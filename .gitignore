@@ -1,0 +1,17 @@
+# MSC resting-state scans: 10 x 206 MB, over GitHub's 100 MB per-file limit.
+# Fetch from OpenNeuro ds000224 (derivatives/surface_pipeline) into data/msc/.
+data/msc/
+
+# Derived and reproducible: caches, simulation output, videos.
+data/cache/
+results/
+
+# local tool config
+.claude/
+
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
+.venv/
+venv/
