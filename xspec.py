@@ -173,7 +173,7 @@ def _project(T, nblock=1, share=False):
     return T
 
 
-def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False):
+def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None):
     """Maximise corr(C(S), Ct) over S(f) >= 0, by projected gradient on the ratio.
 
     Correlation rather than squared error: with a free scale, least squares is minimised
@@ -183,7 +183,14 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False):
 
     `nblock` > 1 expects H to be R regimes stacked along the region axis, each already
     scaled by sqrt(occupancy); the model expression is then unchanged and only the
-    projection differs. See _project."""
+    projection differs. See _project.
+
+    Pass a list as `trace` to get the objective per accepted step back. Whether the solve
+    ran out of iterations or stalled is not cosmetic: a block-diagonal problem with R
+    times the channels is a harder problem at the same iteration count, and comparing its
+    result against the single-block one then measures the optimiser rather than the model.
+    R=3 strictly contains R=1 whenever one regime is the base medium, so a lower number
+    there is a convergence failure by construction."""
     nf, nV, K = H.shape
     S = np.stack([np.eye(K, dtype=complex) for _ in range(nf)])     # white input to start
     off = ~np.eye(nV, dtype=bool)
@@ -210,8 +217,11 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False):
 
     val, C, n = obj(S)
     step = 1.0 / max(np.linalg.norm(adjoint(Ctn)), 1e-30)
+    if trace is not None:
+        trace.append(float(val))
     if verbose:
         print(f"    start (white input)  corr = {val:+.4f}")
+    stalled_at = None
     for it in range(iters):
         G = adjoint(Ctn) / n - (val / n) * adjoint(C / n)
         for _ in range(12):                        # backtracking on the step size
@@ -223,12 +233,18 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False):
             if v2 > val:
                 S, val, C, n = T, v2, C2, n2
                 step *= 1.6
+                if trace is not None:
+                    trace.append(float(val))
                 break
             step *= 0.4
         else:
-            break                                   # no uphill step remains
+            stalled_at = it                         # no uphill step remains
+            break
         if verbose and (it % 25 == 0 or it == iters - 1):
             print(f"    iter {it:4d}  corr = {val:+.4f}", flush=True)
+    if trace is not None:
+        trace.append(dict(final=float(val), steps=len(trace) - 1,
+                          stalled_at=stalled_at, iters=iters))
     return S, model(S)
 
 

@@ -36,19 +36,40 @@ def quantile_match(target_edges, model_edges):
     return np.sort(model_edges)[order]
 
 
-def regime_deltas(R, span):
-    """R sets of map-coefficient offsets, spread symmetrically about the base medium.
+def regime_deltas(R, span, which="sulc", target="speed", base=None, verbose=True):
+    """R regimes differing along ONE map, in ONE of speed or damping.
 
-    The offsets go on a and b - the log-linear grading of speed and damping by myelin,
-    thickness and sulcal depth - so the regimes differ in the spatial PATTERN of the
-    medium, not merely its overall scale. A global scalar would mostly reproduce the
-    inertness bo_step already found in c0."""
+    Deliberately minimal. The first version moved two maps at once on both speed and
+    damping and also scaled global damping, which made every regime differ from the base
+    in four ways and left nothing to attribute a result to. Here a regime is the base
+    medium with a single coefficient shifted, so R media lie on one line through
+    parameter space and the only question is what moving along that line does.
+
+    Offsets are clipped to fluid.COEF_LIM. The base medium sits inside the box bo_step
+    searched, and span 0.30 on a coefficient already at -0.30 would put one regime at
+    -0.60 - a medium never validated as sensible, and outside the range the incumbent was
+    tuned in."""
+    import fluid as fl
     if R == 1:
         return [{}]
-    t = np.linspace(-1.0, 1.0, R)
-    return [dict(da=span * v * np.array([1.0, -1.0, 0.0]),
-                 db=span * v * np.array([-1.0, 0.0, 1.0]),
-                 sig=float(10.0 ** (0.5 * span * v))) for v in t]
+    j = list(fl.MAPS_DEFAULT).index(which)
+    key = "da" if target == "speed" else "db"
+    b0 = np.asarray((base or {}).get("a" if target == "speed" else "b", np.zeros(3)), float)
+    out, clipped = [], False
+    for v in np.linspace(-1.0, 1.0, R):
+        off = np.zeros(3)
+        want = b0[j] + span * v
+        got = float(np.clip(want, -fl.COEF_LIM, fl.COEF_LIM))
+        clipped |= abs(got - want) > 1e-12
+        off[j] = got - b0[j]
+        out.append({key: off})
+    if verbose:
+        coefs = [b0[j] + d[key][j] for d in out]
+        print(f"  regimes vary {target} with {which}: coefficient "
+              f"{np.array2string(np.array(coefs), precision=3)} "
+              f"(base {b0[j]:+.3f}, limit +-{fl.COEF_LIM})"
+              + ("  [CLIPPED]" if clipped else ""))
+    return out
 
 
 def main():
@@ -83,7 +104,12 @@ def main():
     ap.add_argument("--epoch", type=int, default=regimes.EPOCH_FRAMES,
                     help="frames per regime epoch; must exceed the field's decay time")
     ap.add_argument("--regime-span", type=float, default=0.30, dest="regime_span",
-                    help="spread of the per-regime map coefficients, in ln units")
+                    help="spread of the per-regime map coefficient, in ln units")
+    ap.add_argument("--regime-map", default="sulc", dest="regime_map",
+                    choices=("myelin", "thickness", "sulc"),
+                    help="which cortical map the regimes vary along")
+    ap.add_argument("--regime-target", default="speed", dest="regime_target",
+                    choices=("speed", "damp"), help="whether that map grades speed or damping")
     ap.add_argument("--share-input", action="store_true", dest="share_input",
                     help="constrain every regime to the same input cross-spectrum")
     ap.add_argument("--spread-scale", type=float, default=1.0, dest="spread_scale",
@@ -128,7 +154,8 @@ def main():
         H, w, idx = xspec.transfer(R, t.cols[sub], a.nfreq, kernel=kern)
         ref_frames, ps, dt = R.shape[1], None, None
     else:
-        ps = regimes.regime_set(c, p, regime_deltas(nb, a.regime_span))
+        ps = regimes.regime_set(c, p, regime_deltas(
+            nb, a.regime_span, a.regime_map, a.regime_target, base=p))
         dt = regimes.common_dt(c, ps)
         sched_f = regimes.schedule(a.frames, nb, a.epoch)
         occ = regimes.occupancy(sched_f, nb)
@@ -142,11 +169,19 @@ def main():
           f"{ref_frames}-frame window [{time.time()-t0:.0f}s]")
 
     Tgt = normal_scores(raw, iu) if a.target == "normal" else raw
+    tr = []
     S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
-                       share=a.share_input)
+                       share=a.share_input, trace=tr)
     from scipy.stats import spearmanr
     print(f"  solve: pearson vs raw {np.corrcoef(C[iu], raw[iu])[0,1]:+.4f}, "
           f"spearman vs raw {spearmanr(C[iu], raw[iu]).statistic:+.4f}")
+    rep = tr[-1]
+    tail = tr[-6:-1] if len(tr) > 6 else tr[:-1]
+    print(f"  convergence: objective {rep['final']:.4f} after {rep['steps']} accepted "
+          f"steps of {rep['iters']}"
+          + (f", STALLED at {rep['stalled_at']}" if rep['stalled_at'] is not None
+             else "; last 5 gains "
+                  + ", ".join(f"{tail[i+1]-tail[i]:+.1e}" for i in range(len(tail)-1))))
 
     for it in range(a.rank_iters):
         Tm = np.zeros_like(raw)

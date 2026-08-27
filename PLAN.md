@@ -5,39 +5,89 @@ by solving for the input rather than searching for it.
 
 ## Where things stand
 
-**The model is still the sensory one: sim +0.5875 ± 0.0011** (3 draws, 4,480 frames),
-Moran gap 0.046, field rank 46.5.
+**Read this before any other number in this file.** The convex solve's objective is
+ANTI-CORRELATED with the score it is supposed to serve, past about 25 projected-gradient
+steps. Every result recorded here was taken at `--iters 150`, which sits well down the
+descending limb, and different configurations converge at different rates - so the
+comparisons between them are confounded by how far each was solved, not only by what was
+varied.
+
+Sensory 47 pieces, 4,480 frames, everything else at the incumbent configuration:
+
+| solver iterations | solve rho | sim | gap | field rank |
+|---|---|---|---|---|
+| 10 | 0.6349 | +0.5863 ± 0.0017 | 0.063 | 48.1 |
+| **25** | 0.6750 | **+0.6158 ± 0.0000** | 0.058 | 53.6 |
+| 50 | 0.6894 | +0.6143 ± 0.0021 | 0.048 | 55.1 |
+| 100 | 0.7016 | +0.6031 ± 0.0052 | 0.048 | 51.9 |
+| 150 (what everything below used) | 0.7077 | +0.5875 ± 0.0011 | 0.043 | 46.5 |
+| 300 | 0.7135 | +0.5569 ± 0.0085 | 0.049 | 36.9 |
+| 600 | 0.7164 | +0.5307 ± 0.0080 | 0.052 | 31.3 |
+
+Solve rho climbs monotonically; the realised score peaks at 25 steps and falls
+monotonically after. **Field rank tracks the score almost exactly** (48, 54, 55, 52, 46,
+37, 31): as the solve converges it concentrates the input into fewer modes, and the
+low-rank solution generalises worse from the 1,000 solve vertices to all 9,217. The
+diagnostic was in the output all along; it was never used to decide when to stop.
+
+Three consequences.
+
+`--iters 150` was doing implicit regularisation, badly tuned. The current configuration
+reaches **+0.6158 at 25 iterations**, +0.028 above the long-standing headline, for a sixth
+of the compute.
+
+The solve correlation has been the project's main progress signal and it points the wrong
+way. Every "the solve reaches 0.71 and we realise 0.57, where does the 0.14 go" framing
+had it backwards: the solve was not a ceiling being approached but a different objective
+being pursued past the point where it helped.
+
+**The coverage table is confounded.** More channels converge more slowly, so 150 steps is
+a different degree of convergence at K=47 than at K=100 - and being less converged is now
+known to help. The spread advantage may be partly an artefact of that, which is a
+mechanism independent of dispersion or of degrees of freedom.
+
+**Nothing below has been re-run at a defensible stopping rule.** Treat every number in the
+rest of this file as "at 150 iterations", not as a property of the configuration.
+
+### The model, as last measured
+
+Sensory 47 pieces at 150 iterations: **+0.5875 ± 0.0011**, gap 0.046, rank 46.5.
 
 ```bash
-python best_fit.py --frames 4480 --draws 3
+python best_fit.py --frames 4480 --draws 3            # as recorded below
+python best_fit.py --frames 4480 --draws 3 --iters 25 # +0.6158
 ```
 
-That is the number to quote. It is the constrained, falsifiable model — sensory cortex is
-where the dominant patterned input actually enters, so a fit that drives it is making a
-claim, and last session's +0.5661 was the same configuration at a shorter (and, see below,
-flattering) realisation length.
+Sensory is the constrained, falsifiable model - the dominant patterned input to cortex
+enters through sensory areas. `--regions spread` relaxes that and scores far higher
+(+0.7653 at 100 pieces), but 24 farthest-point parcels including pOFC and TGd are the
+input prior switched off rather than an alternative hypothesis about it. Read that gap as
+an upper bound on the machinery with nothing constraining where the drive is applied.
 
-**Relaxing where the input enters scores much higher, and that is a measurement, not a
-result.** Driving 100 pieces spread over the whole cortex reaches +0.7653 ± 0.0015. But 24
-farthest-point parcels including pOFC and TGd are not a hypothesis about input; they are
-the input prior switched off. Read the gap 0.588 → 0.765 as an upper bound on what the
-medium and solve can do when nothing constrains where the drive is applied — and as a
-diagnostic of the medium, for the reason in section 4.
+**The pipeline.** The medium is linear, so the FC depends on the input only through its
+cross-spectral density `S(f)`, which is solved convexly:
 
-**The pipeline** is unchanged and still the right one. The medium is linear, so the FC
-depends on the input only through its cross-spectral density `S(f)`, which is solved
-convexly:
-
-1. impulse response per driven piece, FFT along time → `H(f)`
-2. solve `max corr(Σ_f H S H^H, target)` over `S(f) ⪰ 0` by projected gradient
-3. realise a drive by drawing `z_f = L_f η` per frequency, `S = L L^H`; inverse FFT
+1. impulse response per driven piece, FFT along time -> `H(f)`
+2. solve `max corr(sum_f H S H^H, target)` over `S(f) >= 0` by projected gradient
+3. realise a drive by drawing `z_f = L_f eta` per frequency, `S = L L^H`; inverse FFT
 4. simulate, score with Spearman over a fixed 2M edge sample
 
 **Current configuration** (all in `best_fit.py:BEST_X`): 47 equal-area sensory pieces of
-~145 mm²; per-step damping 6.2e-04, rotation 1.1e-05, boundary absorption 1.8e-03, cadence
+~145 mm2; per-step damping 6.2e-04, rotation 1.1e-05, boundary absorption 1.8e-03, cadence
 33 steps/frame; impulse window 280 frames zero-padded to 1,120, 118 usable frequencies;
-solved against the normal-scored target on 1,000 medoid vertices. `--regions` selects
-other driven sets (`spread`, `sensory+dmn`, `dmn`) for the diagnostic runs.
+solved against the normal-scored target on 1,000 medoid vertices.
+
+## Priority experiments
+
+1. **Fix the stopping rule, then re-run everything.** Options: early stopping selected on
+   held-out vertices (the solve uses 1,000 medoids, 8,217 are unused and free); an explicit
+   rank floor or nuclear-norm penalty, since rank collapse is the visible mechanism; or
+   solving on far more vertices, which `--nvert 2500` tested at 150 iterations - on the
+   descending limb, so that null needs re-running. Until this is settled, comparisons
+   between configurations are comparisons of convergence.
+2. **Re-run the coverage table** at whatever rule comes out of 1, since that result carries
+   the reading of where input enters and is the one most exposed to the confound.
+3. `reach.py` on the current medium.
 
 ## What last session's five experiments returned
 

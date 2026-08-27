@@ -110,8 +110,13 @@ def transfer_stack(cortex, ps, cols, nfreq, pad, nsteps, save, profiles, occ, dt
     stacked quadratic form reproduce sum_r occ_r H_r S_r H_r^H exactly."""
     Hs, idx, w, nfr = [], None, None, None
     for r, p in enumerate(ps):
+        # a regime already running at its own CFL bound is the plain single-medium case,
+        # so pass dt=None and let it share that cache entry rather than recomputing the
+        # identical responses under a dt-tagged name
+        native = fl.CFL * cortex.d.min() / float(fl.fields(cortex, p)[0].max())
+        dt_r = None if abs(native - dt) <= 1e-12 * max(native, 1.0) else dt
         resp = xspec.impulse_responses(cortex, list(range(len(profiles))), p, nsteps,
-                                       save, profiles=profiles, verbose=False, dt=dt)
+                                       save, profiles=profiles, verbose=False, dt=dt_r)
         R_ = np.pad(resp, ((0, 0), (0, max(0, pad - resp.shape[1])), (0, 0)))
         H, w, idx = xspec.transfer(R_, cols, nfreq, kernel=kernel)
         nfr = R_.shape[1]
