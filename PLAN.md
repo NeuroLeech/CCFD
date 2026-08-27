@@ -25,7 +25,11 @@ Sensory 47 pieces, 4,480 frames, everything else at the incumbent configuration:
 | 600 | 0.7164 | +0.5307 ± 0.0080 | 0.052 | 31.3 |
 
 Solve rho climbs monotonically; the realised score peaks at 25 steps and falls
-monotonically after. **Field rank tracks the score almost exactly** (48, 54, 55, 52, 46,
+monotonically after. A 4,000-step probe shows where the objective actually goes: 0.2428 at
+the white-input start, 0.6903 by step 25, 0.7298 at step 4,000, still gaining 5e-05 per
+100 steps and never once stalling - there is no convergence criterion, only an iteration
+cap. **The first 25 steps buy 92% of the total objective gain.** The remaining 8% is what
+costs 0.11 of realised score. **Field rank tracks the score almost exactly** (48, 54, 55, 52, 46,
 37, 31): as the solve converges it concentrates the input into fewer modes, and the
 low-rank solution generalises worse from the 1,000 solve vertices to all 9,217. The
 diagnostic was in the output all along; it was never used to decide when to stop.
@@ -78,6 +82,21 @@ cross-spectral density `S(f)`, which is solved convexly:
 solved against the normal-scored target on 1,000 medoid vertices.
 
 ## Priority experiments
+
+0. **Switching, resolved.** Simplified to one map on speed alone (`--regime-map sulc
+   --regime-target speed`), the epochs are quasi-static (within-epoch ratio 1.2, against
+   23-25x for the first four-things-at-once construction) and R=3 matches R=1 at each
+   one's peak: +0.6103 ± 0.0114 against +0.6158, inside R=3's own scatter. R=3 also
+   reaches a strictly higher solve objective at every matched iteration count (0.7725
+   against 0.7164 at 600), so the larger model class is real and the original comparison
+   was measuring convergence. Switching is now NEUTRAL rather than harmful, and needs a
+   reason to help rather than a bug to fix.
+
+   The transient was the damping variation, not the speed jump. Speed is the H whose
+   discontinuity was blamed for it, and speed-only switching has no transient; damping
+   sets the field's stationary amplitude, so switching damping forces a re-equilibration
+   at every boundary. Damping regimes therefore need a ramped switch before they can be
+   tested - and damping is the more plausible physiological modulation of the two.
 
 1. **Fix the stopping rule, then re-run everything.** Options: early stopping selected on
    held-out vertices (the solve uses 1,000 medoids, 8,217 are unused and free); an explicit
