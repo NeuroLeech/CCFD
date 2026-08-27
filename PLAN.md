@@ -175,39 +175,126 @@ Held out, 100 spread pieces still beat 47 sensory ones by +0.167. So the spread 
 is not target noise — which leaves the mechanism question open, and that is the one that
 matters.
 
+## Three extensions built this session
+
+Machinery in `regimes.py`, `connectome.py`, `units.py`; all wired into `best_fit.py`
+behind flags that default to the existing path. **R=1 and lam=0 reproduce +0.5875 ±
+0.0011 exactly**, so everything below is a comparison against an unchanged baseline.
+
+### Switching medium — implemented, and it makes the fit worse
+
+R media switched at epoch boundaries inside one run, field state carried across. Regimes
+differ in the map grading of speed and damping (`--regime-span`), not a global scalar,
+since `bo_step` found `c0` inert in per-step units.
+
+| | solve rho | sim @4480 | gap | rank |
+|---|---|---|---|---|
+| R=1 baseline | 0.7077 | +0.5875 ± 0.0011 | 0.046 | 46.5 |
+| R=2, identical media (null) | 0.7022 | +0.5941 (1 draw) | 0.060 | 54.1 |
+| R=2, epoch 280 | 0.6540 | +0.4241 ± 0.0055 | 0.050 | 121.5 |
+| R=3, epoch 280 | 0.7022 | +0.4703 ± 0.0324 | 0.043 | 76.1 |
+
+**The quasi-static assumption fails, and that is the finding.** `regimes.epoch_profile`
+reports the field variance 23-25x higher in the first 20 frames of an epoch than the last
+20, and it is not the drive: measured per frame, drive power is flat to 1.00 across the
+epoch and equal between regimes. The switch itself is injecting the transient. The state
+`(h, ue)` is carried across continuously, but the energy `1/2 int (H|u|^2 + g h^2)`
+depends on `H`, so a discontinuous change in the speed field is a discontinuous change in
+energy. The run is then a sequence of kicks and ring-downs rather than a mixture of
+stationary regimes - which is exactly what the solve assumes, and the score reflects the
+mismatch.
+
+**The null control settles it.** `--regime-span 0` switches between two IDENTICAL media,
+so the machinery runs unchanged while the medium does not actually change: within-epoch
+ratio **1.1 (quasi-static)**, regime variance ratio 1.04, sim +0.5941. The switching
+machinery is therefore sound and costs nothing; the entire 23-25x transient, and the
+entire loss from +0.59 to +0.42, comes from the medium changing.
+
+Two other explanations are ruled out. The solve is not collapsing onto one regime: block
+powers are 0.42/0.58 at R=2 and 0.18/0.57/0.26 at R=3. And it is not the drive amplitudes -
+`realise_switching` originally lost the solved per-regime power, because `xspec.realise`
+normalises each block to unit variance; fixing that moved the score by 0.003 (+0.4215 to
++0.4241), confirming the bug was real but not the cause.
+
+**Next:** ramp the medium between regimes rather than jumping it - a ramp over a few decay
+times removes the energy discontinuity and is closer to what arousal or neuromodulation
+would actually do - then lengthen the epochs.
+
+### Long-range structural coupling — implemented, and it also makes the fit worse
+
+HCP-derived group-normative Glasser-360 connectome from ENIGMA Toolbox; the term is
+linear, instantaneous and low rank, so the system stays LTI and the convex solve is
+untouched.
+
+| lam | solve rho | sim @4480 | gap | rank |
+|---|---|---|---|---|
+| 0 | 0.7077 | +0.5875 ± 0.0011 | 0.046 | 46.5 |
+| 1 | 0.6509 | +0.5363 ± 0.0056 | 0.037 | 53.2 |
+| 5 | 0.5527 | +0.4245 ± 0.0064 | 0.028 | 74.4 |
+
+Monotone in lam, and already at the solve stage, before any realisation. Note the Moran
+gap moves the OTHER way - 0.046 to 0.028 - so the coupling improves the spatial
+autocorrelation match while making the edge ordering worse. Whatever it is adding is the
+right kind of long-range structure by one measure and the wrong kind by the one being
+scored. Adding transport that the
+coverage result suggested was missing makes the transfer function a *worse* basis for the
+target - which is worth understanding rather than tuning away, since it is the opposite of
+what motivated the term.
+
+Three traps were found and fixed on the way in, all silent:
+- Stripping the `L_`/`R_` prefix when matching parcel names makes `L_V1` collide with
+  `R_V1`; the right-hemisphere entry wins and **the wrong hemisphere loads**, looking
+  entirely normal. The ordering check caught it.
+- `"L_7AL_ROI".replace("L_", "")` also eats the `L_` inside `7AL_`, mangling every area
+  whose name ends in L (PSL, SFL, 5L, 7AL, 7PL).
+- Tractography weights have arbitrary scale, so `lam` meant nothing until `W` was
+  normalised by its Laplacian's largest eigenvalue. Before that, lam=0.05 was already past
+  the stability bound.
+
+Filtering on distance residual alone does not give long-range connections - the top
+residuals sit at the median distance of all connected pairs. `residual_W` now takes a
+distance floor as well: beyond 60 mm, top 15% by residual, 82 edges at median 98 mm
+against 41 mm for all connected pairs.
+
+### Approximate units — the model runs ~100x faster than the data
+
+`units.py` measures spread against **white-surface** geodesics (already millimetres, via
+`ladder._white_graph`) while the dynamics run on the inflated mesh.
+
+Spread is **1.96 mm/frame** (IQR 1.55-2.54 over the 47 sensory pieces). So:
+
+- at a plausible cortical 300 mm/s, one frame is **6.5 ms** - about **1/100 of a TR**
+- equivalently, if one frame *were* one TR, the implied spread would be **3.0 mm/s**,
+  about 100x slower than cortical travelling waves
+
+Either way the model sits two orders of magnitude off the data it is fitted to. The two
+global calibrations (white/inflated area ratio 0.73 mm per unit, mean edge ratio 1.09)
+differ by 33%, which is the width of the approximation and nowhere near enough to close a
+factor of 100.
+
+**And closing that gap by filtering costs the fit.** A temporal low-pass between field and
+observable is linear, so it multiplies into `H` and the solve is unchanged
+(`--smooth`, FWHM in frames; `xspec.transfer` and `score_realisation` share one kernel).
+At FWHM 8 frames: solve rho 0.7077 -> 0.5967, sim +0.5875 -> +0.5171, gap 0.046 -> 0.126,
+and **field rank collapses from 46.5 to 7.2**. The structure the fit depends on lives at
+frequencies far above anything fMRI could observe.
+
 ## Priority experiments
 
-1. **Does the medium reach far enough?** This is the top question, and `reach.py` already
-   asks it — and has been run once before, on an older medium and the whole-parcel region
-   set, where it found the target's eigenpatterns *inside* the reachable span (recorded in
-   the docstring of the now-deleted `inverse.py`, which existed because of that result).
-   So the question is not whether the span is adequate in principle but whether it still
-   is for the current per-step medium and the 47 sensory pieces, and whether "inside the
-   span" survives being asked about the leading eigenpatterns rather than all of them: the model is linear, so the fields obtainable from a region set are the span
-   of its impulse responses, and if the target's leading FC eigenpatterns lie outside that
-   span, no input whatsoever can succeed and the limit is the fluid rather than the drive.
-   Run it on the current per-step medium with the 47 sensory pieces, and again with
-   `spread` — if sensory-only is structurally capped and spread is not, that confirms the
-   reading above and points the fix at the medium's reach, damping and speed rather than
-   at adding injectors. `reach.py` still hardcodes the old `run_ou` constants and whole
-   parcels; it needs the current medium and the piece profiles wired in first.
-2. **A control for the medium itself.** Replace the fluid with something trivial (pure
-   diffusion, or geodesic smoothing of the drive) at matched K and driven area, on both
-   `sensory` and `spread`. If the score barely moves, the model is a flexible spatial
-   basis rather than a claim about dynamics — and the spread advantage would then be
-   basis size, not transport.
-3. **Fix the realisation grid.** Draw on the solved bins and tile to length instead of
-   interpolating, and re-run the length sweep. If the 1,120 bonus disappears and the curve
-   becomes monotone, every number in the tables above shifts and the comparisons get
-   cleaner. Cheap, and it touches everything.
-4. **Alternative spread samples.** The sampler is deterministic, so both "spread beats
-   sensory" and the sharper "dispersion beats count" rest on a single draw of the set.
-   Several alternatives (different starting parcel, or random with a minimum separation)
-   at matched area would turn a 1.5-sd ordering into a distribution — worth doing before
-   the diagnostic is leaned on.
-5. **Re-tune the medium on `sensory`**, not on spread, if the BO is run at all. It is
-   exploitation, so it should wait until 1 and 2 have said what the medium ought to be
-   doing differently.
+1. **Ramp the switch, then lengthen the epochs.** The null control shows the machinery is
+   clean and the transient is the medium change itself, so the switching result so far is a
+   measurement of switching transients rather than of a time-varying medium. Ramp the
+   medium over a few decay times to remove the energy discontinuity, then epochs of 1120+.
+2. **Understand why coupling hurts** before tuning it. It is monotone in lam at the solve
+   stage, so it is a statement about the transfer function, not about realisation noise.
+   Candidates: the parcel-mean projection is too coarse (180 parcels against 47 driven
+   pieces), the Laplacian form removes as much as it adds, or long-range transport genuinely
+   does not help this objective - which would undercut the reading of the coverage result.
+3. **Take the 100x seriously.** It is the largest unexplained number in the project. Either
+   the medium is far too fast for the timescale it is fitted at, or the frame is not the
+   observable and a haemodynamic stage is missing - and the smoothing result says that
+   stage costs most of the fit when added naively.
+4. `reach.py` on the current medium, as before.
 
 ## Things to keep reporting
 
@@ -260,6 +347,9 @@ that survives the new target and region set.
 | `xspec.py` | transfer function, convex solve, `normal_scores`, realisation, scoring |
 | `subparcels.py` | equal-area splitting; `region_set`, `spread_sample` |
 | `holdout.py` | subject-split control: solve on one half, score on the other |
+| `regimes.py` | a medium that switches between regimes inside one run |
+| `connectome.py` | long-range structural coupling; the ENIGMA HCP connectome |
+| `units.py` | approximate mm and seconds; the temporal filter |
 | `reliability.py` | split-half reliability of the target, and the ceiling it implies |
 | `fluid.py` | medium: speed/damping fields, map grading, integration |
 | `bo_step.py` | BO over the medium in per-step units; checkpoints, `--resume` |
