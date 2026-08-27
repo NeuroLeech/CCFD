@@ -173,10 +173,10 @@ def main():
         from render_regimes import _proj
         proj = _proj(cortex.V, cortex.F)
     if args.figure:
-        from render_winner import fluid_maps
+        from surface_plots import fluid_maps
         fluid_maps(cortex, base, proj, os.path.join(RESULTS, "fluid_maps_play.png"))
     if args.video:
-        from render_winner import movie
+        from surface_plots import movie
         from paths import VIDEOS
         tag, dr = args.video, r["drive"]
         note = (f"c0 {args.c0:g} Ld {args.Ld:g} sig0 {args.sig0:g}"

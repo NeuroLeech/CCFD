@@ -178,7 +178,12 @@ matters.
 ## Priority experiments
 
 1. **Does the medium reach far enough?** This is the top question, and `reach.py` already
-   asks it: the model is linear, so the fields obtainable from a region set are the span
+   asks it — and has been run once before, on an older medium and the whole-parcel region
+   set, where it found the target's eigenpatterns *inside* the reachable span (recorded in
+   the docstring of the now-deleted `inverse.py`, which existed because of that result).
+   So the question is not whether the span is adequate in principle but whether it still
+   is for the current per-step medium and the 47 sensory pieces, and whether "inside the
+   span" survives being asked about the leading eigenpatterns rather than all of them: the model is linear, so the fields obtainable from a region set are the span
    of its impulse responses, and if the target's leading FC eigenpatterns lie outside that
    span, no input whatsoever can succeed and the limit is the fluid rather than the drive.
    Run it on the current per-step medium with the 47 sensory pieces, and again with
@@ -263,4 +268,5 @@ that survives the new target and region set.
 | `fc_group_nki.py` | build the NKI group target (99 usable subjects) |
 | `fc_states.py` | windowed-FC states, occupancy, dwell, transitions |
 | `fc_moran.py`, `fc_vertexwise.py`, `cortical_maps.py` | diagnostics, MSC path, maps |
-| `render_winner.py`, `plot_fc_map.py`, `play_fluid.py` | videos, surface maps, manual sweeps |
+| `render_frames.py`, `surface_plots.py` | video of a saved run; the plotting helpers |
+| `plot_fc_map.py`, `play_fluid.py` | surface maps, manual sweeps |

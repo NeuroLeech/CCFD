@@ -1,31 +1,25 @@
-"""Videos of a searched genome: the field it produces, and the drive that produced it.
+"""Surface rendering helpers: a field movie, the drive's latent maps, the medium's maps.
 
-The drive is rendered on the same surface and the same projection as the field, so the
-two videos can be watched against each other - what is injected on the left, what the
-fluid does with it on the right. Both carry the latent traces and a time cursor beneath,
-because a frame of either is uninterpretable without knowing where in the drive it sits.
+These were the back half of the genome-search renderer; the search is gone and the
+plotting is not. play_fluid.py drives them for a hand-set medium, and render_frames.py
+covers the commoner case of animating frames a best_fit run already wrote to disk.
 
-A third output is static: each latent's spatial pattern, sum_k L[k,j] * taper_k, which is
-the map that latent switches on and off. Those three maps plus the traces are the whole
-input, so they are worth seeing on their own.
-
-  python render_winner.py                                   # newest cma_fc pickle
-  python render_winner.py --pkl results/cma_fc/cma_fc_pop32_gen50_seed0.pkl --fps 20
+`movie` puts the field on lateral/medial/dorsal projections with the drive traced beneath
+and a time cursor, because a frame is uninterpretable without knowing where in the drive
+it sits. `fluid_maps` is static: the speed and damping fields the medium actually has.
 """
-import os, glob, argparse
+import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.tri import Triangulation
-import pickle
 
 from mesh_cache import load_cortex
 from input_model import NetworkDrive, parcel_tapers
 from swe_rot import RotSWE, sponge_profile
 from render_regimes import _proj
-from ga_fc import decode, AMP_FIXED
 from genome import LD_FIXED, SPONGE_STRENGTH_FIXED, SPONGE_WIDTH_FIXED
 from run_ou import CFL, C, G, H
 from paths import RESULTS, VIDEOS
@@ -169,73 +163,3 @@ def fluid_maps(cortex, fp, proj, path):
     fig.savefig(path, dpi=135, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {path}")
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--pkl", default=None, help="search result (default: newest cma_fc)")
-    ap.add_argument("--draw-seed", type=int, default=90_000, dest="draw_seed")
-    ap.add_argument("--fps", type=int, default=16)
-    ap.add_argument("--tag", default=None)
-    a = ap.parse_args()
-
-    pkl = a.pkl or sorted(glob.glob(os.path.join(RESULTS, "cma_fc", "*.pkl")),
-                          key=os.path.getmtime)[-1]
-    d = pickle.load(open(pkl, "rb"))
-    K, r = d["K"], d["r"]
-    tag = a.tag or os.path.basename(pkl).replace(".pkl", "")
-    print(f"{os.path.basename(pkl)}: best {d['best'][0]:+.4f} at generation {d['best'][2]}")
-
-    cortex = load_cortex("fsaverage5", verbose=False)
-    dt = CFL * cortex.d.min() / C
-    xb, fp = d["best"][1], None
-    if d.get("fluid"):
-        import fluid as fl
-        fp = fl.decode(xb[-fl.N_PARAM:])
-        xb = xb[:-fl.N_PARAM]
-        cfield = fp["c0"] * fl.group_field(cortex, fp["c_group"])
-        dt = fl.CFL * cortex.d.min() / float(cfield.max())
-        print(f"  fluid: c0 {fp['c0']:.2f}, Ld {fp['Ld']:.1f}, sig0 {fp['sig0']:.1e}, "
-              f"speed x{np.round(fp['c_group'],2)}, damping x{np.round(fp['sig_group'],2)}")
-
-    if d.get("generator") == "ladder":
-        import ladder
-        from input2 import parcel_tapers as region_tapers
-        regs = d["regions"]
-        D, _ = ladder.parcel_geodesic(cortex, regs, verbose=False)
-        p = ladder.decode(xb, d.get("rung", 4))
-        print("  ladder: " + ", ".join(f"{k} {v:.3g}" for k, v in p.items()))
-        drive = ladder.make_drive(cortex, xb, d["nsteps"], dt, amp=AMP_FIXED,
-                                  rung=d.get("rung", 4), seed=a.draw_seed,
-                                  tapers=region_tapers(cortex, verbose=False),
-                                  regions=regs, D=D)
-        traces = drive.Aser
-    else:
-        L, silent, tau = decode(xb, K, r, d["tau_lim"], d["silent_lim"], d.get("gain_lim"))
-        print(f"  taus {np.round(tau,1)}  silent {np.round(silent,3)}  "
-              f"gains {np.round(np.linalg.norm(L,axis=0),3)}")
-        drive = NetworkDrive(cortex, d["regions"], L, silent, tau, AMP_FIXED, d["nsteps"],
-                             dt, seed=a.draw_seed,
-                             tapers=parcel_tapers(cortex, verbose=False),
-                             balance="spatial")
-        traces = drive.S
-    fields, drives, dt = run_saving_drive(cortex, drive, d["nsteps"], 25, d["sponge"], fp)
-    print(f"  {len(fields)} frames, field peak {np.abs(fields).max():.2e}, "
-          f"drive peak {np.abs(drives).max():.2e}")
-    np.save(os.path.join(RESULTS, f"frames_{tag}.npy"), fields)
-
-    proj = _proj(cortex.V, cortex.F)
-    if fp is not None:
-        fluid_maps(cortex, fp, proj, os.path.join(RESULTS, f"fluid_maps_{tag}.png"))
-    movie(fields, cortex, proj, traces, 25, dt,
-          os.path.join(VIDEOS, f"{tag}_field.mp4"), f"{tag}  field h", fps=a.fps)
-    movie(drives, cortex, proj, traces, 25, dt,
-          os.path.join(VIDEOS, f"{tag}_drive.mp4"), f"{tag}  drive (injected per step)",
-          fps=a.fps)
-    if d.get("generator") != "ladder":
-        latent_maps(cortex, drive, L, proj,
-                    os.path.join(RESULTS, f"latent_maps_{tag}.png"))
-
-
-if __name__ == "__main__":
-    main()
