@@ -5,13 +5,14 @@ from input2 import RegionDrive
 from swe_rot import RotSWE, sponge_profile
 import numpy as np
 
-
 cortex = load_cortex("fsaverage5")          # this is `cortex`
 
-REGIONS = [9,1,24, 150,30,65,132]                           # V1, 10r   (cortex.names[1] == 'L_V1_ROI')
+#REGIONS = [9,1,24, 150,30,65,132]                           # V1, 10r   (cortex.names[1] == 'L_V1_ROI')
+#REGIONS = [9,1,24, 150,30,65,132]                           # V1, 10r   (cortex.names[1] == 'L_V1_ROI')
+REGIONS = [9,1,24]# 150,30,65,132]                           # V1, 10r   (cortex.names[1] == 'L_V1_ROI')
 #REGIONS = [9,1,24, 150 30,30,65]
 #REGIONS = [9,65,132, 24,30,1,150]                           # V1, 10r   (cortex.names[1] == 'L_V1_ROI')
-NSTEPS = 2000
+NSTEPS = 6000
 
 def numpy_ema(prices, span):
     alpha = 2 / (span + 1)
@@ -25,32 +26,37 @@ def numpy_ema(prices, span):
         
     return ema
 
-
-CFL, C, G, H = 0.35, 1.0, 1.0, 1.0
+CFL, C, G, H = 0.2, 1.0, 1.0, 1.0
 dt = CFL*cortex.d.min()/C                   # 0.347 time units; wave crossing ~200
 
 # --- your timecourses: (NSTEPS, 2), one column per region -------------------
 t = np.arange(NSTEPS)*dt
 
-N1 = 1         # Number of boxcars
-N2 = t.shape[0]        # Total array size
-min_len = 50     # Minimum boxcar length
-max_len = 250    # Maximum boxcar length
+N1 = 10        # Number of boxcars
+N2 = NSTEPS        # Total array size
+min_len = 100     # Minimum boxcar length
+offset=25
+gap=300
+#max_len = 250    # Maximum boxcar length
+
 
 # --- GENERATE BOXCARS ---
 signal = np.zeros(N2)
-signal=numpy_ema(signal, span=50)
-for _ in range(N1):
-    val = np.random.choice([1, -1])                   # Random +1 or -1
-    length = np.random.randint(min_len, max_len + 1)  # Random duration
-    start = np.random.randint(0, max(1, N2 - length)) # Random start position
-    
-    signal[start : start + length] = val
+for i in range(N1):
+    if np.random.randn(1)<0:
+        signal[gap*i +offset:gap*i +offset+min_len]=1
+    else:
+        signal[gap*i +offset:gap*i +offset+min_len]=-1
 
-#signal[3000:]=0
-A = np.c_[ np.cos(2*np.pi*t/1000),np.cos(2*np.pi*t/1000),
-           np.cos(2*np.pi*t/1000),np.cos(2*np.pi*t/1000)*-1,np.cos(2*np.pi*t/1000)*-1,np.cos(2*np.pi*t/1000)*-1,np.cos(2*np.pi*t/1000)*-1]
-A = np.c_[ signal,signal, signal,signal*-1,signal*-1,signal*-1,signal*-1]
+
+signal=numpy_ema(signal, span=50)
+
+#A = np.c_[ np.cos(2*np.pi*t/300),np.cos(2*np.pi*t/300),
+#            np.cos(2*np.pi*t/300),np.cos(2*np.pi*t/300)*-1,np.cos(2*np.pi*t/300)*-1,np.cos(2*np.pi*t/300)*-1,np.cos(2*np.pi*t/300)*-1]
+
+A = np.c_[ np.cos(2*np.pi*t/300),np.cos(2*np.pi*t/300),np.cos(2*np.pi*t/300)]
+
+#A = np.c_[ signal*-1,signal*-1, signal*-1,signal*1,signal*1,signal*1,signal*1]
 
 # ---------------------------------------------------------------------------
 print(t)
@@ -60,11 +66,11 @@ drive.describe()
 
 # s = RotSWE(cortex.m, C/52.4, l=cortex.l, d=cortex.d, A=cortex.A,
 #            E=cortex.edges, bnd_edge=cortex.bnd)      # 52.4 = Ld, the frozen regime
-s = RotSWE(cortex.m, 0, l=cortex.l, d=cortex.d, A=cortex.A,
-           E=cortex.edges, bnd_edge=cortex.bnd)      # 52.4 = Ld, the frozen regime
-#s.set_sponge(sponge_profile(cortex.V, cortex.edges, cortex.bnd, 7.25, 0.27) + 0.000)
+s = RotSWE(cortex.m, C/52.4, l=cortex.l, d=cortex.d, A=cortex.A,
+           E=cortex.edges, bnd_edge=cortex.bnd)      
+#s.set_sponge(sponge_profile(cortex.V, cortex.edges, cortex.bnd, 7.25, 0.27) + 0.001)
 #s.set_sponge(np.zeros(cortex.nV))
-#s.sig_e[:] = 0.003          # drag on velocity only
+#s.sig_e[:] = 0.001          # drag on velocity only
 
 s.astype(np.float32)
 
@@ -81,7 +87,7 @@ for n in range(NSTEPS):
 frames = np.array(frames)
 print(f"  {len(frames)} frames, peak {100*np.abs(frames).max()/H:.2f}% of depth")
 
-print(frames.shape)
+np.save('results/frames.npy',frames)
 # --- video ------------------------------------------------------------------
 import matplotlib
 matplotlib.use("Agg")
