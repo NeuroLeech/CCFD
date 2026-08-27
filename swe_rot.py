@@ -25,6 +25,7 @@ class RotSWE:
 
     def __init__(self, m, f_field, l=None, d=None, A=None, E=None, bnd_edge=None):
         self.sig_v = self.sig_e = None
+        self.coupling = None            # optional long-range term; see connectome.py
         V = m.V
         self.V = V
         self.E = m.E if E is None else E
@@ -149,6 +150,15 @@ class RotSWE:
         return un, hn
 
     def step(self, ue, h, dt, g, H, niter=2):
+        """One timestep. If `self.coupling` is set, its long-range term is added to the
+        depth update - see connectome.CouplingOperator.
+
+        The term belongs HERE rather than in the callers because the integration loop is
+        written out separately in fluid.run, xspec.impulse_responses and bo_step._impulse.
+        Adding it to some but not all of those would leave the transfer function
+        describing a different system from the one simulated, which is the identity the
+        whole convex solve rests on, and it would show up only as a slightly worse
+        score."""
         rhs = ue + dt * (-g * self.grad(h))
         Cold = self.coriolis(ue)
         # The first fixed-point pass starts from un = ue, so coriolis(un) == Cold
@@ -159,6 +169,8 @@ class RotSWE:
             un = rhs + 0.5 * dt * (Cold + self.coriolis(un))
         un[self.bnd_edge] = 0.0
         hn = h - dt * H * self.divergence(un)
+        if self.coupling is not None:
+            hn = hn + dt * self.coupling(h)
         if self.sig_v is not None:
             un = un / (1.0 + dt * self.sig_e)
             hn = hn / (1.0 + dt * self.sig_v)

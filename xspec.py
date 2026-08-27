@@ -77,15 +77,22 @@ def medoid_subset(target, n=1000, sketch=400, seed=0):
 
 
 def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=None,
-                      verbose=True):
+                      verbose=True, dt=None, coupling=None):
     """(K, nframes, nV) response of the field to one impulse in each region.
 
     `profiles` overrides the parcel tapers with an explicit (K, nV) profile matrix, which
-    is how sub-parcel pieces are driven."""
+    is how sub-parcel pieces are driven. `dt` overrides the CFL timestep, which switching
+    runs need so that every regime is integrated on one clock.
+
+    The cache key has to carry dt. Two regimes can share every entry of `p` that appears
+    in the key and still be different systems if they are stepped at different rates, and
+    a silently reused response would make H describe a system nobody simulated."""
     ptag = "" if profiles is None else f"_prof{profiles.shape[0]}x{float(profiles.sum()):.3f}"
+    dtag = "" if dt is None else f"_dt{float(dt):.8g}"
+    ctag = "" if coupling is None else "_" + coupling.key()
     key = (f"{cortex.mesh}_sig{p['sig0']:.6g}_c{p['c0']:.6g}_Ld{p['Ld']:.6g}"
            f"_spg{p.get('sponge_scale', 1.0):.4g}_a{np.round(p.get('a', 0), 3)}"
-           f"_b{np.round(p.get('b', 0), 3)}_{len(regions)}_{nsteps}_{save}{ptag}")
+           f"_b{np.round(p.get('b', 0), 3)}_{len(regions)}_{nsteps}_{save}{ptag}{dtag}{ctag}")
     cache = os.path.join(CACHE, "impulse_" + key.replace(" ", "") + ".npy")
     if os.path.exists(cache):
         return np.load(cache)
@@ -93,7 +100,7 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
         T, ids = parcel_tapers(cortex, verbose=False)
         pos = {int(q): i for i, q in enumerate(ids)}
         profiles = np.stack([T[pos[int(k)]] for k in regions])
-    s, dt, g, H = fl.build(cortex, p, sponge=True)
+    s, dt, g, H = fl.build(cortex, p, sponge=True, dt=dt, coupling=coupling)
     out = []
     for k in range(len(profiles)):
         h = profiles[k].astype(np.float32).copy()
@@ -112,23 +119,71 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
     return out
 
 
-def transfer(resp, cols, nfreq):
-    """FFT the impulse responses -> H (nfreq, nVsub, K) and the bin weights."""
+def transfer(resp, cols, nfreq, kernel=None):
+    """FFT the impulse responses -> H (nfreq, nVsub, K) and the bin weights.
+
+    `kernel` is a temporal filter standing between the field and the observable - the
+    stage the model does not otherwise have, and which the units calibration says is
+    missing by about two orders of magnitude. Being linear, it simply multiplies the
+    transfer function, so the solve is unchanged and costs nothing extra. It must be the
+    same kernel that score_realisation applies to the realised frames; anything else and
+    H describes a system that is never scored."""
     G = resp[:, :, cols]                                  # (K, nframes, nVsub)
     F = np.fft.rfft(G, axis=1)                            # (K, nbins, nVsub)
     nb = F.shape[1]
+    if kernel is not None:
+        import units
+        F = F * units.kernel_response(kernel, nb, G.shape[1])[None, :, None]
     idx = np.unique(np.round(np.geomspace(1, nb - 1, nfreq)).astype(int))
     w = np.gradient(idx).astype(float)                    # each sample stands for a band
     return np.ascontiguousarray(F[:, idx].transpose(1, 2, 0)), w, idx
 
 
-def solve(H, w, Ct, iters=300, verbose=True):
+def _project(T, nblock=1, share=False):
+    """Project each frequency onto the feasible set, in place.
+
+    With one block that is the PSD cone. With R blocks - which is how a switching medium
+    enters, see regimes.py - the feasible set is BLOCK-DIAGONAL PSD: regime r drives its
+    own input, and there is no cross-regime input covariance to estimate because the
+    regimes never run at the same time. Zeroing the off-diagonal blocks is the Frobenius
+    projection onto block-diagonal matrices, and each diagonal block then projects onto
+    the PSD cone independently.
+
+    `share` additionally constrains every block to be equal - the tighter claim that one
+    input is played through a medium that changes, rather than input and medium switching
+    together. Averaging Hermitian blocks and then clipping keeps the result feasible."""
+    nf = T.shape[0]
+    K = T.shape[1] // nblock
+    for f in range(nf):
+        if nblock > 1:
+            B = np.stack([T[f][r * K:(r + 1) * K, r * K:(r + 1) * K]
+                          for r in range(nblock)])
+            if share:
+                B[:] = B.mean(0)
+            T[f] = 0.0
+            for r in range(nblock):
+                M = 0.5 * (B[r] + B[r].conj().T)
+                ev, U = np.linalg.eigh(M)
+                T[f][r * K:(r + 1) * K, r * K:(r + 1) * K] = \
+                    (U * np.clip(ev, 0, None)) @ U.conj().T
+        else:
+            M = 0.5 * (T[f] + T[f].conj().T)
+            ev, U = np.linalg.eigh(M)
+            T[f] = (U * np.clip(ev, 0, None)) @ U.conj().T
+    return T
+
+
+def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False):
     """Maximise corr(C(S), Ct) over S(f) >= 0, by projected gradient on the ratio.
 
     Correlation rather than squared error: with a free scale, least squares is minimised
     by shrinking the model to nothing, which is what an earlier version of this did. The
     ratio <C,Ct>/||C|| is scale invariant, so the solution is a shape rather than a size,
-    and the PSD projection is the only constraint that has to be enforced."""
+    and the PSD projection is the only constraint that has to be enforced.
+
+    `nblock` > 1 expects H to be R regimes stacked along the region axis, each already
+    scaled by sqrt(occupancy); the model expression is then unchanged and only the
+    projection differs. See _project."""
     nf, nV, K = H.shape
     S = np.stack([np.eye(K, dtype=complex) for _ in range(nf)])     # white input to start
     off = ~np.eye(nV, dtype=bool)
@@ -160,11 +215,7 @@ def solve(H, w, Ct, iters=300, verbose=True):
     for it in range(iters):
         G = adjoint(Ctn) / n - (val / n) * adjoint(C / n)
         for _ in range(12):                        # backtracking on the step size
-            T = S + step * G
-            for f in range(nf):                    # project each onto PSD
-                T[f] = 0.5 * (T[f] + T[f].conj().T)
-                ev, U = np.linalg.eigh(T[f])
-                T[f] = (U * np.clip(ev, 0, None)) @ U.conj().T
+            T = _project(S + step * G, nblock, share)
             tr = sum(np.trace(T[f]).real for f in range(nf))
             if tr > 0:
                 T = T / tr
@@ -271,8 +322,12 @@ class ProfileDrive:
 
 
 def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=False,
-                      seed=0, profiles=None):
-    """Hold each drawn sample over its block of steps, run, and score for real."""
+                      seed=0, profiles=None, run_fn=None, kernel=None):
+    """Hold each drawn sample over its block of steps, run, and score for real.
+
+    `run_fn(drive, nsteps, save) -> (frames, dt)` replaces the plain integration, which is
+    how a switching medium is scored without this module having to know about regimes.py
+    (which imports this one). p is then unused."""
     from input2 import RegionDrive
     from fc_moran import MoranMatch
     nsteps = len(A_frames) * save
@@ -286,7 +341,11 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
         ww = float(d.w @ d.w)
         d.Aser = d.Aser - np.outer(d.Aser @ d.w / ww, d.w)
     d.Aser = (d.Aser * (amp / np.sqrt((d.Aser ** 2).mean()))).astype(np.float32)
-    frames, _ = fl.run(cortex, d, p, nsteps, save)
+    frames, _ = (run_fn(d, nsteps, save) if run_fn is not None
+                 else fl.run(cortex, d, p, nsteps, save))
+    if kernel is not None:                  # the observable, not the field; see transfer
+        import units
+        frames = units.smooth_frames(frames, kernel)
     Z, _ = target.model_z(frames)
     sim = float(target._prep(target.model_edges(Z=Z)[0]) @ target.y)
     mm = MoranMatch(cortex, target)

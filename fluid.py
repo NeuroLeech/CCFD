@@ -110,12 +110,17 @@ def fields(cortex, p):
             p["sig0"] * group_field(cortex, p["sig_group"]))
 
 
-def build(cortex, p, sponge=True):
+def build(cortex, p, sponge=True, dt=None, coupling=None):
     """-> (solver, dt, g, H field). Wave speed is sqrt(g*H), so a per-vertex H is a
-    per-vertex speed; dt follows the CFL condition at the fastest point on the sheet."""
+    per-vertex speed; dt follows the CFL condition at the fastest point on the sheet.
+
+    `dt` overrides that. A run whose medium switches between regimes has to integrate all
+    of them on one clock, and that clock must be set by the FASTEST regime - a dt chosen
+    for a slow medium violates the CFL bound the moment a faster one is entered. Pass the
+    common step, and each regime is then simply running below its own limit."""
     c, damp0 = fields(cortex, p)
     Hf = (c ** 2).astype(np.float32)                     # g = 1, so H = c^2
-    dt = CFL * cortex.d.min() / float(c.max())
+    dt = CFL * cortex.d.min() / float(c.max()) if dt is None else float(dt)
 
     s = RotSWE(cortex.m, 1.0 / p["Ld"], l=cortex.l, d=cortex.d, A=cortex.A,
                E=cortex.edges, bnd_edge=cortex.bnd)
@@ -130,12 +135,13 @@ def build(cortex, p, sponge=True):
     s.astype(np.float32)
     s.sig_v = s.sig_v.astype(np.float32)
     s.sig_e = s.sig_e.astype(np.float32)
+    s.coupling = coupling               # long-range term, applied inside RotSWE.step
     return s, dt, np.float32(1.0), Hf
 
 
-def run(cortex, drive, p, nsteps, save_every=25, sponge=True):
+def run(cortex, drive, p, nsteps, save_every=25, sponge=True, dt=None, coupling=None):
     """Integrate with spatially varying speed and damping. -> (frames, dt)."""
-    s, dt, g, Hf = build(cortex, p, sponge)
+    s, dt, g, Hf = build(cortex, p, sponge, dt, coupling)
     Aser = drive.Aser.astype(np.float32)
     P = drive.P.astype(np.float32)
     h = np.zeros(cortex.nV, np.float32)
