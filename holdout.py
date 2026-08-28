@@ -17,7 +17,7 @@ import os, argparse, time
 import numpy as np
 
 from mesh_cache import load_cortex
-from fc_score import FCTarget
+import fc_score
 from paths import RESULTS, CACHE
 import xspec, bo_step, subparcels, fc_group_nki as nki
 from best_fit import BEST_X
@@ -91,7 +91,7 @@ def main():
     a = ap.parse_args()
 
     c = load_cortex("fsaverage5", verbose=False)
-    t = FCTarget(c, verbose=True)
+    t = fc_score.default_target(c, verbose=True)
     e, m, sub = half_targets(t, a.seed)
     yA, yB = t._prep(e[0]), t._prep(e[1])
     print(f"  the two halves agree with each other at spearman {float(yA @ yB):+.4f}, "

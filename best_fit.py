@@ -12,7 +12,7 @@ import os, time, argparse
 import numpy as np
 
 from mesh_cache import load_cortex
-from fc_score import FCTarget
+import fc_score
 from fc_moran import MoranMatch
 from paths import RESULTS
 import xspec, bo_step, subparcels, regimes, units
@@ -73,11 +73,24 @@ def regime_deltas(R, span, which="sulc", target="speed", base=None, verbose=True
 
 
 def held_out_score(t, frames, val, val_raw_ranks):
-    """Spearman of the SIMULATED FC against the target, on vertices the solve never saw."""
+    """Spearman of the SIMULATED FC against the target, on vertices the solve never saw.
+
+    Centred the same way the reported score is. The centring is a FULL-matrix operation -
+    row means over all 9,217 vertices - so it cannot be done from the held-out block
+    alone; the means come from the whole Z, exactly as fc_score.model_edges does it.
+    Scoring an un-centred block against a centred target would make the selection
+    criterion a different quantity from the thing being selected for."""
     from scipy.stats import rankdata
     Z, _ = t.model_z(frames)
+    T, V = Z.shape[1], Z.shape[0]
     Zv = Z[val]
-    F = (Zv @ Zv.T) / Zv.shape[1]
+    F = (Zv @ Zv.T) / T
+    if t.centre == "double":
+        ssum = Z.sum(0)
+        diag = (Z * Z).sum(1) / T
+        m = ((Z @ ssum) / T - diag) / (V - 1)
+        grand = (float(ssum @ ssum) / T - float(diag.sum())) / (V * (V - 1))
+        F = F - m[val][:, None] - m[val][None, :] + grand
     iu = np.triu_indices(len(val), 1)
     r = rankdata(F[iu])
     r = (r - r.mean()) / max(r.std(), 1e-30)
@@ -195,13 +208,17 @@ def main():
                     help="constrain every regime to the same input cross-spectrum")
     ap.add_argument("--spread-scale", type=float, default=1.0, dest="spread_scale",
                     help="multiply the 'spread' area budget (1.0 = the sensory area)")
+    ap.add_argument("--centre", default="double", choices=("double", "none"),
+                    help="'double' centres the target AND the model the same way; "
+                         "'none' is the old behaviour, a pre-centred target scored "
+                         "against an un-centred model")
     ap.add_argument("--target", default="normal",
                     choices=("normal", "raw"), help="what the solve matches")
     ap.add_argument("--tag", default="best")
     a = ap.parse_args()
 
     c = load_cortex("fsaverage5", verbose=False)
-    t = FCTarget(c, verbose=True)
+    t = fc_score.default_target(c, centre=a.centre, verbose=True)
     mm = MoranMatch(c, t)
     parcels, split = subparcels.region_set(c, a.regions, a.split, a.spread_scale)
     labels, tags = subparcels.split_parcels(c, parcels, split, verbose=False)

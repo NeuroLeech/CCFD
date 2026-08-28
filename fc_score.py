@@ -36,6 +36,35 @@ def default_fc(space, mask="glasser", subject="*", outdir=FCDIR):
     return hits[-1]
 
 
+def raw_fc(space, mask="glasser", subject="*", outdir=FCDIR):
+    """Newest UN-centred FC matrix for this space/mask.
+
+    default_fc matches both `...spearmanfc.npy` and `...spearmandcfc.npy` and takes
+    whichever was written last, which is how the pre-centred file came to be the default
+    target. That matters because a pre-centred target is scored against an un-centred
+    model: the centring then applies to one side only."""
+    pat = os.path.join(outdir, f"{subject}_hemi-L_space-{space}_mask-{mask}*fc.npy")
+    hits = [h for h in sorted(glob.glob(pat), key=os.path.getmtime)
+            if not os.path.basename(h).endswith("dcfc.npy")]
+    if not hits:
+        raise FileNotFoundError(f"no un-centred FC matrix matching {pat}")
+    return hits[-1]
+
+
+def default_target(cortex, centre="double", **kw):
+    """FCTarget that centres the TARGET and the MODEL the same way.
+
+    With centre='double' the raw matrix is loaded and double-centred here, and
+    FCTarget.model_edges applies the same operation to the model - so both sides have
+    had their global component removed. Loading the pre-centred file with centre='none'
+    instead leaves the model un-centred, which is worth about 0.02 of score and, more to
+    the point, distorts diagnostics: it makes the model look as though it cannot produce
+    anticorrelation at all, when symmetrically centred it is 56% negative against the
+    target's 61%."""
+    path = raw_fc(cortex.mesh) if centre == "double" else default_fc(cortex.mesh)
+    return FCTarget(cortex, fc_path=path, centre=centre, **kw)
+
+
 def double_centre(FC, inplace=False):
     """Subtract row and column means, add the grand mean, all excluding the diagonal.
 

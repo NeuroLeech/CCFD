@@ -19,7 +19,7 @@ import argparse, time
 import numpy as np
 
 from mesh_cache import load_cortex
-from fc_score import FCTarget
+import fc_score
 import fc_group_nki as nki
 import holdout
 
@@ -38,7 +38,7 @@ def main():
     a = ap.parse_args()
 
     c = load_cortex("fsaverage5", verbose=False)
-    t = FCTarget(c, verbose=True)
+    t = fc_score.default_target(c, verbose=True)
     n = len(nki.subject_files("left"))
 
     rhos = []

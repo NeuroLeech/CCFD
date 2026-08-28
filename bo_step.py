@@ -68,11 +68,11 @@ def unpack(x, cortex):
 def _init(nfreq, iters, ndraw, regions, split=0, pad=0, realise=0, target="normal",
           region_set="sensory"):
     from mesh_cache import load_cortex
-    from fc_score import FCTarget
+    import fc_score
     if regions:
         xspec.REGIONS = list(regions)
     c = load_cortex("fsaverage5", verbose=False)
-    t = FCTarget(c, verbose=False)
+    t = fc_score.default_target(c, verbose=False)
     _W.update(cortex=c, target=t, nfreq=nfreq, iters=iters, ndraw=ndraw,
               sub=xspec.medoid_subset(t, 1000), pad=pad, realise=realise,
               target_mode=target)
