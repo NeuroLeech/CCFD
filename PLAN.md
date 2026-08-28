@@ -154,45 +154,42 @@ different scheme.
 inside the scatter, and the field degraded (gap 0.075, rank 25.7 — the collapse signature).
 The promised ~0.02 is not there.
 
-### 4. Region coverage — this is where everything was
+### 4. Region coverage — re-run with the stopping point selected
 
-All at 1,120 frames, 3 draws, piece area held at ~145 mm² so only *where* and *how much*
-changes:
+All at 4,480 frames, 3 draws, piece area held at ~145 mm2, stopping point chosen per
+configuration by `--select-iters` on held-out vertices:
 
-| set | pieces | driven area | solve ρ | sim | gap | rank |
+| set | K | stops at | sim (selected) | gap | rank | sim at the old fixed 150 |
 |---|---|---|---|---|---|---|
-| DMN only | 16 | 2,349 mm² | 0.5268 | +0.4727 ± 0.0083 | 0.064 | 32.1 |
-| sensory | 47 | 7,271 mm² | 0.7077 | +0.5661 ± 0.0198 | 0.043 | 45.6 |
-| spread | 51 | 7,476 mm² | 0.7643 | +0.6552 ± 0.0073 | 0.030 | 57.7 |
-| sensory+DMN | 63 | 9,620 mm² | 0.7873 | +0.6370 ± 0.0189 | 0.034 | 70.2 |
-| spread ×2 | 100 | 14,616 mm² | 0.8755 | +0.7194 ± 0.0053 | 0.026 | 93.5 |
-| spread ×3 | 148 | 21,866 mm² | 0.9249 | +0.7380 ± 0.0070 | 0.043 | 105.0 |
+| DMN only | 16 | 400* | +0.5204 ± 0.0037 | 0.078 | 33.5 | +0.4727 (1,120 frames) |
+| sensory | 47 | 50 | +0.6135 ± 0.0021 | 0.049 | 55.0 | +0.5875 |
+| spread | 51 | 400* | **+0.7133 ± 0.0021** | 0.040 | 62.6 | +0.6972 |
+| sensory+DMN | 63 | 200 | +0.6857 ± 0.0078 | 0.032 | 73.6 | +0.6863 |
+| spread x2 | 100 | - | not re-run | | | +0.7653 |
+| spread x3 | 148 | - | not re-run | | | +0.7380 (1,120 frames) |
 
-At matched area and matched piece count, spreading beats sensory by +0.089, and every
-diagnostic moves the right way at once. Doubling the driven area buys +0.064 — but
-trebling it buys only +0.019 more, and the Moran gap gets *worse* (0.043 against 0.026),
-so coverage saturates somewhere around twice the sensory area.
+\* at the top of the grid, so those two peaks may lie beyond it.
 
-**What this is not.** It is not a finding that the input is spread over the cortex. The
-dominant patterned input to cortex enters through sensory areas; a farthest-point sample
-that includes pOFC and TGd is the input prior switched off, not an alternative hypothesis
-about it. The scores in the lower rows are what the machinery can do when nothing
-constrains where the drive is applied.
+**The coverage result survives.** Spread beats sensory at matched driven area and matched
+piece count by **+0.100**, against +0.110 before. Correcting the stopping rule does not
+explain it away, so it remains what it was: the input prior switched off, scoring far
+better than the input prior kept.
 
-**What it probably is.** Note the ordering: spread at 51 pieces beats sensory+DMN at 63
-pieces and 2,000 mm² more. More channels and more area, worse score — so this is not
-degrees of freedom, or that would reverse. What pays is *dispersion*: having a source near
-every part of the sheet. The natural reading is a statement about the medium rather than
-the input. If the fluid transported far enough, sources in sensory cortex could generate
-distant FC structure by propagating there; that it helps instead to put an injector nearby
-says the effective reach is too short, and the solve is buying with geography what the
-dynamics will not deliver.
+**The confound was real but did not change the ordering.** It distorted individual numbers
+by up to ~0.05 - sensory was the worst hit, being well past its peak at 150 - while
+sensory+DMN, whose peak sits at 200, was untouched (-0.001).
 
-The ordering survives at 4,480 frames, where the scatter is an order of magnitude
-smaller: spread +0.6972 ± 0.0022 against sensory+DMN +0.6863 ± 0.0065, still with 12
-fewer pieces and 2,144 mm² less area. But the margin is only ~0.011, about 1.5 pooled sd,
-so treat "dispersion, not count" as supported and not yet nailed down. Experiment 4 in the
-list below is what would settle it.
+**"More channels converge more slowly" was wrong.** The optimal stopping point is not
+monotone in K, or in anything else yet identified: sensory (47) stops at 50, sensory+DMN
+(63) at 200, DMN (16) at 400, spread x3 (148) at 100 by its own selection grid. It has to
+be measured per configuration, which is what `--select-iters` is for.
+
+**Selection needs a tolerance, and did not have one at first.** On the first pass spread x2
+chose 1,600 iterations over 400 for +0.0025 - inside the noise of the single 1,120-frame
+draw the selection uses - and the resulting solve at K=100 ran for eleven hours without
+finishing. `--select-tol` (default 0.005) now takes the cheapest candidate within
+tolerance of the best, and the grid edge is flagged. The two spread x2/x3 re-runs were
+stopped rather than completed.
 
 ### 5. Re-run the medium BO — wired up, then deliberately stopped
 

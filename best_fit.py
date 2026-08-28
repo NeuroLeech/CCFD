@@ -102,10 +102,10 @@ def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, n
     raw_v = np.asarray(val_Ct)[iu]
     yv = rankdata(raw_v)
     yv = (yv - yv.mean()) / max(yv.std(), 1e-30)
-    cands = [int(x) for x in a.select_iters.split(",") if x.strip()]
+    cands = sorted(int(x) for x in a.select_iters.split(",") if x.strip())
     print(f"  selecting the stopping point over {cands}, by realised score on "
           f"{len(val)} held-out vertices at {a.select_frames} frames:")
-    best, best_n = -np.inf, cands[0]
+    scores = {}
     for n in cands:
         S, _ = xspec.solve(H, w, Tgt, iters=n, verbose=False, nblock=nb,
                            share=a.share_input)
@@ -124,11 +124,17 @@ def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, n
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, run_fn=run_fn,
                                     kernel=kern)
         v = held_out_score(t, r["frames"], val, yv)
+        scores[n] = v
         print(f"    {n:5d} iterations: held-out realised {v:+.4f}  "
               f"(rank {r['rank']:.1f})", flush=True)
-        if v > best:
-            best, best_n = v, n
-    print(f"  -> stopping at {best_n} iterations")
+    best = max(scores.values())
+    best_n = min(n for n in cands if scores[n] >= best - a.select_tol)
+    note = "" if scores[best_n] == best else (
+        f" (cheapest within {a.select_tol} of {max(scores, key=scores.get)}, "
+        f"which scored {best:+.4f})")
+    print(f"  -> stopping at {best_n} iterations{note}")
+    if best_n == cands[-1]:
+        print(f"     WARNING: that is the top of the grid, so the peak may lie beyond it")
     return best_n
 
 
@@ -150,6 +156,10 @@ def main():
                          "objective nor a held-out covariance match locates it.")
     ap.add_argument("--select-frames", type=int, default=1120, dest="select_frames",
                     help="realisation length used for selection only")
+    ap.add_argument("--select-tol", type=float, default=0.005, dest="select_tol",
+                    help="take the CHEAPEST candidate within this of the best, rather "
+                         "than the argmax: selection uses one short draw, so differences "
+                         "this size are noise, and paying 4x the solve for them is waste")
     ap.add_argument("--val-vert", type=int, default=1000, dest="val_vert",
                     help="held-out vertices for early stopping (0 = fixed iteration "
                          "count, which is a hidden regularisation parameter)")
