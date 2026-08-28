@@ -76,6 +76,18 @@ def medoid_subset(target, n=1000, sketch=400, seed=0):
     return out
 
 
+def validation_subset(target, sub, n=1000, seed=1):
+    """Vertices the solve never sees, for early stopping.
+
+    The solve fits 1,000 medoid vertices and leaves 8,217 unused, so a generalisation
+    signal is already paid for. Drawn at random from the complement rather than by
+    medoid, because these are meant to be a fair sample of what the solve is NOT fitting,
+    not a second summary of the same structure."""
+    rng = np.random.default_rng(seed)
+    rest = np.setdiff1d(np.arange(target.nV), np.asarray(sub))
+    return np.sort(rng.choice(rest, min(n, len(rest)), replace=False))
+
+
 def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=None,
                       verbose=True, dt=None, coupling=None):
     """(K, nframes, nV) response of the field to one impulse in each region.
@@ -173,7 +185,8 @@ def _project(T, nblock=1, share=False):
     return T
 
 
-def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None):
+def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
+          val_H=None, val_Ct=None, val_every=5):
     """Maximise corr(C(S), Ct) over S(f) >= 0, by projected gradient on the ratio.
 
     Correlation rather than squared error: with a free scale, least squares is minimised
@@ -184,6 +197,16 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None):
     `nblock` > 1 expects H to be R regimes stacked along the region axis, each already
     scaled by sqrt(occupancy); the model expression is then unchanged and only the
     projection differs. See _project.
+
+    `val_H` and `val_Ct` turn on early stopping against held-out vertices, which this
+    solve needs rather than merely benefits from. The objective never converges - it is
+    still climbing after 4,000 steps and never stalls - while the realised score peaks
+    around 25 steps and falls away after, because converging concentrates the input into
+    fewer modes and the low-rank solution does not generalise off the solve vertices. A
+    fixed iteration count is therefore a hidden regularisation parameter whose right value
+    differs per configuration, which makes configurations incomparable. Scoring Spearman
+    on vertices the solve never sees, and keeping the best S, makes that choice explicit
+    and per-configuration.
 
     Pass a list as `trace` to get the objective per accepted step back. Whether the solve
     ran out of iterations or stalled is not cosmetic: a block-diagonal problem with R
@@ -217,6 +240,23 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None):
 
     val, C, n = obj(S)
     step = 1.0 / max(np.linalg.norm(adjoint(Ctn)), 1e-30)
+
+    watching = val_H is not None and val_Ct is not None
+    if watching:
+        from scipy.stats import rankdata
+        iu_v = np.triu_indices(val_H.shape[1], 1)
+        yv = rankdata(np.asarray(val_Ct)[iu_v])
+        yv = (yv - yv.mean()) / max(yv.std(), 1e-30)
+
+        def val_score(S):
+            Cv = np.zeros((val_H.shape[1],) * 2)
+            for f in range(nf):
+                Cv += w[f] * 2.0 * np.real((val_H[f] @ S[f]) @ val_H[f].conj().T)
+            r = rankdata(Cv[iu_v])
+            r = (r - r.mean()) / max(r.std(), 1e-30)
+            return float(r @ yv / len(yv))
+
+        best_v, best_S, best_at = val_score(S), S.copy(), 0
     if trace is not None:
         trace.append(float(val))
     if verbose:
@@ -240,11 +280,21 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None):
         else:
             stalled_at = it                         # no uphill step remains
             break
+        if watching and (it % val_every == 0 or it == iters - 1):
+            v = val_score(S)
+            if v > best_v:
+                best_v, best_S, best_at = v, S.copy(), it
         if verbose and (it % 25 == 0 or it == iters - 1):
-            print(f"    iter {it:4d}  corr = {val:+.4f}", flush=True)
+            print(f"    iter {it:4d}  corr = {val:+.4f}"
+                  + (f"   held-out {val_score(S):+.4f}" if watching else ""), flush=True)
+    if watching:
+        S = best_S
     if trace is not None:
-        trace.append(dict(final=float(val), steps=len(trace) - 1,
-                          stalled_at=stalled_at, iters=iters))
+        rep = dict(final=float(val), steps=len(trace) - 1,
+                   stalled_at=stalled_at, iters=iters)
+        if watching:
+            rep.update(held_out=float(best_v), stopped_at=int(best_at))
+        trace.append(rep)
     return S, model(S)
 
 

@@ -72,6 +72,66 @@ def regime_deltas(R, span, which="sulc", target="speed", base=None, verbose=True
     return out
 
 
+def held_out_score(t, frames, val, val_raw_ranks):
+    """Spearman of the SIMULATED FC against the target, on vertices the solve never saw."""
+    from scipy.stats import rankdata
+    Z, _ = t.model_z(frames)
+    Zv = Z[val]
+    F = (Zv @ Zv.T) / Zv.shape[1]
+    iu = np.triu_indices(len(val), 1)
+    r = rankdata(F[iu])
+    r = (r - r.mean()) / max(r.std(), 1e-30)
+    return float(r @ val_raw_ranks / len(r))
+
+
+def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, nb,
+                 sched_f, ps, dt, kern, cpl):
+    """Choose where to stop the solve, by simulating at each candidate and scoring on
+    held-out vertices.
+
+    This is more expensive than a criterion evaluated inside the solve, and it is what the
+    measurements say is needed. The solve objective rises monotonically for at least 4,000
+    steps; the covariance match on held-out vertices peaks around 130; the realised score
+    peaks around 25. Two effects compound - the predicted covariance overfits the solve
+    vertices, AND the simulation reproduces its own prediction less faithfully as the
+    input collapses to fewer modes (fidelity 0.945 down to 0.927 across the sweep). Only a
+    realised, held-out number sees both, so only that can be used to pick between
+    configurations."""
+    from scipy.stats import rankdata
+    iu = np.triu_indices(len(val), 1)
+    raw_v = np.asarray(val_Ct)[iu]
+    yv = rankdata(raw_v)
+    yv = (yv - yv.mean()) / max(yv.std(), 1e-30)
+    cands = [int(x) for x in a.select_iters.split(",") if x.strip()]
+    print(f"  selecting the stopping point over {cands}, by realised score on "
+          f"{len(val)} held-out vertices at {a.select_frames} frames:")
+    best, best_n = -np.inf, cands[0]
+    for n in cands:
+        S, _ = xspec.solve(H, w, Tgt, iters=n, verbose=False, nblock=nb,
+                           share=a.share_input)
+        if nb == 1:
+            A = xspec.realise(S, idx, a.select_frames, ref_frames=ref_frames, seed=7)
+            run_fn = None
+        else:
+            sf = sched_f[:a.select_frames]
+            A = regimes.realise_switching(S, idx, a.select_frames, ref_frames, nb, sf,
+                                          w=w, seed=7)
+            steps = np.repeat(sf, save)
+            run_fn = (lambda dr, ns, sv: regimes.run_switching(
+                c, dr, ps, steps[:ns], ns, sv, dt))
+        if cpl is not None and run_fn is None:
+            run_fn = lambda dr, ns, sv: bo_step.fl.run(c, dr, p, ns, sv, coupling=cpl)
+        r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, run_fn=run_fn,
+                                    kernel=kern)
+        v = held_out_score(t, r["frames"], val, yv)
+        print(f"    {n:5d} iterations: held-out realised {v:+.4f}  "
+              f"(rank {r['rank']:.1f})", flush=True)
+        if v > best:
+            best, best_n = v, n
+    print(f"  -> stopping at {best_n} iterations")
+    return best_n
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--frames", type=int, default=1120, help="realisation length")
@@ -82,6 +142,17 @@ def main():
     ap.add_argument("--nfreq", type=int, default=NFREQ)
     ap.add_argument("--pad", type=int, default=PAD)
     ap.add_argument("--nvert", type=int, default=NVERT)
+    ap.add_argument("--select-iters", default="", dest="select_iters",
+                    help="comma-separated iteration counts to choose between, by "
+                         "REALISED score on held-out vertices (e.g. 10,25,50,100,200). "
+                         "The stopping point is a hidden regularisation parameter whose "
+                         "best value differs per configuration, and neither the solve "
+                         "objective nor a held-out covariance match locates it.")
+    ap.add_argument("--select-frames", type=int, default=1120, dest="select_frames",
+                    help="realisation length used for selection only")
+    ap.add_argument("--val-vert", type=int, default=1000, dest="val_vert",
+                    help="held-out vertices for early stopping (0 = fixed iteration "
+                         "count, which is a hidden regularisation parameter)")
     ap.add_argument("--split", type=int, default=50,
                     help="pieces to divide the driven parcels into (sets the piece area)")
     ap.add_argument("--regions", default="sensory",
@@ -130,6 +201,11 @@ def main():
           f"{10**BEST_X[0]:.2e}, rotation {10**BEST_X[1]:.2e}, sponge {10**BEST_X[2]:.2e}")
 
     sub = xspec.medoid_subset(t, a.nvert)
+    # held-out vertices serve two mechanisms that must not both run: selecting the
+    # stopping point by realised score (--select-iters), or early stopping inside the
+    # solve on the predicted covariance. Selection supersedes it, so it wins.
+    n_val = a.val_vert or (1000 if a.select_iters else 0)
+    val = xspec.validation_subset(t, sub, n_val) if n_val else None
     n = len(sub)
     iu = np.triu_indices(n, 1)
     raw = np.asarray(t.target_fc()[np.ix_(sub, sub)], np.float64)
@@ -152,6 +228,8 @@ def main():
                                        profiles=P, verbose=False, coupling=cpl)
         R = np.pad(resp, ((0, 0), (0, max(0, a.pad - resp.shape[1])), (0, 0)))
         H, w, idx = xspec.transfer(R, t.cols[sub], a.nfreq, kernel=kern)
+        Hv = (xspec.transfer(R, t.cols[val], a.nfreq, kernel=kern)[0]
+              if val is not None else None)
         ref_frames, ps, dt = R.shape[1], None, None
     else:
         ps = regimes.regime_set(c, p, regime_deltas(
@@ -165,23 +243,40 @@ def main():
         H, w, idx, ref_frames = regimes.transfer_stack(
             c, ps, t.cols[sub], a.nfreq, a.pad, 280 * save, save, P, occ, dt,
             kernel=kern)
+        Hv = (regimes.transfer_stack(c, ps, t.cols[val], a.nfreq, a.pad, 280 * save,
+                                     save, P, occ, dt, verbose=False, kernel=kern)[0]
+              if val is not None else None)
     print(f"  transfer: {H.shape[0]} frequencies x {H.shape[2]} channels from a "
           f"{ref_frames}-frame window [{time.time()-t0:.0f}s]")
 
     Tgt = normal_scores(raw, iu) if a.target == "normal" else raw
+    val_Ct = None if val is None else np.asarray(
+        t.target_fc()[np.ix_(val, val)], np.float64)
+
+    if a.select_iters:
+        a.iters = select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct,
+                               Tgt, nb, sched_f if nb > 1 else None,
+                               ps if nb > 1 else None, dt if nb > 1 else None, kern, cpl)
     tr = []
     S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
-                       share=a.share_input, trace=tr)
+                       share=a.share_input, trace=tr,
+                       val_H=None if a.select_iters else Hv,
+                       val_Ct=None if a.select_iters else val_Ct)
     from scipy.stats import spearmanr
     print(f"  solve: pearson vs raw {np.corrcoef(C[iu], raw[iu])[0,1]:+.4f}, "
           f"spearman vs raw {spearmanr(C[iu], raw[iu]).statistic:+.4f}")
     rep = tr[-1]
-    tail = tr[-6:-1] if len(tr) > 6 else tr[:-1]
-    print(f"  convergence: objective {rep['final']:.4f} after {rep['steps']} accepted "
-          f"steps of {rep['iters']}"
-          + (f", STALLED at {rep['stalled_at']}" if rep['stalled_at'] is not None
-             else "; last 5 gains "
-                  + ", ".join(f"{tail[i+1]-tail[i]:+.1e}" for i in range(len(tail)-1))))
+    if "stopped_at" in rep:
+        print(f"  early stopping on {len(val)} held-out vertices: best spearman "
+              f"{rep['held_out']:+.4f} at step {rep['stopped_at']} of {rep['iters']} "
+              f"(objective there was still climbing to {rep['final']:.4f})")
+    else:
+        tail = tr[-6:-1] if len(tr) > 6 else tr[:-1]
+        print(f"  convergence: objective {rep['final']:.4f} after {rep['steps']} accepted "
+              f"steps of {rep['iters']}"
+              + (f", STALLED at {rep['stalled_at']}" if rep['stalled_at'] is not None
+                 else "; last 5 gains "
+                      + ", ".join(f"{tail[i+1]-tail[i]:+.1e}" for i in range(len(tail)-1))))
 
     for it in range(a.rank_iters):
         Tm = np.zeros_like(raw)

@@ -5,68 +5,79 @@ by solving for the input rather than searching for it.
 
 ## Where things stand
 
-**Read this before any other number in this file.** The convex solve's objective is
-ANTI-CORRELATED with the score it is supposed to serve, past about 25 projected-gradient
-steps. Every result recorded here was taken at `--iters 150`, which sits well down the
-descending limb, and different configurations converge at different rates - so the
-comparisons between them are confounded by how far each was solved, not only by what was
-varied.
+**Best fit: +0.6135 ± 0.0021** (47 sensory pieces, 4,480 frames, 3 draws), gap 0.049,
+field rank 55.0, with the stopping point chosen rather than assumed:
 
-Sensory 47 pieces, 4,480 frames, everything else at the incumbent configuration:
+```bash
+python best_fit.py --select-iters 10,25,50,100,200 --frames 4480 --draws 3
+```
+
+### The stopping point was a hidden parameter, and it was set wrong
+
+The convex solve's objective is anti-correlated with the score past about 25 steps. A
+4,000-step probe: the objective goes 0.2428 (white input) to 0.6903 by step 25 to 0.7298
+at step 4,000, still gaining 5e-05 per 100 steps and **never once stalling** - there is no
+convergence criterion in `xspec.solve`, only an iteration cap. The first 25 steps buy 92%
+of the total objective gain; the remaining 8% costs 0.11 of realised score.
+
+Sensory 47 pieces, 4,480 frames, nothing else varied:
 
 | solver iterations | solve rho | sim | gap | field rank |
 |---|---|---|---|---|
 | 10 | 0.6349 | +0.5863 ± 0.0017 | 0.063 | 48.1 |
-| **25** | 0.6750 | **+0.6158 ± 0.0000** | 0.058 | 53.6 |
-| 50 | 0.6894 | +0.6143 ± 0.0021 | 0.048 | 55.1 |
+| 25 | 0.6750 | +0.6158 ± 0.0000 | 0.058 | 53.6 |
+| **50** | 0.6894 | **+0.6143 ± 0.0021** | 0.048 | 55.1 |
 | 100 | 0.7016 | +0.6031 ± 0.0052 | 0.048 | 51.9 |
-| 150 (what everything below used) | 0.7077 | +0.5875 ± 0.0011 | 0.043 | 46.5 |
+| 150 (the old default) | 0.7077 | +0.5875 ± 0.0011 | 0.043 | 46.5 |
 | 300 | 0.7135 | +0.5569 ± 0.0085 | 0.049 | 36.9 |
 | 600 | 0.7164 | +0.5307 ± 0.0080 | 0.052 | 31.3 |
 
-Solve rho climbs monotonically; the realised score peaks at 25 steps and falls
-monotonically after. A 4,000-step probe shows where the objective actually goes: 0.2428 at
-the white-input start, 0.6903 by step 25, 0.7298 at step 4,000, still gaining 5e-05 per
-100 steps and never once stalling - there is no convergence criterion, only an iteration
-cap. **The first 25 steps buy 92% of the total objective gain.** The remaining 8% is what
-costs 0.11 of realised score. **Field rank tracks the score almost exactly** (48, 54, 55, 52, 46,
-37, 31): as the solve converges it concentrates the input into fewer modes, and the
-low-rank solution generalises worse from the 1,000 solve vertices to all 9,217. The
-diagnostic was in the output all along; it was never used to decide when to stop.
+Solve rho climbs monotonically; the score peaks around 25-50 and falls monotonically after.
+Field rank tracks the score (48, 54, 55, 52, 46, 37, 31) - the diagnostic was in the output
+all along and was never used to decide when to stop.
 
-Three consequences.
+**Two effects compound, which is why the obvious fix is not enough.** Measured on the 1,000
+solve vertices, the SIMULATED FC against the target improves monotonically with iterations
+(+0.6053 at 10 steps to +0.6747 at 600) - so on the vertices it fits, more solving is
+strictly better. The loss is entirely off them. On top of that the simulation reproduces
+its own prediction less faithfully as the input collapses to fewer modes: Spearman between
+realised and predicted FC falls 0.9452 to 0.9271 across the sweep (`fidelity.py`).
 
-`--iters 150` was doing implicit regularisation, badly tuned. The current configuration
-reaches **+0.6158 at 25 iterations**, +0.028 above the long-standing headline, for a sixth
-of the compute.
+So a criterion has to see both, and only a realised, held-out number does:
 
-The solve correlation has been the project's main progress signal and it points the wrong
-way. Every "the solve reaches 0.71 and we realise 0.57, where does the 0.14 go" framing
-had it backwards: the solve was not a ceiling being approached but a different objective
-being pursued past the point where it helped.
+| criterion | stops at | resulting sim |
+|---|---|---|
+| fixed count (what everything used) | 150 | +0.5875 |
+| held-out COVARIANCE match, inside the solve | 130 | +0.5947 |
+| held-out REALISED score (`--select-iters`) | 50 | **+0.6135** |
 
-**The coverage table is confounded.** More channels converge more slowly, so 150 steps is
-a different degree of convergence at K=47 than at K=100 - and being less converged is now
-known to help. The spread advantage may be partly an artefact of that, which is a
-mechanism independent of dispersion or of degrees of freedom.
+Cheap in-solve proxies do not work: the effective rank of the predicted `C(S)` rises
+monotonically (57.6 to 101.1) and the mean rank of `S(f)` falls monotonically (7.84 to
+6.04). Neither turns over where the score does. `--select-iters` therefore solves and
+simulates once per candidate at 1,120 frames, scores on 1,000 vertices the solve never
+saw, and picks - about 10 minutes per configuration, and the selection curve is a clean
+inverted U (+0.5473, +0.5856, +0.5871, +0.5839, +0.5482 over 10/25/50/100/200).
 
-**Nothing below has been re-run at a defensible stopping rule.** Treat every number in the
-rest of this file as "at 150 iterations", not as a property of the configuration.
+### What this reaches backwards into
 
-### The model, as last measured
+Solve correlation has been the main progress signal in this project and it points the
+wrong way. Every "the solve reaches 0.71, we realise 0.57, where does the 0.14 go" framing
+had the gap backwards: the solve was not a ceiling being approached but a different
+objective being pursued past the point where it helped.
 
-Sensory 47 pieces at 150 iterations: **+0.5875 ± 0.0011**, gap 0.046, rank 46.5.
+**Every result below was taken at 150 iterations and none has been re-run.** Configurations
+with more channels converge more slowly at a fixed count, and being less converged now
+looks like an advantage, so the coverage table in particular is confounded - the spread
+advantage may be partly an artefact of that, a mechanism independent of dispersion or of
+degrees of freedom. Treat every number below as "at 150 iterations", not as a property of
+the configuration.
 
-```bash
-python best_fit.py --frames 4480 --draws 3            # as recorded below
-python best_fit.py --frames 4480 --draws 3 --iters 25 # +0.6158
-```
+### The model
 
 Sensory is the constrained, falsifiable model - the dominant patterned input to cortex
-enters through sensory areas. `--regions spread` relaxes that and scores far higher
-(+0.7653 at 100 pieces), but 24 farthest-point parcels including pOFC and TGd are the
-input prior switched off rather than an alternative hypothesis about it. Read that gap as
-an upper bound on the machinery with nothing constraining where the drive is applied.
+enters through sensory areas. `--regions spread` relaxes that and scored far higher
+(+0.7653 at 100 pieces, at 150 iterations), but 24 farthest-point parcels including pOFC
+and TGd are the input prior switched off rather than an alternative hypothesis about it.
 
 **The pipeline.** The medium is linear, so the FC depends on the input only through its
 cross-spectral density `S(f)`, which is solved convexly:
@@ -98,12 +109,9 @@ solved against the normal-scored target on 1,000 medoid vertices.
    at every boundary. Damping regimes therefore need a ramped switch before they can be
    tested - and damping is the more plausible physiological modulation of the two.
 
-1. **Fix the stopping rule, then re-run everything.** Options: early stopping selected on
-   held-out vertices (the solve uses 1,000 medoids, 8,217 are unused and free); an explicit
-   rank floor or nuclear-norm penalty, since rank collapse is the visible mechanism; or
-   solving on far more vertices, which `--nvert 2500` tested at 150 iterations - on the
-   descending limb, so that null needs re-running. Until this is settled, comparisons
-   between configurations are comparisons of convergence.
+1. **Re-run everything at a selected stopping point.** The rule exists now
+   (`--select-iters`); what has not happened is applying it to the coverage table, the
+   nvert null, the smoothing and the coupling sweep, all of which were measured at 150.
 2. **Re-run the coverage table** at whatever rule comes out of 1, since that result carries
    the reading of where input enters and is the one most exposed to the confound.
 3. `reach.py` on the current medium.
