@@ -89,7 +89,7 @@ def validation_subset(target, sub, n=1000, seed=1):
 
 
 def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=None,
-                      verbose=True, dt=None, coupling=None):
+                      verbose=True, dt=None, coupling=None, workers=0):
     """(K, nframes, nV) response of the field to one impulse in each region.
 
     `profiles` overrides the parcel tapers with an explicit (K, nV) profile matrix, which
@@ -112,23 +112,65 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
         T, ids = parcel_tapers(cortex, verbose=False)
         pos = {int(q): i for i, q in enumerate(ids)}
         profiles = np.stack([T[pos[int(k)]] for k in regions])
-    s, dt, g, H = fl.build(cortex, p, sponge=True, dt=dt, coupling=coupling)
-    out = []
-    for k in range(len(profiles)):
-        h = profiles[k].astype(np.float32).copy()
-        ue = np.zeros(s.nE, np.float32)
-        fr = [h.copy()]
-        for n in range(1, nsteps):
-            ue, h = s.step(ue, h, np.float32(dt), g, H)
-            if n % save == 0:
-                fr.append(h.copy())
-        out.append(np.asarray(fr))
-        if verbose:
-            print(f"  impulse {k:3d}: peak {np.abs(fr[0]).max():.3f} -> "
-                  f"end {np.abs(fr[-1]).max():.2e}", flush=True)
-    out = np.asarray(out)
+    if workers and workers > 1:
+        out = _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling,
+                                 workers, verbose)
+    else:
+        s, dt, g, H = fl.build(cortex, p, sponge=True, dt=dt, coupling=coupling)
+        out = []
+        for k in range(len(profiles)):
+            h = profiles[k].astype(np.float32).copy()
+            ue = np.zeros(s.nE, np.float32)
+            fr = [h.copy()]
+            for n in range(1, nsteps):
+                ue, h = s.step(ue, h, np.float32(dt), g, H)
+                if n % save == 0:
+                    fr.append(h.copy())
+            out.append(np.asarray(fr))
+            if verbose:
+                print(f"  impulse {k:3d}: peak {np.abs(fr[0]).max():.3f} -> "
+                      f"end {np.abs(fr[-1]).max():.2e}", flush=True)
+        out = np.asarray(out)
     np.save(cache, out)
     return out
+
+
+_W_IMP = {}
+
+
+def _imp_init(cortex, p, profiles, dt, coupling):
+    _W_IMP.update(cortex=cortex, p=p, profiles=profiles, dt=dt, coupling=coupling)
+
+
+def _imp_one(args):
+    k, nsteps, save = args
+    s, dt, g, H = fl.build(_W_IMP["cortex"], _W_IMP["p"], sponge=True,
+                           dt=_W_IMP["dt"], coupling=_W_IMP["coupling"])
+    h = _W_IMP["profiles"][k].astype(np.float32).copy()
+    ue = np.zeros(s.nE, np.float32)
+    fr = [h.copy()]
+    for n in range(1, nsteps):
+        ue, h = s.step(ue, h, np.float32(dt), g, H)
+        if n % save == 0:
+            fr.append(h.copy())
+    return np.asarray(fr)
+
+
+def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers, verbose):
+    """One impulse per piece, across processes.
+
+    The pieces are completely independent - each is a separate initial condition evolving
+    on its own - so this is the one genuinely embarrassing parallelism in the pipeline,
+    and it was being run serially everywhere except inside bo_step."""
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    K = len(profiles)
+    if verbose:
+        print(f"  {K} impulses over {workers} workers", flush=True)
+    with ctx.Pool(workers, initializer=_imp_init,
+                  initargs=(cortex, p, profiles, dt, coupling)) as pool:
+        out = pool.map(_imp_one, [(k, nsteps, save) for k in range(K)])
+    return np.asarray(out)
 
 
 def transfer(resp, cols, nfreq, kernel=None):

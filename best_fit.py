@@ -176,6 +176,15 @@ def main():
     ap.add_argument("--val-vert", type=int, default=1000, dest="val_vert",
                     help="held-out vertices for early stopping (0 = fixed iteration "
                          "count, which is a hidden regularisation parameter)")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="processes for the impulse responses; they are independent per "
+                         "piece, so this is near-linear. 0 = serial")
+    ap.add_argument("--damp", type=float, default=None,
+                    help="override interior damping per step (BEST_X carries 6.2e-04)")
+    ap.add_argument("--impulse-frames", type=int, default=280, dest="impulse_frames",
+                    help="impulse window; must exceed the field's decay time, which is "
+                         "1/(damping per step). At 6.2e-04 that is ~49 frames; lower "
+                         "damping rings longer and needs a longer window")
     ap.add_argument("--split", type=int, default=50,
                     help="pieces to divide the driven parcels into (sets the piece area)")
     ap.add_argument("--regions", default="sensory",
@@ -223,9 +232,14 @@ def main():
     parcels, split = subparcels.region_set(c, a.regions, a.split, a.spread_scale)
     labels, tags = subparcels.split_parcels(c, parcels, split, verbose=False)
     P = subparcels.taper_profiles(c, labels, len(tags))
-    p, save, _ = bo_step.unpack(BEST_X, c)
+    x = BEST_X.copy()
+    if a.damp is not None:
+        x[0] = np.log10(a.damp)
+    p, save, _ = bo_step.unpack(x, c)
     print(f"  {len(P)} pieces, save {save} steps/frame, per-step damping "
-          f"{10**BEST_X[0]:.2e}, rotation {10**BEST_X[1]:.2e}, sponge {10**BEST_X[2]:.2e}")
+          f"{10**x[0]:.2e}, rotation {10**x[1]:.2e}, sponge {10**x[2]:.2e}"
+          + (f", impulse window {a.impulse_frames} frames "
+             f"(decay {1.0/(10**x[0]*save):.0f})" if a.impulse_frames != 280 else ""))
 
     sub = xspec.medoid_subset(t, a.nvert)
     # held-out vertices serve two mechanisms that must not both run: selecting the
@@ -251,8 +265,9 @@ def main():
               f"{regimes.common_dt(c, [p]) * cpl.spectral_bound():.4g} (needs << 1)")
     nb = a.regimes
     if nb == 1:
-        resp = xspec.impulse_responses(c, list(range(len(P))), p, 280 * save, save,
-                                       profiles=P, verbose=False, coupling=cpl)
+        resp = xspec.impulse_responses(c, list(range(len(P))), p, a.impulse_frames * save, save,
+                                       profiles=P, verbose=False, coupling=cpl,
+                                       workers=a.workers)
         R = np.pad(resp, ((0, 0), (0, max(0, a.pad - resp.shape[1])), (0, 0)))
         H, w, idx = xspec.transfer(R, t.cols[sub], a.nfreq, kernel=kern)
         Hv = (xspec.transfer(R, t.cols[val], a.nfreq, kernel=kern)[0]
@@ -268,9 +283,10 @@ def main():
         print(f"  {nb} regimes, epoch {a.epoch} frames, occupancy "
               f"{np.round(occ, 3)}, common dt {dt:.4g} (single medium {dt1:.4g})")
         H, w, idx, ref_frames = regimes.transfer_stack(
-            c, ps, t.cols[sub], a.nfreq, a.pad, 280 * save, save, P, occ, dt,
+            c, ps, t.cols[sub], a.nfreq, a.pad, a.impulse_frames * save, save, P, occ, dt,
             kernel=kern)
-        Hv = (regimes.transfer_stack(c, ps, t.cols[val], a.nfreq, a.pad, 280 * save,
+        Hv = (regimes.transfer_stack(c, ps, t.cols[val], a.nfreq, a.pad,
+                                     a.impulse_frames * save,
                                      save, P, occ, dt, verbose=False, kernel=kern)[0]
               if val is not None else None)
     print(f"  transfer: {H.shape[0]} frequencies x {H.shape[2]} channels from a "
@@ -337,7 +353,7 @@ def main():
                 regimes.epoch_profile(r["frames"], sched_f, a.epoch, nb)
             np.save(os.path.join(RESULTS, f"frames_{a.tag}.npy"), r["frames"])
             np.save(os.path.join(RESULTS, f"drive_{a.tag}.npy"), r["drive"].Aser)
-    np.savez(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), S=S, idx=idx, x=BEST_X,
+    np.savez(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), S=S, idx=idx, x=x,
              save=save, labels=labels, tags=np.array(tags, dtype=object))
     print(f"\n  realised over {a.frames} frames, {a.draws} draws: "
           f"sim {np.mean(sims):+.4f} +- {np.std(sims):.4f}   "
