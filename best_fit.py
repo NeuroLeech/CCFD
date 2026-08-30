@@ -98,7 +98,7 @@ def held_out_score(t, frames, val, val_raw_ranks):
 
 
 def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, nb,
-                 sched_f, ps, dt, kern, cpl):
+                 sched_f, ps, dt, kern, cpl, Lw=None):
     """Choose where to stop the solve, by simulating at each candidate and scoring on
     held-out vertices.
 
@@ -122,6 +122,8 @@ def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, n
     for n in cands:
         S, _ = xspec.solve(H, w, Tgt, iters=n, verbose=False, nblock=nb,
                            share=a.share_input)
+        if Lw is not None:
+            S = xspec.unwhiten(S, Lw)
         if nb == 1:
             A = xspec.realise(S, idx, a.select_frames, ref_frames=ref_frames, seed=7)
             run_fn = None
@@ -176,6 +178,9 @@ def main():
     ap.add_argument("--val-vert", type=int, default=1000, dest="val_vert",
                     help="held-out vertices for early stopping (0 = fixed iteration "
                          "count, which is a hidden regularisation parameter)")
+    ap.add_argument("--whiten", type=float, default=0.0,
+                    help="change of variables conditioning the solve (try 1e-3); "
+                         "0 = off. See xspec.whiten")
     ap.add_argument("--workers", type=int, default=0,
                     help="processes for the impulse responses; they are independent per "
                          "piece, so this is near-linear. 0 = serial")
@@ -293,18 +298,30 @@ def main():
           f"{ref_frames}-frame window [{time.time()-t0:.0f}s]")
 
     Tgt = normal_scores(raw, iu) if a.target == "normal" else raw
+    Lw = None
+    if a.whiten > 0:
+        H, Lw = xspec.whiten(H, a.whiten)
+        if Hv is not None:
+            Hv = np.stack([np.linalg.solve(Lw[f], Hv[f].conj().T).conj().T
+                           for f in range(len(Lw))])
+        print(f"  whitened solve (eps {a.whiten:g}): H^H H conditioned to "
+              f"{np.linalg.cond(H[0].conj().T @ H[0]):.1f} at the first frequency")
+
     val_Ct = None if val is None else np.asarray(
         t.target_fc()[np.ix_(val, val)], np.float64)
 
     if a.select_iters:
         a.iters = select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct,
                                Tgt, nb, sched_f if nb > 1 else None,
-                               ps if nb > 1 else None, dt if nb > 1 else None, kern, cpl)
+                               ps if nb > 1 else None, dt if nb > 1 else None, kern, cpl,
+                               Lw)
     tr = []
     S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
                        share=a.share_input, trace=tr,
                        val_H=None if a.select_iters else Hv,
                        val_Ct=None if a.select_iters else val_Ct)
+    if Lw is not None:
+        S = xspec.unwhiten(S, Lw)
     from scipy.stats import spearmanr
     print(f"  solve: pearson vs raw {np.corrcoef(C[iu], raw[iu])[0,1]:+.4f}, "
           f"spearman vs raw {spearmanr(C[iu], raw[iu]).statistic:+.4f}")

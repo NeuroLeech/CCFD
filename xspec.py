@@ -227,6 +227,45 @@ def _project(T, nblock=1, share=False):
     return T
 
 
+def whiten(H, eps=1e-3):
+    """Change of variables making the transfer well conditioned. -> (H_tilde, L).
+
+    The stacked H is violently anisotropic - 25 directions carry 22% of the energy - so
+    plain projected gradient crawls in the weak ones and the objective is still climbing
+    after 4,000 steps. Preconditioning the GRADIENT does not fix it: the PSD projection
+    that follows each step undoes the rescaling, and it stalls within ten iterations.
+
+    Reparameterising does. With M = H^H H and L its Cholesky factor, put
+    Q = L^H S L. Then H S H^H = (H L^-H) Q (H L^-H)^H, so solving with H_tilde = H L^-H
+    is the same problem in a basis where H_tilde^H H_tilde = I, and Q is PSD exactly when
+    S is. The solver needs no change at all; only the answer has to be mapped back with
+    `unwhiten`. eps is relative to the mean eigenvalue and keeps near-null directions from
+    being inflated without limit."""
+    nf, nV, K = H.shape
+    Ht = np.empty_like(H)
+    L = np.empty((nf, K, K), complex)
+    for f in range(nf):
+        M = H[f].conj().T @ H[f]
+        M = 0.5 * (M + M.conj().T)
+        M += eps * (np.trace(M).real / K) * np.eye(K)
+        L[f] = np.linalg.cholesky(M)
+        Ht[f] = np.linalg.solve(L[f], H[f].conj().T).conj().T      # H L^-H
+    return Ht, L
+
+
+def unwhiten(Q, L):
+    """Q in the whitened basis -> S in the original one: S = L^-H Q L^-1.
+
+    The order matters and is easy to get backwards: L^-1 Q L^-H is a different matrix and
+    gives a C that does not match the one the solve reported."""
+    S = np.empty_like(Q)
+    for f in range(len(Q)):
+        Lh = L[f].conj().T
+        Z = np.linalg.solve(Lh, Q[f])                            # L^-H Q
+        S[f] = np.linalg.solve(Lh, Z.conj().T).conj().T          # (L^-H Z^H)^H = Z L^-1
+    return S
+
+
 def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
           val_H=None, val_Ct=None, val_every=5):
     """Maximise corr(C(S), Ct) over S(f) >= 0, by projected gradient on the ratio.
@@ -249,6 +288,9 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
     differs per configuration, which makes configurations incomparable. Scoring Spearman
     on vertices the solve never sees, and keeping the best S, makes that choice explicit
     and per-configuration.
+
+    See `whiten` for the conditioning problem and the fix, which is a change of variables
+    applied OUTSIDE this function rather than anything in here.
 
     Pass a list as `trace` to get the objective per accepted step back. Whether the solve
     ran out of iterations or stalled is not cosmetic: a block-diagonal problem with R
