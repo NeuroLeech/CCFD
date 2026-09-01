@@ -8,7 +8,7 @@ transfer function, the rank-transformed target, the realisation and the score.
   python best_fit.py --frames 2240 --draws 3  # longer realisation
   python best_fit.py --rank-iters 4           # iterate the solve on the model's ranks
 """
-import os, time, argparse
+import os, sys, time, argparse
 import numpy as np
 
 from mesh_cache import load_cortex
@@ -22,6 +22,23 @@ import xspec, bo_step, subparcels, regimes, units
 BEST_X = np.array([np.log10(6.2e-4), np.log10(1.1e-5), np.log10(1.8e-3), np.log10(33),
                    -0.30, -0.05, 0.01, -0.03, 0.35, 0.35])
 PAD, NFREQ, NVERT = 1120, 192, 1000
+
+# The best sensory-only configuration, pinned rather than reconstructed from a shell
+# history. Everything here is an OVERRIDE of BEST_X or of an argparse default, because
+# the bo_step search that produced BEST_X predates both the damping sweep and the
+# whitened solve and has not been re-run against them.
+#
+# The select grid runs past 400 deliberately. Before whitening the realised score peaked
+# around 50 and fell away, so the grid stopped at 400; WITH whitening the curve is not an
+# inverted U at all - 10/25/50/100/200/400 gives .5411/.5840/.5905/.5898/.5870/.5987, and
+# the pick landed on the top of the grid with the peak possibly beyond it.
+#
+# impulse_frames is not cosmetic. The field's decay time is 1/(damping per step * save),
+# which at 2e-4 and save=33 is ~152 frames, and an impulse window shorter than that
+# truncates the response - so H would describe a system nobody simulates. 560 is the
+# window diag_residual.py and solver_test.py already use for this damping.
+BEST = dict(damp=2e-4, whiten=1e-3, impulse_frames=560, regions="sensory", split=50,
+            select_iters="25,50,100,200,400,800,1600", frames=4480, draws=3)
 
 
 normal_scores = xspec.normal_scores          # lives in xspec so bo_step can use it too
@@ -98,7 +115,7 @@ def held_out_score(t, frames, val, val_raw_ranks):
 
 
 def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, nb,
-                 sched_f, ps, dt, kern, cpl, Lw=None):
+                 sched_f, ps, dt, kern, cpl, Lw=None, keep_f=None, spec=None):
     """Choose where to stop the solve, by simulating at each candidate and scoring on
     held-out vertices.
 
@@ -121,7 +138,7 @@ def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, n
     scores = {}
     for n in cands:
         S, _ = xspec.solve(H, w, Tgt, iters=n, verbose=False, nblock=nb,
-                           share=a.share_input)
+                           share=a.share_input, freq_keep=keep_f, spec=spec)
         if Lw is not None:
             S = xspec.unwhiten(S, Lw)
         if nb == 1:
@@ -193,7 +210,8 @@ def main():
     ap.add_argument("--split", type=int, default=50,
                     help="pieces to divide the driven parcels into (sets the piece area)")
     ap.add_argument("--regions", default="sensory",
-                    choices=("sensory", "dmn", "sensory+dmn", "spread"),
+                    choices=("sensory", "dmn", "sensory+dmn", "spread",
+                             "subcortical", "subcortical+sensory"),
                     help="which parcels are driven; 'spread' is an even whole-cortex "
                          "sample matched to the sensory driven area")
     ap.add_argument("--coupling", type=float, default=0.0,
@@ -203,6 +221,20 @@ def main():
                     help="shortest connection counted as long-range")
     ap.add_argument("--coupling-keep", type=float, default=0.15, dest="coupling_keep",
                     help="fraction of long connections kept, by distance residual")
+    ap.add_argument("--coupling-lag", type=int, default=0, dest="coupling_lag",
+                    help="uniform delay on the long-range term, in STEPS. Delaying a "
+                         "linear term keeps the system LTI, so the convex solve is "
+                         "unchanged and only H moves. One model step is ~0.2 ms by the "
+                         "units.py calibration, so a physiological 10-30 ms delay is "
+                         "only 50-150 steps")
+    ap.add_argument("--coupling-surrogate", type=int, default=None, metavar="SEED",
+                    dest="coupling_surrogate",
+                    help="rewire the connectome preserving degree and edge-length "
+                         "distribution: the control that separates 'this topology helps' "
+                         "from 'any long-range redistribution helps'")
+    ap.add_argument("--coupling-raw", action="store_true", dest="coupling_raw",
+                    help="use the whole normalised connectome instead of the "
+                         "distance-residual long-range filter")
     ap.add_argument("--smooth", type=float, default=0.0,
                     help="temporal FWHM in frames of the filter between field and "
                          "observable (0 = none); units.py says the model frame is "
@@ -228,8 +260,48 @@ def main():
                          "against an un-centred model")
     ap.add_argument("--target", default="normal",
                     choices=("normal", "raw"), help="what the solve matches")
+    ap.add_argument("--oversample", type=int, default=0, metavar="K",
+                    help="put the model on the fMRI clock with frames at TR/K, so it is "
+                         "sampled faster than BOLD. Sets save and per-step damping "
+                         "together so spread in mm/s and decay in seconds are unchanged, "
+                         "and sizes the impulse window to the resulting decay. See "
+                         "timescale.py for why the previous anchor put the whole model "
+                         "above the resting-state band")
+    ap.add_argument("--decay-s", type=float, default=None, dest="decay_s",
+                    help="field decay time in SECONDS (default: the measured BOLD 1/e "
+                         "time, 9.03 s). Pass 0 to carry the unanchored medium's 97.7 s")
+    ap.add_argument("--spread-mm-s", type=float, default=None, dest="spread_mm_s",
+                    help="wave spread in mm/s; sets `save`. With the decay pinned by the "
+                         "data this is the one free parameter, and reach = spread x decay")
+    ap.add_argument("--seconds", type=float, default=577.0,
+                    help="realisation length in SECONDS when --oversample is used "
+                         "(577 s = the 895-TR NKI run)")
+    ap.add_argument("--band", default="",
+                    help="restrict the input cross-spectrum to LO,HI in Hz "
+                         "(e.g. 0.01,0.1). Needs --oversample to have a clock")
+    ap.add_argument("--match-spectrum", action="store_true", dest="match_spectrum",
+                    help="hold the model's OUTPUT power spectrum to the measured BOLD "
+                         "spectrum (data/cache/bold_psd.npz). Convex, and a much tighter "
+                         "statement than a band: the empirical spectrum falls as f^-2.6 "
+                         "with 84%% of its variance in 0.01-0.1 Hz. Needs --oversample")
+    ap.add_argument("--bold-smooth", action="store_true", dest="bold_smooth",
+                    help="low-pass the field to the fMRI Nyquist before scoring, with "
+                         "the same kernel folded into the transfer function")
     ap.add_argument("--tag", default="best")
+    ap.add_argument("--best", action="store_true",
+                    help="the pinned best sensory-only configuration (see BEST). Any "
+                         "flag given explicitly still wins, so this is a starting point "
+                         "rather than a lock")
     a = ap.parse_args()
+
+    if a.best:
+        # only fill in what the caller did not ask for, so --best --damp 1e-4 means what
+        # it looks like it means
+        given = set(sys.argv[1:])
+        for k, v in BEST.items():
+            if "--" + k.replace("_", "-") not in given:
+                setattr(a, k, v)
+        print("  --best: " + ", ".join(f"{k}={getattr(a, k)}" for k in BEST))
 
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, centre=a.centre, verbose=True)
@@ -238,6 +310,29 @@ def main():
     labels, tags = subparcels.split_parcels(c, parcels, split, verbose=False)
     P = subparcels.taper_profiles(c, labels, len(tags))
     x = BEST_X.copy()
+    clock = None
+    if a.oversample:
+        import timescale
+        clock = timescale.plan(a.oversample,
+                               decay_s=(None if a.decay_s == 0 else
+                                        (a.decay_s or timescale.BOLD_TAU_S)),
+                               spread_mm_s=a.spread_mm_s)
+        x[3] = np.log10(clock["save"])
+        x[0] = np.log10(clock["damp"])
+        # the window has to hold the decay, which at a finer `save` is many more FRAMES
+        # even though it is the same number of seconds
+        decay_fr = 1.0 / (clock["damp"] * clock["save"])
+        if a.impulse_frames < 3 * decay_fr:
+            a.impulse_frames = int(np.ceil(3 * decay_fr / 64.0) * 64)
+        if a.pad < a.impulse_frames:
+            a.pad = int(2 ** np.ceil(np.log2(a.impulse_frames)))
+        a.frames = timescale.frames_for(a.seconds, clock["frame_s"])
+        if a.bold_smooth:
+            a.smooth = timescale.bold_fwhm_frames(clock["frame_s"])
+        print(f"  clock: frame {clock['frame_s']:.4f}s, impulse window "
+              f"{a.impulse_frames} frames ({a.impulse_frames*clock['frame_s']:.0f}s, "
+              f"decay {decay_fr:.0f} frames), pad {a.pad}, realise {a.frames} frames "
+              f"({a.seconds:.0f}s)")
     if a.damp is not None:
         x[0] = np.log10(a.damp)
     p, save, _ = bo_step.unpack(x, c)
@@ -263,11 +358,29 @@ def main():
     if a.coupling > 0:
         import connectome
         D180 = connectome.parcel_distances(c, verbose=False)
-        Wr = connectome.residual_W(connectome.load_enigma(c), D180,
-                                   a.coupling_keep, a.coupling_mm)
-        cpl = connectome.CouplingOperator(c, Wr, a.coupling)
-        print(f"  coupling lam {a.coupling:g}: dt*bound "
-              f"{regimes.common_dt(c, [p]) * cpl.spectral_bound():.4g} (needs << 1)")
+        Wr = connectome.load_enigma(c)
+        if not a.coupling_raw:
+            Wr = connectome.residual_W(Wr, D180, a.coupling_keep, a.coupling_mm)
+        if a.coupling_surrogate is not None:
+            Wr = connectome.surrogate_W(Wr, D180, seed=a.coupling_surrogate)
+        cpl = connectome.CouplingOperator(c, Wr, a.coupling, a.coupling_lag)
+        # The impulse window has to hold the delayed arrival AND the decay that follows
+        # it, or the response is truncated and H describes a system nobody simulates -
+        # the identity the whole convex solve rests on.
+        decay = 1.0 / (10 ** x[0] * save)                      # frames
+        need = a.coupling_lag / save + 3.0 * decay
+        if a.impulse_frames <= need:
+            raise SystemExit(
+                f"  impulse window {a.impulse_frames} frames is too short for lag "
+                f"{a.coupling_lag} steps ({a.coupling_lag/save:.1f} frames) plus 3 decay "
+                f"times ({3*decay:.0f} frames): need > {need:.0f}. Raise "
+                f"--impulse-frames.")
+        print(f"  coupling lam {a.coupling:g}, lag {a.coupling_lag} steps "
+              f"({a.coupling_lag/save:.2f} frames)"
+              + ("  [SURROGATE]" if a.coupling_surrogate is not None else "")
+              + (", unfiltered W" if a.coupling_raw else "")
+              + f": dt*bound {regimes.common_dt(c, [p]) * cpl.spectral_bound():.4g} "
+              f"(needs << 1); window {a.impulse_frames} > {need:.0f} frames needed")
     nb = a.regimes
     if nb == 1:
         resp = xspec.impulse_responses(c, list(range(len(P))), p, a.impulse_frames * save, save,
@@ -297,6 +410,27 @@ def main():
     print(f"  transfer: {H.shape[0]} frequencies x {H.shape[2]} channels from a "
           f"{ref_frames}-frame window [{time.time()-t0:.0f}s]")
 
+    keep_f = None
+    if a.band:
+        if clock is None:
+            raise SystemExit("  --band needs --oversample: without a clock there is no "
+                             "mapping from frequency bins to Hz")
+        import timescale
+        lo, hi = (float(v) for v in a.band.split(","))
+        keep_f = timescale.band_bins(idx, ref_frames, clock["frame_s"], (lo, hi))
+        if not keep_f.any():
+            raise SystemExit("  no solved frequency lies in that band")
+
+    spec = None
+    if a.match_spectrum:
+        if clock is None:
+            raise SystemExit("  --match-spectrum needs --oversample: without a clock "
+                             "there is no mapping from frequency bins to Hz")
+        import timescale
+        spec = timescale.bold_power(idx, ref_frames, clock["frame_s"], w)
+        if spec.sum() <= 0:
+            raise SystemExit("  no solved frequency lies in the measured BOLD range")
+
     Tgt = normal_scores(raw, iu) if a.target == "normal" else raw
     Lw = None
     if a.whiten > 0:
@@ -314,10 +448,10 @@ def main():
         a.iters = select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct,
                                Tgt, nb, sched_f if nb > 1 else None,
                                ps if nb > 1 else None, dt if nb > 1 else None, kern, cpl,
-                               Lw)
+                               Lw, keep_f, spec)
     tr = []
     S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
-                       share=a.share_input, trace=tr,
+                       share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
                        val_H=None if a.select_iters else Hv,
                        val_Ct=None if a.select_iters else val_Ct)
     if Lw is not None:

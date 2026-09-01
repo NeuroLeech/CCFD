@@ -185,15 +185,118 @@ def residual_W(W, D, keep=0.15, min_mm=60.0, verbose=True):
     return out
 
 
+def surrogate_W(W, D, nbins=10, nswap=200, seed=0, match_scale=True, verbose=True):
+    """A connectome matched to W in everything except which pairs are connected.
+
+    The control the coupling experiment needs. Without it, "structural connectivity
+    improves the fit" cannot be told apart from "any long-range redistribution improves
+    the fit" - and the coverage result already said this medium is short of transport, so
+    that alternative is the live one, not a pedantic one.
+
+    Degree-preserving double-edge swaps, (a,b),(c,d) -> (a,d),(c,b), restricted so that
+    BOTH new edges fall in the same geodesic-distance bin as the pair that produced them.
+    Degree sequence is then exact (every swap leaves all four degrees unchanged), the
+    per-bin edge count is exact (by the acceptance rule), and the weight multiset is exact
+    (weights travel with their edges). What is destroyed is topology: which specific
+    parcels are wired to which.
+
+    `synthetic_matrix` is NOT this - it draws pairs with a distance-biased probability and
+    preserves neither degree nor weights, so it can only exercise the machinery.
+
+    `match_scale` rescales the result so its Laplacian norm equals W's, which is what
+    makes a single `lam` mean the same thing for both. _lap_norm is homogeneous of degree
+    one in W, so this is an exact match, not an approximation."""
+    rng = np.random.default_rng(seed)
+    n = W.shape[0]
+    iu = np.triu_indices(n, 1)
+    sel = W[iu] > 0
+    ea, eb, ew = iu[0][sel].copy(), iu[1][sel].copy(), W[iu][sel].copy()
+    ed = D[ea, eb]
+    nE = len(ea)
+    if nE < 4:
+        raise ValueError(f"only {nE} edges to rewire")
+    # Equal-count bins, but the bin count has to fall with the edge count or the
+    # constraint becomes unsatisfiable: requiring BOTH swapped edges to stay inside a
+    # narrow bin is nearly impossible when a bin holds only a handful of edges, and the
+    # result is a "surrogate" that is mostly the original graph. ~20 edges per bin is
+    # what makes the acceptance rate usable on the 82-edge filtered connectome.
+    nbins = int(max(2, min(nbins, nE // 20)))
+    qs = np.quantile(ed, np.linspace(0, 1, nbins + 1))
+    qs[0], qs[-1] = -np.inf, np.inf
+    binof = np.clip(np.searchsorted(qs, ed, side="right") - 1, 0, nbins - 1)
+
+    present = set()
+    for a, b in zip(ea, eb):
+        present.add((int(a), int(b)))
+
+    done = 0
+    for b in range(nbins):
+        idx = np.flatnonzero(binof == b)
+        if len(idx) < 2:
+            continue
+        lo, hi = qs[b], qs[b + 1]
+        for _ in range(nswap * len(idx)):
+            p1, p2 = rng.choice(idx, 2, replace=False)
+            a, bb = ea[p1], eb[p1]
+            cc, d = ea[p2], eb[p2]
+            if rng.random() < 0.5:                       # both pairings, not just one
+                cc, d = d, cc
+            if len({int(a), int(bb), int(cc), int(d)}) < 4:
+                continue                                 # would make a self-loop
+            n1 = (min(a, d), max(a, d))
+            n2 = (min(cc, bb), max(cc, bb))
+            if (int(n1[0]), int(n1[1])) in present or (int(n2[0]), int(n2[1])) in present:
+                continue                                 # would double an existing edge
+            if not (lo <= D[n1] < hi and lo <= D[n2] < hi):
+                continue                                 # would leave the distance bin
+            present.discard((int(min(a, bb)), int(max(a, bb))))
+            present.discard((int(min(cc, d)), int(max(cc, d))))
+            present.add((int(n1[0]), int(n1[1])))
+            present.add((int(n2[0]), int(n2[1])))
+            ea[p1], eb[p1] = n1
+            ea[p2], eb[p2] = n2
+            done += 1
+
+    out = np.zeros_like(W)
+    out[ea, eb] = ew
+    out = out + out.T
+    if match_scale:
+        out *= _lap_norm(W) / _lap_norm(out)
+    keep_frac = float(((out > 0) & (W > 0)).sum()) / max(float((W > 0).sum()), 1.0)
+    if keep_frac > 0.5:
+        print(f"  WARNING: surrogate shares {keep_frac:.0%} of its edges with the real "
+              f"connectome, so it is a weak control. Raise nswap or lower nbins.")
+    if verbose:
+        deg_ok = np.allclose(np.sort((out > 0).sum(1)), np.sort((W > 0).sum(1)))
+        print(f"  surrogate: {done} accepted swaps over {nE} edges ({done/nE:.1f} per "
+              f"edge), degree sequence preserved: {deg_ok}")
+        print(f"    {nbins} distance bins; median distance {np.median(D[out > 0]):.0f} mm "
+              f"(real {np.median(D[W > 0]):.0f} mm), "
+              f"{int((out > 0).sum())//2} edges (real {nE}), "
+              f"topology overlap {keep_frac:.1%}")
+    return out
+
+
 class CouplingOperator:
-    """h -> lam * Rt( W (R h) - deg * (R h) ), the long-range term of the depth update.
+    """h -> lam * Rt( W (R h)(t-lag) - deg * (R h)(t-lag) ), the long-range depth term.
 
     R is the area-weighted parcel mean, so `R h` is the parcel-average depth and Rt puts a
     parcel's increment back uniformly over its vertices. The Laplacian form means a
     spatially uniform field produces exactly zero, so the term cannot pump energy in on
-    its own; what it does is move depth between parcels that white matter connects."""
+    its own; what it does is move depth between parcels that white matter connects.
 
-    def __init__(self, cortex, W, lam, dtype=np.float32):
+    `lag` delays that transport by a whole number of STEPS. A single uniform delay, not a
+    distance rule: the question it answers is whether any lag helps before whether the
+    right one does. Delaying a linear term leaves the system linear AND time invariant,
+    so the convex solve is untouched and only H changes - which is the only reason a lag
+    is affordable here at all.
+
+    What is buffered is the 180 PARCEL MEANS, not the 9,374-vertex field, so a lag of a
+    thousand steps costs a few hundred kilobytes. The operator is therefore STATEFUL, and
+    that is a trap: every integration loop must call reset() before it starts, or one
+    impulse response leaks into the next. See reset()."""
+
+    def __init__(self, cortex, W, lam, lag=0, dtype=np.float32):
         lab = np.asarray(cortex.lab)
         area = np.asarray(cortex.A, float)
         self.idx = [np.flatnonzero(lab == p + 1) for p in range(N_PARCELS)]
@@ -206,6 +309,22 @@ class CouplingOperator:
         self.lam = dtype(lam)
         self.nV = cortex.nV
         self.dtype = dtype
+        self.lag = int(lag)
+        if self.lag < 0:
+            raise ValueError(f"lag must be >= 0, got {lag}")
+        self.buf = np.zeros((self.lag + 1, N_PARCELS), dtype)
+        self.ptr = 0
+
+    def reset(self):
+        """Clear the delay buffer. MUST be called before each independent trajectory.
+
+        The serial impulse loop in xspec.impulse_responses builds the solver once and
+        reuses it across all K pieces, and the parallel path reuses one operator per
+        worker across its share of them - so without this, piece k+1 starts inside the
+        tail of piece k. That failure is silent: the responses stay finite and plausible,
+        H simply stops describing the system, and it shows up only as a worse score."""
+        self.buf[:] = 0.0
+        self.ptr = 0
 
     def parcel_mean(self, h):
         return np.array([float(self.wts[p] @ h[q]) if len(q) else 0.0
@@ -213,7 +332,13 @@ class CouplingOperator:
 
     def __call__(self, h):
         m = self.parcel_mean(h)
-        inc = self.lam * (self.W @ m - self.deg * m)
+        # write the current mean, advance, then read: after the advance the write head
+        # sits on the OLDEST entry, which is the one written `lag` steps ago. At lag=0
+        # the ring is one row and this is the identity, bit for bit.
+        self.buf[self.ptr] = m
+        self.ptr = (self.ptr + 1) % (self.lag + 1)
+        md = self.buf[self.ptr]
+        inc = self.lam * (self.W @ md - self.deg * md)
         out = np.zeros(self.nV, self.dtype)
         for p, q in enumerate(self.idx):
             if len(q):
@@ -224,7 +349,13 @@ class CouplingOperator:
         """Largest |eigenvalue| of the parcel-level Laplacian times lam.
 
         The term is explicit, so dt * bound has to stay well under 1 or the step is
-        unstable - the same kind of condition the CFL bound imposes on the wave part."""
+        unstable - the same kind of condition the CFL bound imposes on the wave part.
+
+        This bound is NECESSARY BUT NOT SUFFICIENT once lag > 0. It is derived from the
+        Laplacian being negative semidefinite, which makes the instantaneous term purely
+        dissipative; a delayed feedback carries no such guarantee and can pump energy at
+        frequencies where the delay turns dissipation into gain. So a lagged medium needs
+        the empirical energy check in `main`, not just this number."""
         L = np.diag(self.deg.astype(float)) - self.W.astype(float)
         return float(self.lam) * float(np.abs(np.linalg.eigvalsh(L)).max())
 
@@ -232,7 +363,12 @@ class CouplingOperator:
         """Short hash for the impulse cache. Responses computed with one coupling must
         never be reused for another, and W is far too big to put in a filename."""
         hh = hashlib.sha1(np.ascontiguousarray(self.W, np.float64).tobytes()).hexdigest()
-        return f"cpl{float(self.lam):.6g}_{hh[:10]}"
+        # lag appears only when set, so responses cached before lags existed stay valid -
+        # at lag=0 the operator is bit-identical to the version that wrote them
+        tag = f"cpl{float(self.lam):.6g}_"
+        if self.lag:
+            tag += f"L{self.lag}_"
+        return tag + hh[:10]
 
 
 def parcel_distances(cortex, verbose=True):
@@ -256,6 +392,13 @@ def main():
     ap.add_argument("--keep", type=float, default=0.15)
     ap.add_argument("--min-mm", type=float, default=60.0, dest="min_mm",
                     help="shortest connection counted as long-range")
+    ap.add_argument("--lag", type=int, default=0,
+                    help="uniform delay on the long-range term, in STEPS")
+    ap.add_argument("--surrogate", type=int, default=None, metavar="SEED",
+                    help="use a degree- and distance-matched rewiring instead of the "
+                         "real topology; the control, see surrogate_W")
+    ap.add_argument("--energy-steps", type=int, default=4000, dest="energy_steps",
+                    help="length of the empirical stability check")
     ap.add_argument("--check", action="store_true", help="lam=0 identity and stability")
     a = ap.parse_args()
 
@@ -271,12 +414,14 @@ def main():
     else:
         W = synthetic_matrix(c, D)
     Wr = residual_W(W, D, a.keep, a.min_mm)
+    if a.surrogate is not None:
+        Wr = surrogate_W(Wr, D, seed=a.surrogate)
 
     p, save, _ = bo_step.unpack(BEST_X, c)
     s, dt, g, Hf = fl.build(c, p)
     print(f"  dt {dt:.4g}")
     for lam in (0.0, a.lam, 10 * a.lam, 100 * a.lam):
-        op = CouplingOperator(c, Wr, lam)
+        op = CouplingOperator(c, Wr, lam, a.lag)
         b = op.spectral_bound()
         print(f"  lam {lam:<8.4g} spectral bound {b:9.4g}   dt*bound {dt*b:9.4g}"
               + ("   (explicit term needs << 1)" if lam == 0.0 else ""))
@@ -285,18 +430,98 @@ def main():
         rng = np.random.default_rng(0)
         h = rng.standard_normal(c.nV).astype(np.float32)
         ue = np.zeros(s.nE, np.float32)
+        dtD = np.float32(dt)
         s.coupling = None
-        u0, h0 = s.step(ue.copy(), h.copy(), np.float32(dt), g, Hf)
-        s.coupling = CouplingOperator(c, Wr, 0.0)
-        u1, h1 = s.step(ue.copy(), h.copy(), np.float32(dt), g, Hf)
+        u0, h0 = s.step(ue.copy(), h.copy(), dtD, g, Hf)
+        s.coupling = CouplingOperator(c, Wr, 0.0, a.lag)
+        u1, h1 = s.step(ue.copy(), h.copy(), dtD, g, Hf)
         print(f"\n  lam=0 identical to no coupling: "
               f"{np.abs(h1 - h0).max() == 0.0 and np.abs(u1 - u0).max() == 0.0}")
-        s.coupling = CouplingOperator(c, Wr, a.lam)
-        _, h2 = s.step(ue.copy(), h.copy(), np.float32(dt), g, Hf)
-        print(f"  lam={a.lam} changes the field: {np.abs(h2 - h0).max():.3g}")
+        # has to be run for lag+1 steps, not 1: at lag L the buffer is still zeros for
+        # the first L steps, so a one-step check reports "no effect" for a term that has
+        # simply not arrived yet
+        op1 = CouplingOperator(c, Wr, a.lam, a.lag); op1.reset()
+        s.coupling = op1
+        uu, h2 = ue.copy(), h.copy()
+        for _ in range(a.lag + 1):
+            uu, h2 = s.step(uu, h2, dtD, g, Hf)
+        s.coupling = None
+        uu, hb = ue.copy(), h.copy()
+        for _ in range(a.lag + 1):
+            uu, hb = s.step(uu, hb, dtD, g, Hf)
+        print(f"  lam={a.lam} changes the field after lag+1={a.lag+1} steps: "
+              f"{np.abs(h2 - hb).max():.3g}")
         flat = np.ones(c.nV, np.float32)
+        op_flat = CouplingOperator(c, Wr, a.lam, 0)      # lag 0: the term itself, undelayed
         print(f"  uniform field is a fixed point of the term: "
-              f"{np.abs(s.coupling(flat)).max():.3g}")
+              f"{np.abs(op_flat(flat)).max():.3g}")
+
+        # ---- lag=0 must reproduce the unlagged operator exactly, step for step
+        if a.lag:
+            def trajectory(op, nsteps, seed=1):
+                r = np.random.default_rng(seed)
+                hh = r.standard_normal(c.nV).astype(np.float32)
+                uu = np.zeros(s.nE, np.float32)
+                s.coupling = op
+                if op is not None:
+                    op.reset()
+                for _ in range(nsteps):
+                    uu, hh = s.step(uu, hh, dtD, g, Hf)
+                return hh
+            d0 = trajectory(CouplingOperator(c, Wr, a.lam, 0), 40)
+            dL = trajectory(CouplingOperator(c, Wr, a.lam, a.lag), 40)
+            print(f"  lag={a.lag} differs from lag=0 over 40 steps: "
+                  f"{np.abs(dL - d0).max():.3g}  (must be > 0, or the buffer is inert)")
+
+        # ---- the reset test: a reused operator must match a fresh one
+        r = np.random.default_rng(2)
+        prof = [r.standard_normal(c.nV).astype(np.float32) for _ in range(2)]
+
+        def run_from(op, h0v, nsteps):
+            uu = np.zeros(s.nE, np.float32)
+            hh = h0v.copy()
+            s.coupling = op
+            for _ in range(nsteps):
+                uu, hh = s.step(uu, hh, dtD, g, Hf)
+            return hh
+
+        op = CouplingOperator(c, Wr, a.lam, a.lag)
+        reused = []
+        for k in range(2):
+            op.reset()                                  # what the loops now do
+            reused.append(run_from(op, prof[k], 30))
+        fresh = [run_from(CouplingOperator(c, Wr, a.lam, a.lag), prof[k], 30)
+                 for k in range(2)]
+        err = max(float(np.abs(reused[k] - fresh[k]).max()) for k in range(2))
+        print(f"  reused operator + reset == fresh operator: {err == 0.0} "
+              f"(max |diff| {err:.3g})")
+
+        op2 = CouplingOperator(c, Wr, a.lam, a.lag)
+        noreset = [run_from(op2, prof[k], 30) for k in range(2)]   # deliberately no reset
+        leak = float(np.abs(noreset[1] - fresh[1]).max())
+        print(f"  without reset, piece 2 is contaminated by piece 1 by {leak:.3g}"
+              + ("   <- so the reset is load-bearing" if leak > 0 else
+                 "   (zero at lag=0, as expected: the operator is stateless there)"))
+
+        # ---- empirical stability: a delayed feedback is not covered by spectral_bound
+        op3 = CouplingOperator(c, Wr, a.lam, a.lag)
+        op3.reset()
+        s.coupling = op3
+        rr = np.random.default_rng(3)
+        hh = rr.standard_normal(c.nV).astype(np.float32)
+        uu = np.zeros(s.nE, np.float32)
+        area = np.asarray(c.A, float)
+        e0 = None
+        for n in range(a.energy_steps):
+            uu, hh = s.step(uu, hh, dtD, g, Hf)
+            if n % (a.energy_steps // 4) == 0 or n == a.energy_steps - 1:
+                e = float(area @ (hh.astype(float) ** 2))
+                if e0 is None:
+                    e0 = max(e, 1e-300)
+                print(f"    step {n:6d}  depth energy {e:.4e}  ({e/e0:8.3e} x start)"
+                      + ("   NOT FINITE" if not np.isfinite(e) else ""))
+        print(f"  energy bounded over {a.energy_steps} steps at lam={a.lam}, "
+              f"lag={a.lag}: {np.isfinite(e) and e <= e0}")
 
 
 if __name__ == "__main__":

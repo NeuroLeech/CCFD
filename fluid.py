@@ -102,12 +102,49 @@ def group_field(cortex, values, smooth=12):
     return f
 
 
+def patch_field(cortex, parcels, factor, smooth=8):
+    """Per-vertex multiplier: `factor` inside `parcels`, 1 outside, smoothly joined.
+
+    The map parameterisation cannot express a regional change at all. Speed and damping
+    are sig0*exp(b.M) over three z-scored whole-cortex maps with coefficients capped at
+    COEF_LIM, so every reachable pattern is a smooth gradient spanning about x0.25 to x4,
+    and "damp this parcel to nothing" is not in the family. That is a property of the
+    parameterisation, not of the solver: RotSWE.set_sponge already takes an arbitrary
+    per-vertex damping array and applies it IMPLICITLY, so any strength is stable - it is
+    how the absorbing boundary works.
+
+    Smoothed in the LOG so the multiplier stays positive and the ramp is geometric rather
+    than linear; a hard step would put a cliff in the medium and reflect waves off it,
+    which is a numerical artefact rather than the effect being tested."""
+    lab = np.asarray(cortex.lab)
+    g = np.zeros(cortex.nV)
+    g[np.isin(lab, np.asarray(parcels))] = np.log(max(float(factor), 1e-12))
+    E = cortex.edges
+    deg = np.bincount(E.ravel(), minlength=cortex.nV).astype(float)
+    deg[deg == 0] = 1.0
+    for _ in range(int(smooth)):
+        acc = np.zeros(cortex.nV)
+        np.add.at(acc, E[:, 0], g[E[:, 1]])
+        np.add.at(acc, E[:, 1], g[E[:, 0]])
+        g = 0.5 * g + 0.5 * acc / deg
+    return np.exp(g)
+
+
 def fields(cortex, p):
-    """-> (wave speed, damping) per vertex, whichever parameterisation p came from."""
+    """-> (wave speed, damping) per vertex, whichever parameterisation p came from.
+
+    `damp_patch` / `speed_patch` are (parcels, factor) pairs applied on top, and are the
+    only way to change the medium REGIONALLY - see patch_field."""
     if p.get("mode") == "maps":
-        return map_fields(cortex, p)
-    return (p["c0"] * group_field(cortex, p["c_group"]),
-            p["sig0"] * group_field(cortex, p["sig_group"]))
+        c, sig = map_fields(cortex, p)
+    else:
+        c = p["c0"] * group_field(cortex, p["c_group"])
+        sig = p["sig0"] * group_field(cortex, p["sig_group"])
+    if p.get("damp_patch"):
+        sig = sig * patch_field(cortex, *p["damp_patch"])
+    if p.get("speed_patch"):
+        c = c * patch_field(cortex, *p["speed_patch"])
+    return c, sig
 
 
 def build(cortex, p, sponge=True, dt=None, coupling=None):
@@ -142,6 +179,9 @@ def build(cortex, p, sponge=True, dt=None, coupling=None):
 def run(cortex, drive, p, nsteps, save_every=25, sponge=True, dt=None, coupling=None):
     """Integrate with spatially varying speed and damping. -> (frames, dt)."""
     s, dt, g, Hf = build(cortex, p, sponge, dt, coupling)
+    if s.coupling is not None:
+        s.coupling.reset()          # the operator is stateful when lagged, and callers
+                                    # reuse one across draws; see CouplingOperator.reset
     Aser = drive.Aser.astype(np.float32)
     P = drive.P.astype(np.float32)
     h = np.zeros(cortex.nV, np.float32)

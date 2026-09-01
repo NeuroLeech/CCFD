@@ -42,10 +42,12 @@ every candidate is realised and simulated before any number is quoted.
 | `fc_centre.py` | double-centring: the linear analogue of global signal regression |
 | `fc_score.py` | `FCTarget`: alignment, edge sample, Spearman score |
 | `fc_moran.py` | spatial autocorrelation match, as a diagnostic |
+| `family.py` | the family of inputs consistent with the target, not just the argmax |
 | `fc_states.py` | windowed-FC states, occupancy, dwell, transitions |
 | `reliability.py` | split-half reliability of the target, and the ceiling it implies |
 | `holdout.py` | solve on one half of the subjects, score on the other |
 | `reach.py` | can this fluid produce the target's patterns at all? |
+| `diag_maps.py` | where the fit fails, drawn on the surface |
 | **input, by hand** | |
 | `input2.py` | input as K regions with timecourses supplied directly |
 | `input_model.py` | input as K regions driven through r shared latent factors |

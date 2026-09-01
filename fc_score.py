@@ -93,10 +93,17 @@ def vertices_path(fc_path):
     return re.sub(r"_(spearman|pearson)(dc)?fc\.npy$", "_vertices.npy", fc_path)
 
 
-def _rank_z(X):
-    """Rows -> rank transformed, zero mean, unit variance. Flat rows come back all zero,
-    which makes their correlation with everything exactly 0."""
-    R = rankdata(X, axis=1).astype(np.float32)
+def _rank_z(X, rank=True):
+    """Rows -> (optionally rank transformed,) zero mean, unit variance. Flat rows come
+    back all zero, which makes their correlation with everything exactly 0.
+
+    `rank=False` skips the rank transform, which is what a Pearson target needs. The
+    transform is not a detail: it is a NONLINEAR map, so with it in place the model's FC
+    is not a linear function of the field, concatenated segments do not have additive
+    covariance, and a lagged covariance is not the inverse transform of the model's
+    cross-spectrum. Everything downstream of xspec assumes that linearity."""
+    R = (rankdata(X, axis=1).astype(np.float32) if rank
+         else np.ascontiguousarray(X, np.float32))
     R -= R.mean(1, keepdims=True)
     sd = R.std(1, keepdims=True)
     flat = (sd == 0).ravel()
@@ -171,11 +178,17 @@ class FCTarget:
         return v / n if n > 0 else v
 
     def model_z(self, frames):
-        """Rank z-scored model rows (V, T) - the one thing every model quantity needs."""
-        return _rank_z(np.ascontiguousarray(frames[self.burn:, self.cols].T))
+        """z-scored model rows (V, T), rank transformed iff the metric is Spearman.
+
+        Keyed off the metric so the model side matches the target side by construction;
+        scoring rank-transformed model rows against a Pearson target would be measuring
+        neither quantity."""
+        return _rank_z(np.ascontiguousarray(frames[self.burn:, self.cols].T),
+                       rank=(self.metric == "spearman"))
 
     def model_edges(self, frames=None, chunk=250_000, Z=None, flat=None):
-        """Model Spearman FC evaluated only on the sampled edges -> (n_edges,) float32."""
+        """Model FC on the sampled edges -> (n_edges,) float32. Spearman or Pearson
+        according to self.metric, which model_z has already honoured."""
         if Z is None:
             Z, flat = self.model_z(frames)
         T, V = Z.shape[1], Z.shape[0]

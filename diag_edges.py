@@ -16,7 +16,7 @@ import numpy as np
 from scipy.stats import spearmanr
 
 from mesh_cache import load_cortex
-from fc_score import FCTarget
+import fc_score
 from paths import RESULTS
 import units
 
@@ -29,7 +29,11 @@ def main():
     a = ap.parse_args()
 
     c = load_cortex("fsaverage5", verbose=False)
-    t = FCTarget(c, verbose=False)
+    # default_target, NOT FCTarget(c): the bare constructor loads the
+    # pre-double-centred file with centre='none', which centres the target and
+    # leaves the model un-centred - the exact asymmetry f409535 fixed in the
+    # scoring path. A diagnostic run that way describes a matrix nobody fits.
+    t = fc_score.default_target(c, verbose=False)
     rng = np.random.default_rng(a.seed)
     v = np.sort(rng.choice(t.nV, a.nvert, replace=False))
 

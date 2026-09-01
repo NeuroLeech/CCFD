@@ -27,6 +27,23 @@ AUD = [24, 173, 174, 124, 104]
 SENSORY = SOM + VIS + AUD
 DMN = [150, 151, 132, 30, 33, 65, 88]          # the association parcels of the old 19-set
 
+# Parcels grouped by the thalamic nucleus that drives them, from
+# AlternateListOfInputs.json. This is an ALTERNATIVE HYPOTHESIS about where patterned
+# input enters, not a relaxation of one: `spread` picks parcels by farthest-point
+# geometry and is the input prior switched off, whereas this names a mechanism.
+#
+# LGN -> V1; MGN -> A1; VPL/VPM -> 3b, 1; VA/VL -> 4, 6a, 6mp; pulvinar -> IP1, 7AL, PIT;
+# mediodorsal -> 9-46d, 46, d32; limbic/amygdala -> 25, OFC, EC; insular -> AAIC.
+#
+# Two entries were not Glasser labels and were resolved by hand: "SMA" -> 6mp (medial
+# area 6 posterior) and "AI" -> AAIC (anterior agranular insula complex).
+#
+# It overlaps SENSORY only at V1, 4, 3b, A1, 1. The ten it adds are where the sensory
+# model measurably fails - against a whole-cortex mean accuracy of +0.629: PIT +0.350,
+# 9-46d +0.394, EC +0.401, OFC +0.408, 25 +0.430, 46 +0.529, d32 +0.546, IP1 +0.619,
+# 6a +0.676, 7AL +0.828.
+SUBCORTICAL = [1, 24, 9, 51, 8, 96, 55, 145, 42, 22, 86, 84, 62, 164, 93, 118, 112]
+
 
 def spread_sample(cortex, budget, exclude=(), verbose=True):
     """Parcels spread evenly over the whole cortex, totalling about `budget` mm2.
@@ -174,6 +191,11 @@ def region_set(cortex, name, split, scale=1.0):
         return DMN, int(round(A(DMN) / piece))
     if name == "sensory+dmn":
         ps = SENSORY + DMN
+        return ps, int(round(A(ps) / piece))
+    if name == "subcortical":
+        return SUBCORTICAL, int(round(A(SUBCORTICAL) / piece))
+    if name == "subcortical+sensory":
+        ps = sorted(set(SUBCORTICAL) | set(SENSORY))
         return ps, int(round(A(ps) / piece))
     ps = spread_sample(cortex, A(SENSORY) * scale, exclude=SENSORY + DMN)
     return ps, int(round(A(ps) / piece))

@@ -34,6 +34,13 @@ def main():
     ap.add_argument("--window", type=int, default=280,
                     help="impulse frames before padding; must exceed the decay time or "
                          "the response is truncated and the transfer function is wrong")
+    ap.add_argument("--coupling", type=float, default=0.0,
+                    help="long-range structural coupling strength (0 = off)")
+    ap.add_argument("--coupling-lag", type=int, default=0, dest="coupling_lag")
+    ap.add_argument("--coupling-keep", type=float, default=0.15, dest="coupling_keep")
+    ap.add_argument("--coupling-mm", type=float, default=60.0, dest="coupling_mm")
+    ap.add_argument("--coupling-surrogate", type=int, default=None,
+                    dest="coupling_surrogate", metavar="SEED")
     a = ap.parse_args()
 
     c = load_cortex("fsaverage5", verbose=False)
@@ -49,9 +56,27 @@ def main():
     print(f"  rotation per step {10**x[1]:.2e}  (Ld {p['Ld']:.4g}), "
           f"damping {10**x[0]:.2e}, {len(P)} pieces")
 
+    # NOTE: whitening is deliberately absent. It is a change of variables in the CHANNEL
+    # space - H L^-H - so it multiplies H on the right by an invertible matrix and leaves
+    # the column span, and therefore this ceiling, exactly unchanged. Whitening changes
+    # what the solver REACHES, not what is reachable. Coupling is the term that can
+    # actually move the span, which is why it is the one exposed here.
+    cpl = None
+    if a.coupling > 0:
+        import connectome
+        D180 = connectome.parcel_distances(c, verbose=False)
+        Wr = connectome.residual_W(connectome.load_enigma(c, verbose=False), D180,
+                                   a.coupling_keep, a.coupling_mm, verbose=False)
+        if a.coupling_surrogate is not None:
+            Wr = connectome.surrogate_W(Wr, D180, seed=a.coupling_surrogate,
+                                        verbose=False)
+        cpl = connectome.CouplingOperator(c, Wr, a.coupling, a.coupling_lag)
+        print(f"  coupling lam {a.coupling:g}, lag {a.coupling_lag} steps"
+              + ("  [SURROGATE]" if a.coupling_surrogate is not None else ""))
+
     sub = xspec.medoid_subset(t, a.nvert)
     resp = xspec.impulse_responses(c, list(range(len(P))), p, a.window * save, save,
-                                   profiles=P, verbose=False)
+                                   profiles=P, verbose=False, coupling=cpl)
     R = np.pad(resp, ((0, 0), (0, max(0, 1120 - resp.shape[1])), (0, 0)))
     H, w, idx = xspec.transfer(R, t.cols[sub], a.nfreq)
     nf, nV, K = H.shape
