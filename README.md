@@ -20,6 +20,27 @@ Scoring is against the 99-subject NKI group FC on fsaverage5, double-centred,
 by Spearman over a fixed 2M edge sample. A solve correlation is not a score:
 every candidate is realised and simulated before any number is quoted.
 
+## What it looks like
+
+<video src="https://github.com/NeuroLeech/CCFD/raw/main/docs/best_field.mp4" controls muted loop playsinline width="900"></video>
+
+[`docs/best_field.mp4`](docs/best_field.mp4) — the best fit to date. Depth `h` on the
+left fsaverage5 inflated surface (lateral, medial, dorsal), with the six loudest drive
+channels traced underneath and a cursor on the current frame. The colour scale is fixed
+across the clip, so amplitude is comparable frame to frame rather than renormalised.
+600 saved frames — 97 s of the 577 s realisation — at 20 fps, about 3.2x real time.
+
+The run is the `Current best` of `PLAN.md`: 47 subcortically driven pieces over
+8,542 mm², spread 6 mm/s, decay 9.03 s pinned to the NKI autocorrelation, scoring
+**+0.7204 ± 0.0009** Spearman over 2M edges. To rebuild it:
+
+```bash
+python best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
+  --pad 4096 --impulse-frames 224 --iters 400 --val-vert 0 --draws 2 \
+  --regions subcortical --split 40 --profile taper
+python render_frames.py --tag pr_taper --start 200 --n 600 --save 16 --fps 20
+```
+
 ## Layout
 
 | file | what it does |
