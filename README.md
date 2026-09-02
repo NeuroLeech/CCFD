@@ -22,13 +22,17 @@ every candidate is realised and simulated before any number is quoted.
 
 ## What it looks like
 
-<video src="https://github.com/NeuroLeech/CCFD/raw/main/docs/best_field.mp4" controls muted loop playsinline width="900"></video>
+[![the best fit, on the surface](docs/best_field.gif)](docs/best_field.mp4)
 
-[`docs/best_field.mp4`](docs/best_field.mp4) — the best fit to date. Depth `h` on the
-left fsaverage5 inflated surface (lateral, medial, dorsal), with the six loudest drive
-channels traced underneath and a cursor on the current frame. The colour scale is fixed
-across the clip, so amplitude is comparable frame to frame rather than renormalised.
-600 saved frames — 97 s of the 577 s realisation — at 20 fps, about 3.2x real time.
+The loop above is the first 15 s, surfaces only. GitHub strips `<video>` out of rendered
+READMEs, so the full clip is a link rather than a player:
+[`docs/best_field.mp4`](docs/best_field.mp4) — 30 s, with the drive traced underneath.
+
+Both show depth `h` on the left fsaverage5 inflated surface, lateral / medial / dorsal,
+on a colour scale held fixed across the clip so amplitude stays comparable frame to frame
+instead of being renormalised. The mp4 adds the six loudest drive channels underneath,
+with a cursor on the current frame. It covers 600 saved frames of the 3,578-frame
+realisation — 97 s of 577 s — at 20 fps, about 3.2x real time.
 
 The run is the `Current best` of `PLAN.md`: 47 subcortically driven pieces over
 8,542 mm², spread 6 mm/s, decay 9.03 s pinned to the NKI autocorrelation, scoring
