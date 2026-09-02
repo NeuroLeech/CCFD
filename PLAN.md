@@ -15,13 +15,15 @@ simulated time against FC computed from 577 s of data.
 ## Current best
 
 ```bash
-python best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 3 --bold-smooth \
-  --pad 4096 --impulse-frames 224 --iters 400 --val-vert 0 --draws 3 \
-  --regions subcortical --split 40
+python best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
+  --pad 4096 --impulse-frames 224 --iters 400 --val-vert 0 --draws 2 \
+  --regions subcortical --split 40 --profile taper
 ```
 
-**+0.6679 ± 0.0033** Spearman over 2M edges, 577 s realisation, Moran gap 0.064, field
-rank 29.4. Sensory at matched channel count gives +0.5695 ± 0.0162.
+**+0.7204 ± 0.0009** Spearman over 2M edges, 577 s realisation, Moran gap 0.060, field
+rank 22.1; 47 pieces driving 8,542 mm². The same configuration at `--spread-mm-s 3` gives
++0.6679 ± 0.0033, and sensory at matched channel count and spread 3 gives +0.5695 ± 0.0162.
+Spread was swept and 6 mm/s is where that sweep peaked (reach = spread × decay = 53 mm).
 
 `--val-vert 0` matters: without it, `best_fit` turns on early stopping against a held-out
 COVARIANCE, which stopped the sensory arm at step 5 of 400 while subcortical ran to 399.
@@ -115,9 +117,12 @@ zero-lag block is a GSR'd target while the score is not.
 
 ---
 
-## 3. Ruled out
+## 3. Measured, with the conditions that were tested
 
-Each of these was measured, and each is a reason not to spend effort there.
+Each row is a measurement at the configuration named, not a general claim. A null here
+means the effect did not appear THERE — at that parameter range, that region set, that
+clock — and several entries have already changed sign when the clock changed. Read the
+conditions before reusing any of them as a reason to skip something.
 
 | candidate | measurement |
 |---|---|
@@ -125,7 +130,8 @@ Each of these was measured, and each is a reason not to spend effort there.
 | **reachable span** | 0.952 at 400 directions on the retuned medium (0.960 old clock) |
 | **target reliability** | ceiling +0.9679; per-vertex mean 0.9218 |
 | **restricting the fit to reliable vertices** | +0.0056 ± 0.0030 on held-out reliable vertices (1.8 sd), −0.045 on all vertices |
-| **structural connectivity** | monotone worse: +0.5695 → 0.4953 for λ = 0 → 3 |
+| **structural connectivity, long-range** | monotone worse: +0.5695 → 0.4953 for λ = 0 → 3 *(old clock)*; on the fMRI clock, +0.7204 uncoupled → +0.7162 at λ=0.30 |
+| **structural connectivity, incl. short fibres** | `--coupling-mm 10 --coupling-keep 1.0`: +0.7117 / +0.7011 / +0.6788 at λ = 0.02 / 0.04 / 0.08. At matched perturbation strength (dt·bound 0.0139 vs 0.0136) short+long is +0.6788 against long-only's +0.7162. **The per-edge-length breakdown was not run**, so whether the 10–30 mm band moved is unmeasured |
 | **unsupervised denoising** | PCA saturates at K=50 and never beats no truncation; bandpass −0.033 and GSR −0.008 on split-half reliability |
 | **MSC as an alternative dataset** | see below |
 | **whitening** | +0.006 old clock, **−0.219** on the fMRI clock (rank 15.2 → 6.8) |
@@ -167,8 +173,8 @@ scored:
 
 An input through effectively **1.9 of 47 pieces** scores as well as one spread over 29.6.
 Realised score spans 0.0139 while spatial concentration spans **22×**. Four of the six are
-indistinguishable. Max-entropy is the WORST despite the highest rank, which kills the idea
-that "field rank tracks the score" carries from stopping points to the family.
+indistinguishable. Max-entropy is the WORST despite the highest rank, so "field rank
+tracks the score" — which holds across stopping points — does not carry to the family.
 
 ### The gap, decomposed *(old clock, `ceiling.py`)*
 
@@ -189,14 +195,154 @@ NEGATIVE: neither architecture (0.0075) nor target noise (0.0321) can account fo
 
 ---
 
-## 4. Open
+## 4. The 10-30 mm band
+
+Accuracy split by the geodesic distance between an edge's endpoints has a minimum at
+10-30 mm. It is the deepest feature in the fit and it has not moved under anything tried.
+
+### The curve, across input parameterisations
+
+Taper vs fixed-width Gaussian kernels, subcortical, spread 6, 47 pieces (`/tmp/prof.sh`):
+
+| config | area driven | realised | 0-10 | 10-20 | 20-30 | 30-40 | 40-60 | 60-80 | 80-120 | 120-250 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| taper | 8,542 mm² | +0.7204 ± 0.0009 | 0.635 | 0.530 | **0.512** | 0.628 | 0.722 | 0.714 | 0.696 | 0.685 |
+| gauss 10 masked | 8,394 | +0.7199 ± 0.0024 | 0.640 | **0.518** | 0.524 | 0.638 | 0.723 | 0.712 | 0.689 | 0.685 |
+| gauss 10 unmasked | 16,793 | +0.7256 ± 0.0003 | 0.639 | 0.529 | **0.536** | 0.650 | 0.729 | 0.720 | 0.698 | 0.698 |
+| gauss 16 unmasked | 29,620 | +0.7307 ± 0.0023 | 0.613 | 0.555 | **0.525** | 0.646 | 0.733 | 0.720 | 0.706 | 0.704 |
+
+At matched area, profile SHAPE moves the score by less than the draw scatter. Coverage
+lifts the tails (120-250 mm: 0.685 → 0.704) without filling the notch; widening to
+29,620 mm² is a soft version of switching the input prior off, for +0.010.
+
+The notch also survived piece diameter 9-22 mm, medium reach 14-54 mm, and the coupling
+term (section 3). Five parameterisations spanning input geometry, input extent, medium
+transport and an added anatomical term, with the band's position unchanged in all of them.
+
+### It is not a scoring artefact (`band_ceiling.py`)
+
+Per-vertex band accuracy is a Spearman over that vertex's own annulus — median 120
+partners — so the obvious worry is that there is too little spread within an annulus to
+rank. Measured against the same estimator as the target: 99 subjects split in half, group
+FC per half, full-matrix double centring, then read out on the band.
+
+| | value |
+|---|---|
+| band ceiling (half A vs half B), mean | **+0.9119** |
+| model band accuracy, mean | +0.5793 |
+| shortfall | **+0.3326** |
+| corr(model band accuracy, ceiling) | **−0.010** |
+| corr(model band accuracy, target sd within annulus) | +0.111 |
+| corr(model band accuracy, per-vertex reliability) | +0.074 |
+
+Where the data is reliable has no relationship to where the model fails. The failing
+parcels have high ceilings — VVC 0.954, area 1 0.938, OFC 0.930, VMV3 0.917, LBelt 0.910,
+A4 0.889 — giving shortfalls up to +1.02.
+
+**Nuisance controls have to be the right statistic.** `band_fail.py` first tested mean
+|target FC| in the band (−0.021) and called the artefact unlikely; the quantity a rank
+correlation over an annulus actually depends on is the SPREAD within it, and that needed
+the split-half run to settle.
+
+### Where it fails (`band_fail.py`)
+
+All 9,217 vertices, each scored on its own 10-20 mm annulus, taper run.
+
+- Band accuracy mean +0.5793 against all-partner +0.6952, and the two correlate at only
+  **+0.270** — a different spatial pattern, not a projection of the global one.
+- Worst AT the drive and improving away from it: +0.535 (0-1 mm from the nearest driven
+  vertex), +0.554, +0.569, +0.604 (10-20 mm), +0.593, +0.580, +0.614. The all-partner
+  curve is flat across the same bins.
+- Model |FC| in the band is ~2x the target's at every distance (0.46-0.54 vs 0.25-0.30).
+- Worst parcels, with their all-partner accuracy alongside: VVC −0.068/+0.489,
+  A4 −0.006/+0.516, 23d +0.031/+0.298, LBelt +0.123/+0.665, PBelt +0.140/+0.614,
+  VMV3 +0.159/+0.582, 25 +0.243/+0.813, OFC +0.247/+0.460, EC +0.256/+0.360,
+  V8 +0.259/+0.450, area 1 +0.286/+0.697, OP4 +0.305/+0.780.
+- Best: 7AL +0.870, STGa +0.869, 9a +0.850, AIP +0.846, PGi +0.839, 7PC, 6d, LIPv, PGs,
+  PHT, PF, PFm — parietal and lateral prefrontal.
+- Grouped by the input parcel a vertex sits NEAREST: OFC +0.412, 25 +0.415, A1 +0.450,
+  EC +0.459, 3b +0.463, V1 +0.485 at the bottom; 7AL +0.742, 9-46d +0.718, 6a +0.714,
+  IP1 +0.710, 46 +0.656 at the top. Primary sensory and orbitofrontal/limbic drives are
+  the bad neighbourhoods, association drives the good ones.
+
+The parcel list clusters where a primary area abuts its belt — A1/A4/LBelt/PBelt,
+V1/V8/VVC/VMV3, 3b/area 1/OP4.
+
+### Local over-smoothing does not explain it (`band_homog.py`)
+
+Local homogeneity = mean profile correlation with the vertex's band partners, model and
+target measured the same way over 2,000 common partners.
+
+| | target | model | excess |
+|---|---|---|---|
+| 10-20 mm homogeneity | +0.6887 | +0.7618 | +0.0731 |
+
+The model IS smoother on average, and that excess does not locate the failure:
+corr(band accuracy, excess) **+0.068**. The distance profile runs the other way — excess
+−0.016 at the drive where the fit is worst, rising monotonically to +0.138 at 30-40 mm
+where it is fine. At the failing parcels the sign is mostly negative (LBelt −0.114,
+V8 −0.091, PBelt −0.083, OFC −0.074), while two of the best-fitting carry the largest
+excesses (STGa +0.190, PHT +0.169).
+
+What does align, weakly, is target homogeneity: the failing parcels sit at 0.83-0.89 and
+the best at 0.50-0.68, corr −0.124. Not pursued further.
+
+### The mesh is not the limit (`spatial_scale.py`, `mesh_check.py`, `mesh_transfer.py`)
+
+The impulse-response fields fall to r = 0.5 over **7.6 mm**, under three fsaverage5 vertex
+spacings (mean nearest-neighbour 2.90 mm), which is close enough to the grid to be worth a
+convergence check.
+
+The same CONTINUUM medium `p` was integrated on fsaverage6 — every rate in `p` is per unit
+time, so the finer mesh takes its own smaller timestep from the CFL bound and the physics
+per second is unchanged; `save` 16 → 40 holds the frame at 0.1613 s (matched to +0.07%).
+fsaverage5's vertices nest exactly inside fsaverage6 (9,373 shared, white coordinates
+agreeing to 1.4 µm), so readout needs no interpolation; the drive is carried the other way
+by nearest neighbour. 20 min for 47 pieces.
+
+| | fs5 | fs6 |
+|---|---|---|
+| autocorrelation at 10-15 mm | +0.270 | +0.272 |
+| at 15-20 mm | +0.143 | +0.149 |
+| r = 0.5 at | 7.62 mm | 7.51 mm |
+| rms amplitude | 1.000 | 1.003 |
+| transfer function \|corr\|, 0.01-0.1 Hz | — | **0.973** (phase < 3°, gain within 1.3%) |
+
+Four times the vertices produces no finer spatial structure, and the transfer function the
+solve consumes is unchanged in the band. The 7.6 mm scale is the physics of this medium at
+spread 6, not the grid.
+
+The time-domain responses DO diverge — +0.946 at one frame, +0.386 by the 9 s decay,
++0.029 at 36 s — but that is accumulated phase error above the band, and it is confounded:
+the two inflated surfaces are separate inflations a median 3 mm apart, a ~6% path-length
+difference over 50 mm, so refinement and metric cannot be separated by this run. The
+autocorrelation and transfer-function results are statistics over the whole sheet and are
+insensitive to that perturbation, which is why they carry the conclusion and the pointwise
+correlation does not.
+
+### What has not been tested here
+
+- **Data-driven splitting** (section 5.2) — the one lever from the original list that
+  changes WHICH vertices are grouped rather than the geometry of the grouping.
+- **A connectivity term at piece scale.** The coupling operator acts on parcel means
+  (median 18 mm), so it cannot represent anything below its own resolution — which is the
+  scale of the band.
+- **The short-fibre coupling arms broken out by edge length.** The scalars are in
+  section 3; the per-band curves that would say whether they moved the notch were never
+  computed.
+
+---
+
+## 5. Open
 
 1. **The edge distribution.** The model saturates: the binned mean tracks the diagonal to
    empirical FC ≈ 0.2 then flattens, returning ~+0.28 where the data has +0.6. It is also
    over-dispersed overall (edge sd ratio 1.44 sensory, 1.60 subcortical) and shows a
    population of false-positive strong edges. `plot_edges.py`. Not itemised anywhere in the
    ceiling budget — this is the live question.
-2. **Data-driven splitting.** `split_parcels` bisects the MESH graph by Fiedler vector, so
+2. **Data-driven splitting.** The remaining untested lever on the 10-30 mm band
+   (section 4), and the only one that changes which vertices are grouped rather than the
+   geometry of the grouping. `split_parcels` bisects the MESH graph by Fiedler vector, so
    pieces are equal-area and follow geometry alone. Clustering vertices on their FC profile
    instead would let pieces follow functional boundaries; `xspec.medoid_subset` already
    does that clustering for a neighbouring purpose. Pairs naturally with the subcortical
@@ -217,7 +363,7 @@ NEGATIVE: neither architecture (0.0075) nor target noise (0.0321) can account fo
 
 ---
 
-## 5. Debugging lessons
+## 6. Debugging lessons
 
 Five errors this session were caught only by a check run AFTER a conclusion had been
 reported. Each check was minutes of work.
@@ -244,13 +390,18 @@ operations in the other order.
 **Check what a parameter does before choosing its range.** The λ ≤ 0.03 connectome screen
 tested a term that moves the field by under 8%.
 
+**Do not write verdicts.** A null at one configuration is a null AT that
+configuration. Section 3 was headed "Ruled out" and several of its entries had already
+changed sign across the clock retune. Record the measurement and the conditions; let the
+reader decide what it forecloses.
+
 **Report scatter, not means.** A "real trade" was claimed from 2 draws with no spread
 measured; the FC cost turned out to be 1.8 sd. Separately, a ±0.016 scatter was carried
 across from a different configuration where the true value was ±0.005.
 
 ---
 
-## 6. Things to keep reporting
+## 7. Things to keep reporting
 
 Multi-draw mean **and** scatter; solve correlation (Pearson and Spearman vs the raw
 target); Moran gap; field rank; and the realisation length in SECONDS as well as frames.
@@ -263,7 +414,7 @@ comparison.
 
 ---
 
-## 7. Theory
+## 8. Theory
 
 **Coalitions do not respect geometry.** Offset-vs-geodesic correlation is +0.39–0.45 at 19
 whole parcels and collapses to +0.01–0.28 at 47 sensory pieces, +0.03–0.17 at spread. Not
@@ -288,7 +439,7 @@ eigenvalue signs of `A·X_emp + X_emp·A*` with no fitting at all.
 
 ---
 
-## 8. Code map
+## 9. Code map
 
 | file | role |
 |---|---|
@@ -310,6 +461,11 @@ eigenvalue signs of `A·X_emp + X_emp·A*` with no fitting at all.
 | `diag_span.py`, `diag_residual.py` | reachable span; is the residual reachable |
 | `vertex_quality.py`, `subject_fit.py` | per-vertex ceiling; single-subject rank and ceiling |
 | `csd_probe.py` | is there consistent lead-lag in the data at all |
+| `band_fail.py` | per-vertex accuracy inside one edge-length band; parcels, distance to drive, nearest input parcel |
+| `band_ceiling.py` | split-half reliability of a vertex's band profile — the ceiling that band accuracy is scored against |
+| `band_homog.py` | local homogeneity of model and target profiles over a band |
+| `spatial_scale.py` | the spatial scale the fields actually carry, against mesh spacing |
+| `mesh_check.py`, `mesh_transfer.py` | fsaverage5 vs fsaverage6 on the same continuum medium; fields and transfer function |
 | **experiments** | |
 | `family.py` | members of the admissible family; realisation laws; input bands |
 | `lagfit.py` | lagged objective, realised and scored; `--wa` sweep |

@@ -201,6 +201,61 @@ def region_set(cortex, name, split, scale=1.0):
     return ps, int(round(A(ps) / piece))
 
 
+def gauss_profiles(cortex, labels, n_pieces, fwhm=10.0, cut=1e-3, mask=None,
+                   verbose=True):
+    """Fixed-width Gaussian profiles centred on each piece's core. -> (n_pieces, nV).
+
+    `taper_profiles` normalises each piece's erosion depth by that piece's OWN maximum, so
+    the input's spatial smoothness is a side effect of how finely the parcels were cut: a
+    165 mm2 piece falls to half amplitude 6.2 mm from its peak, a 78 mm2 piece at 2.3 mm.
+    Changing the piece count therefore changes two things at once, which makes a piece-count
+    sweep uninterpretable. It also leaves the profiles DISJOINT and tapering to zero at
+    every border, so the total drive is a honeycomb - 24.6% of the driven area gets under
+    half the peak, and a spatially uniform input over a driven region cannot be expressed
+    at all.
+
+    Here the width is a parameter in millimetres and the same for every piece, so piece
+    count controls only how many channels there are. Profiles overlap, which removes the
+    seams, and they are free to extend past the parcel boundary - a thalamic projection
+    does not stop at an atlas edge. `mask` restricts them if that is not wanted.
+
+    Distance is white-surface geodesic, so `fwhm` is real millimetres."""
+    import units
+    sigma = float(fwhm) / 2.3548
+    cen = []
+    for i in range(n_pieces):
+        v = np.flatnonzero(labels == i)
+        if not len(v):
+            cen.append(0)
+            continue
+        # the piece's core: the vertex furthest from its own border, by erosion depth
+        from input2 import _erode_once
+        nb = np.zeros(cortex.nV)
+        np.add.at(nb, cortex.edges[:, 0], 1)
+        np.add.at(nb, cortex.edges[:, 1], 1)
+        depth = np.zeros(cortex.nV)
+        cur, k = (labels == i), 0
+        while cur.any():
+            k += 1
+            depth[cur] = k
+            cur = _erode_once(cur, cortex.edges, nb, cortex.nV)
+        cen.append(int(v[np.argmax(depth[v])]))
+    D = units.vertex_geodesic(cortex, np.asarray(cen, int))      # (n_pieces, nV), mm
+    P = np.exp(-0.5 * (D / max(sigma, 1e-9)) ** 2).astype(np.float32)
+    P[P < cut] = 0.0
+    if mask is not None:
+        P = P * np.asarray(mask, np.float32)[None, :]
+    if verbose:
+        tot = P.sum(0)
+        on = tot > cut
+        area = np.asarray(cortex.A, float)
+        print(f"  gaussian profiles: FWHM {fwhm:g} mm, {n_pieces} pieces, "
+              f"{int(on.sum())} vertices touched ({area[on].sum():.0f} mm2)")
+        print(f"    total drive where touched: min {tot[on].min():.3f}, "
+              f"mean {tot[on].mean():.3f}, max {tot[on].max():.3f}")
+    return P
+
+
 def taper_profiles(cortex, labels, n_pieces):
     """Smooth profile per piece: 1 at its core, 0 at its border, same recipe as
     input2.parcel_tapers but for arbitrary vertex sets."""

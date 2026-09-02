@@ -287,6 +287,17 @@ def main():
     ap.add_argument("--bold-smooth", action="store_true", dest="bold_smooth",
                     help="low-pass the field to the fMRI Nyquist before scoring, with "
                          "the same kernel folded into the transfer function")
+    ap.add_argument("--profile", default="taper", choices=("taper", "gauss"),
+                    help="driven-region shape. 'taper' is the smoothstep whose width is "
+                         "set by the piece's own size; 'gauss' is a fixed-width kernel in "
+                         "mm, so piece count controls channels only")
+    ap.add_argument("--profile-fwhm", type=float, default=10.0, dest="profile_fwhm",
+                    help="FWHM in mm for --profile gauss")
+    ap.add_argument("--profile-mask", action="store_true", dest="profile_mask",
+                    help="restrict gaussian profiles to the driven parcels, so the "
+                         "driven AREA matches the taper version and only the shape "
+                         "differs. Without it a wide kernel drives far more cortex and "
+                         "coverage is confounded with profile shape")
     ap.add_argument("--tag", default="best")
     ap.add_argument("--best", action="store_true",
                     help="the pinned best sensory-only configuration (see BEST). Any "
@@ -308,7 +319,9 @@ def main():
     mm = MoranMatch(c, t)
     parcels, split = subparcels.region_set(c, a.regions, a.split, a.spread_scale)
     labels, tags = subparcels.split_parcels(c, parcels, split, verbose=False)
-    P = subparcels.taper_profiles(c, labels, len(tags))
+    P = (subparcels.taper_profiles(c, labels, len(tags)) if a.profile == "taper"
+         else subparcels.gauss_profiles(c, labels, len(tags), a.profile_fwhm,
+                                        mask=(labels >= 0) if a.profile_mask else None))
     x = BEST_X.copy()
     clock = None
     if a.oversample:

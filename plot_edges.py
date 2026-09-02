@@ -60,12 +60,16 @@ def main():
         ax.plot(xs, np.polyval(np.polyfit(y, x, 1), xs), color="#3ec1d3", lw=1.6,
                 label=f"fit, slope {b:.2f}")
         # binned mean of the model within deciles of the target
+        # x-coordinate must be the empirical MEAN in the bin, not the midpoint of the
+        # quantile edges. The top bin spans q95 to the maximum and is strongly skewed, so
+        # its midpoint sits far above its mean and the point falls below the diagonal for
+        # that reason alone - which manufactures an apparent saturation that is not there.
         qs = np.quantile(y, np.linspace(0, 1, 21))
         ctr, mn = [], []
         for lo, hi in zip(qs[:-1], qs[1:]):
             m = (y >= lo) & (y < hi)
             if m.sum() > 50:
-                ctr.append(0.5 * (lo + hi)); mn.append(x[m].mean())
+                ctr.append(y[m].mean()); mn.append(x[m].mean())
         ax.plot(ctr, mn, "o-", color="#7CFC00", ms=3.5, lw=1.4, label="binned mean")
         ax.set_xlabel("empirical FC (double-centred)")
         if k == 0:
