@@ -24,8 +24,7 @@ every candidate is realised and simulated before any number is quoted.
 
 [![the best fit, on the surface](docs/best_field.gif)](docs/best_field.mp4)
 
-The loop above is the first 15 s, surfaces only. GitHub strips `<video>` out of rendered
-READMEs, so the full clip is a link rather than a player:
+The loop above is the first 15 s, surfaces only; the full clip is
 [`docs/best_field.mp4`](docs/best_field.mp4) — 30 s, with the drive traced underneath.
 
 Both show depth `h` on the left fsaverage5 inflated surface, lateral / medial / dorsal,
