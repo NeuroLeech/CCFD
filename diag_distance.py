@@ -62,9 +62,20 @@ def main():
     # leaves the model un-centred - the exact asymmetry f409535 fixed in the
     # scoring path. A diagnostic run that way describes a matrix nobody fits.
     t = fc_score.default_target(c, verbose=False)
-    labels, tags = subparcels.split_parcels(c, subparcels.SENSORY, a.split, verbose=False)
+    # the pieces the RUN drove, not a reconstruction: best_fit saves `labels` alongside
+    # the solved cross-spectrum, and rebuilding from subparcels.SENSORY instead scored
+    # every tag against the sensory geometry however it was actually driven
+    zp = os.path.join(RESULTS, f"xspec_{a.tag}.npz")
+    if os.path.exists(zp):
+        z = np.load(zp, allow_pickle=True)
+        labels, tags = z["labels"], list(z["tags"])
+        src = f"from xspec_{a.tag}.npz"
+    else:
+        labels, tags = subparcels.split_parcels(c, subparcels.SENSORY, a.split,
+                                                verbose=False)
+        src = "rebuilt from subparcels.SENSORY - no saved solve for this tag"
     driven = labels >= 0
-    print(f"  {int(driven.sum())} driven vertices in {len(tags)} pieces")
+    print(f"  {int(driven.sum())} driven vertices in {len(tags)} pieces ({src})")
 
     d_all = distance_to_drive(c, driven)
     d = d_all[t.cols]                                    # aligned to the FC vertex order
