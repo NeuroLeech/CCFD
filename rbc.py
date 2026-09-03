@@ -158,36 +158,39 @@ def _gifti(arr):
     return nib.gifti.GiftiImage(darrays=da)
 
 
-def fslr_to_fsaverage5(X, valid, mask_floor=0.5):
-    """(32492, T) fsLR-32k -> (10242, T) fsaverage5, corrected for the medial wall.
+def fslr_to_fsaverage5(X, valid):
+    """(32492, T) fsLR-32k -> (10242, T) fsaverage5.
 
-    The validity mask is resampled with the data and divided out, so each target vertex is
-    a weighted MEAN over the source vertices that carry data instead of a weighted sum
-    that counts the medial wall as zeros. Target vertices whose resampled mask falls below
-    `mask_floor` are left at zero and reported as uncovered rather than filled with a value
-    interpolated mostly from nothing."""
+    Delegates to fc_vertexwise.resample, which is the function the MSC data already goes
+    through: wb_command -metric-resample ADAP_BARY_AREA with vertex-area metrics and
+    -current-roi for the medial wall. One resampling for every dataset in the project was
+    the point of moving to RBC, and this is where that is either true or not.
+
+    An earlier version here rolled its own - neuromaps' linear transform plus a resampled
+    validity mask divided out to keep the medial wall from dragging the rim down. XCP-D's
+    coverage turns out to be exactly the template fsLR ROI (29,696 vertices, none
+    differing), so the ROI argument does the job the hand-rolled division was doing, and
+    on the vertices both cover the two agree to r = 1.00000000.
+
+    They are NOT interchangeable, though: the hand-rolled mask_floor of 0.5 zeroed 128
+    fsaverage5 vertices on the medial wall rim that this path keeps. None of the 128 fall
+    in the FC target's vertex set, so the target is unaffected either way, but caches
+    written by the old path were cleared rather than reused.
+
+    `valid` is still checked against the ROI rather than ignored: a future release that
+    masks differently would otherwise be resampled against the wrong ROI in silence."""
+    import tempfile
     import nibabel as nib
-    from neuromaps import transforms
-    tmp = tempfile.mkdtemp(prefix="rbc_")
-    try:
-        pd = os.path.join(tmp, "d.L.func.gii")
-        pm = os.path.join(tmp, "m.L.func.gii")
-        nib.save(_gifti(X), pd)
-        nib.save(_gifti(valid.astype(np.float32)[:, None]), pm)
-        D = transforms.fslr_to_fsaverage(pd, target_density="10k", hemi="L",
-                                         method="linear")[0]
-        M = transforms.fslr_to_fsaverage(pm, target_density="10k", hemi="L",
-                                         method="linear")[0]
-        R = np.stack([d.data for d in D.darrays], axis=1).astype(np.float32)
-        w = np.asarray(M.darrays[0].data, np.float32)
-    finally:
-        for f in glob.glob(os.path.join(tmp, "*")):
-            os.remove(f)
-        os.rmdir(tmp)
-    ok = w >= mask_floor
-    R[ok] /= w[ok, None]
-    R[~ok] = 0.0
-    return R, ok
+    import fc_vertexwise as fv
+    files = fv.atlas_files("fsaverage5")
+    roi = np.asarray(nib.load(files["src_mask"]).darrays[0].data, bool)
+    if int((roi != valid).sum()):
+        print(f"    note: run covers {int(valid.sum())} fsLR vertices, template ROI "
+              f"{int(roi.sum())}; {int((roi != valid).sum())} differ")
+    with tempfile.TemporaryDirectory(prefix="rbc_") as td:
+        R = fv.resample(np.asarray(X, np.float32), "fsaverage5", files, td)
+    ok = np.abs(R).sum(1) > 0
+    return R.astype(np.float32), ok
 
 
 def load(run, fetch=True, cache=True, verbose=True):

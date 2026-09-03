@@ -15,7 +15,19 @@ Sampling differs by construction: the empirical run is at TR = 0.645 s and the m
 TR/4, so lags are reported in seconds and the model curve is read at the empirical lags
 when the two are compared.
 
+ONE WARNING ABOUT --source rbc. XCP-D's outputs are bandpass filtered at 0.01-0.08 Hz
+(order 2), the SoftwareFilters field of both desc-denoised and desc-denoisedSmoothed says
+so. Every number this prints for that source is therefore a property of the filter as much
+as of the brain: a passband of 0.01-0.08 sits entirely inside the 0.01-0.1 Hz window, so
+the "power in band" is near 100% by construction, the within-band slope is the data's
+slope shaped by the filter rolloff, and the autocorrelation time is close to what the
+filter bandwidth alone would give. These are the right statistics for describing the
+target that was built from that data. They are NOT free measurements of the BOLD spectrum
+and must not be used to re-anchor the clock the way timescale.py used the nilearn numbers.
+An unfiltered anchor needs the fMRIPrep derivative, which XCP-D lists as its own source.
+
   python autocorr.py --tag pr_taper
+  python autocorr.py --tag pr_taper --source rbc
 """
 import os, argparse
 import numpy as np
@@ -73,6 +85,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tag", default="pr_taper")
     ap.add_argument("--subjects", type=int, default=None)
+    ap.add_argument("--source", default="nilearn", choices=("nilearn", "rbc"),
+                    help="which preprocessing the empirical side comes from. The clock "
+                         "anchors belong to a pipeline, not to 'the data': 9.03 s and "
+                         "f^-2.60 were measured on nilearn's release and do not carry "
+                         "over to a target built from XCP-D")
     ap.add_argument("--maxlag-s", type=float, default=60.0, dest="maxlag_s")
     a = ap.parse_args()
 
@@ -85,16 +102,29 @@ def main():
     clock = timescale.plan(4, decay_s=9.03, spread_mm_s=6, verbose=False)
     fs = clock["frame_s"]
 
-    files = subject_files("left")[:a.subjects]
+    if a.source == "rbc":
+        import json, rbc
+        from paths import CACHE
+        n = a.subjects or 100
+        cf = os.path.join(CACHE, f"rbc_cohort_100_seed0.json")
+        subs = json.load(open(cf))["subjects"][:n]
+        runs = rbc.cohort_runs(subs, specs=(("rest", "645"),))[("rest", "645")]
+        loader = [(r, None) for r in runs]
+        print(f"  empirical side: RBC rest-645, {len(loader)} subjects "
+              f"(fMRIPrep + XCP-D)")
+    else:
+        loader = [(None, p) for p in subject_files("left")[:a.subjects]]
+        print(f"  empirical side: nilearn NKI rest, {len(loader)} subjects")
     nlag_e = int(a.maxlag_s / tr)
     acs, sl_e, sh_e = [], [], []
-    for i, p in enumerate(files):
-        X = load_subject(p)[t.vertices]
+    for i, (run, p) in enumerate(loader):
+        X = (rbc.load(run, verbose=False)[0][t.vertices] if run is not None
+             else load_subject(p)[t.vertices])
         acs.append(acf(X, nlag_e))
         s, sh = psd_slope(X, tr)
         sl_e.append(s); sh_e.append(sh)
         if (i + 1) % 20 == 0:
-            print(f"    {i+1}/{len(files)} subjects", flush=True)
+            print(f"    {i+1}/{len(loader)} subjects", flush=True)
     ac_e = np.mean(acs, 0)
 
     F = np.load(os.path.join(RESULTS, f"frames_{a.tag}.npy"), mmap_mode="r")
@@ -114,6 +144,9 @@ def main():
           f"{integrated(ac_m, fs):>12.2f}")
     print(f"  {'PSD slope 0.01-0.1Hz':<22s} {np.mean(sl_e):>12.2f} {sl_m:>12.2f}")
     print(f"  {'power in 0.01-0.1 Hz':<22s} {np.mean(sh_e):>11.1%} {sh_m:>11.1%}")
+    if a.source == "rbc":
+        print("  NOTE: XCP-D bandpassed these at 0.01-0.08 Hz, so the empirical column\n"
+              "        describes the filter as much as the data - not a clock anchor.")
     print(f"\n  the two curves at the empirical lags, r = "
           f"{np.corrcoef(ac_e, ac_m_at_e)[0,1]:+.4f} over 0-{a.maxlag_s:.0f} s")
     print(f"  {'lag (s)':>9s} {'empirical':>11s} {'model':>11s}")
@@ -122,7 +155,8 @@ def main():
             print(f"  {s:>9.2f} {np.interp(s, lag_e, ac_e):>11.3f} "
                   f"{np.interp(s, lag_m, ac_m):>11.3f}")
 
-    out = os.path.join(RESULTS, f"autocorr_{a.tag}.npz")
+    sfx = "" if a.source == "nilearn" else f"_{a.source}"
+    out = os.path.join(RESULTS, f"autocorr_{a.tag}{sfx}.npz")
     np.savez(out, ac_emp=ac_e, ac_model=ac_m, lag_emp=lag_e, lag_model=lag_m,
              slope_emp=np.array(sl_e), slope_model=sl_m,
              share_emp=np.array(sh_e), share_model=sh_m)
@@ -132,7 +166,7 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-    ax[0].plot(lag_e, ac_e, label="empirical (NKI, 99 subjects)")
+    ax[0].plot(lag_e, ac_e, label=f"empirical ({a.source})")
     ax[0].plot(lag_m, ac_m, label=f"model {a.tag}")
     ax[0].axhline(1 / np.e, color="0.6", lw=0.8, ls="--")
     ax[0].axhline(0, color="0.6", lw=0.8)
@@ -145,7 +179,7 @@ def main():
     for x in ax:
         x.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
-    png = os.path.join(RESULTS, f"autocorr_{a.tag}.png")
+    png = os.path.join(RESULTS, f"autocorr_{a.tag}{sfx}.png")
     fig.savefig(png, dpi=120)
     plt.close(fig)
     print(f"  wrote {png}")
