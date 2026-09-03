@@ -14,6 +14,13 @@ simulated time against FC computed from 577 s of data.
 
 ## Current best
 
+**Read section 0 first.** As of 2026-09-04 the default target is the RBC cohort, not
+nilearn's release, so this command no longer scores what is recorded below — it gives
++0.7102 ± 0.0005 against the new target. Under the passband the data was filtered to it
+gives +0.4701, and the swept optimum there is a different medium entirely: spread
+1.47 mm/s, decay 25 s, +0.6325. Everything in this section and in sections 1-9 was
+measured against the nilearn target and remains comparable with itself.
+
 ```bash
 python best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
   --pad 4096 --impulse-frames 224 --iters 400 --val-vert 0 --draws 2 \
@@ -66,6 +73,101 @@ pool returns the same sim/gap/rank to four decimals. One machine, warm cache:
 
 The impulse cache key does not record whether the responses came from the pool, which is
 why that path is checked for bit-identity rather than for agreement.
+
+---
+
+## 0. The RBC target and the passband (2026-09-04)
+
+The target is no longer nilearn's release. It is 100 RBC subjects' `rest-645` runs
+(`fc_group_rbc.py`), so the target and the task scans are the same people, one session,
+fMRIPrep 24.1.1 + XCP-D 0.10.6, and one resampling into fsaverage5 — the same
+`fc_vertexwise.resample` call the MSC data goes through. 9,310 vertices against 9,217;
+against the old target on the 9,216 they share, pearson +0.927 and spearman +0.889, with
+the new edges larger (sd 0.1311 against 0.1033).
+
+**XCP-D bandpasses everything at 0.01–0.08 Hz, order 2.** Both derivatives carry it in
+`SoftwareFilters`. So the anchors below do NOT transfer: re-measured on RBC they read 1/e
+4.06 s and slope −0.90, but a passband inside the measurement window makes those
+properties of the filter. `autocorr.py --source rbc` prints them with that caveat.
+
+The passband is therefore taken as given rather than re-anchored. `bandpass.py` applies
+the same filter to the model's observable — `--bandpass 0.01,0.08` multiplies H by |H|²
+and filters the realised frames — so what is compared is what survives the filter on both
+sides, not BOLD's temporal statistics, which the model has more of and the data has lost.
+
+| against the RBC target | sim | gap | rank |
+|---|---|---|---|
+| old config, no bandpass | +0.7102 ± 0.0005 | 0.062 | 24.2 |
+| old config, bandpassed | +0.4701 ± 0.0070 | 0.165 | 4.4 |
+| bandpassed, pad 16384 (84 usable bins, not 37) | +0.4718 ± 0.0018 | 0.158 | 4.7 |
+
+The target swap costs little. The passband costs 0.24, and not for want of frequency
+parameters: doubling the usable bins lands inside the draw scatter.
+
+### Why the rank collapses, and what it costs
+
+The unfiltered model's dimensionality lives above the passband. Restricting one run to
+successive bands:
+
+| band (Hz) | rank | FC r=0.5 at |
+|---|---|---|
+| 0.01–0.08 | 4.3 | 60.4 mm |
+| 0.08–0.2 | 8.4 | 30.8 mm |
+| 0.2–0.4 | 15.3 | 15.6 mm |
+| 0.4–0.775 | 35.6 | 9.0 mm |
+
+Rank rises with frequency and spatial scale falls with it — the dispersion relation of a
+wave medium, where a low-frequency window is a large-wavelength window and a sheet holds
+few long-wavelength modes. The bandpass selects the coarse end of the field.
+
+**Decay is not identifiable from the filtered autocorrelation.** Exponentially-correlated
+noise through this filter maps a 60× range of input decay (1–60 s) onto 4.29–7.70 s out,
+and the empirical 4.06 s is below that whole range. The score is the usable handle, so
+both spread and decay were swept against it — decay is no longer pinned at 9.03 s.
+
+### The sweep, 40 runs (`bp_sweep.py`)
+
+sim over spread × decay, all bandpassed, 400 iterations, 2 draws:
+
+|spread|d3|d6|d9|d12|d15|d20|d25|d35|d50|d70|d100|
+|---|---|---|---|---|---|---|---|---|---|---|---|
+|1.11| | |+0.528| | | | | | | | |
+|1.47|+0.479|+0.556|+0.577|+0.593|+0.604|+0.614|**+0.633**|+0.608|+0.621|+0.597|+0.626|
+|1.84|+0.497|+0.567|+0.593|+0.604|+0.627|+0.624|+0.618|+0.617|+0.609|+0.617| |
+|2.58|+0.534| | |+0.604|+0.609|+0.612|+0.617| | | | |
+|2.95| | |+0.573|+0.591|+0.587|+0.594|+0.586| | | | |
+|4.42| | |+0.535| | | | | | | | |
+|5.89| | |+0.470| | | | | | | | |
+|8.84| | |+0.402| | | | | | | | |
+|12.16| | |+0.123| | | | | | | | |
+
+Highest is **+0.6325 ± 0.0163 at spread 1.47 mm/s, decay 25 s** (`grid_s1.5_d25`), against
++0.4701 for the old 5.89 / 9.03 configuration under the same filter.
+
+- **Spread is the sharper axis.** 2.95 is below every other row at every decay by margins
+  outside scatter; 5.89 and above fall away steeply.
+- **sim is flat in decay above ~25 s** — 1.47 runs +0.597 to +0.633 across a 4× range,
+  non-monotonically, with per-run scatter up to 0.016. The maximum is not separated from
+  the plateau.
+- **The product is not sufficient.** At matched reach, spread 2.95 × decay 9.03 (26.6 mm)
+  gives +0.5730 and spread 1.84 × decay 15 (27.6 mm) gives +0.6192 — 3× the scatter apart.
+  `reach = spread × decay` does not summarise the pair under this objective.
+- **Moran gap and rank keep moving where sim does not.** Along spread 1.47 the gap falls
+  0.073 → 0.054 → 0.047 → 0.041 from decay 25 to 100, the lowest recorded anywhere here
+  including the unfiltered +0.7102 run's 0.062, while rank climbs 15.1 → 20.8 past the
+  empirical 13.0. Two configurations 4× apart in decay score the same and differ 1.8× in
+  gap.
+- **The FC correlation length is set by spread, not decay**: 22–23 mm across the whole
+  1.47 row, 33–38 mm across 2.95, against an empirical **9.1 mm**. Reducing spread closes
+  part of that and the score falls before it closes.
+
+Empirical comparison values, on the cohort's own resting runs and so already bandpassed:
+rank **13.0**, FC r=0.5 at **9.1 mm** (20 subjects).
+
+`bp_sweep.py` reads the runs from `results/` rather than the logs, recovering spread and
+decay from each saved `x`, and detects from the realisation's spectrum whether the
+observable was filtered — an unfiltered control caught by the same glob otherwise tops the
+ranking for the wrong reason. Its sim is draw 0 only, where the logs report the draw mean.
 
 ---
 
