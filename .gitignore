@@ -15,3 +15,6 @@ __pycache__/
 .ipynb_checkpoints/
 .venv/
 venv/
+
+# RBC (ReproBrainChart) DataLad clones: NKI only. Large, and fetched on demand.
+data/rbc/
