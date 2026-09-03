@@ -27,14 +27,14 @@ CLIP = 96.0
 FPS = 16
 
 
-def _proj(Vc, Fc):
+def _proj(Vc, Fc, views=None):
     n3 = np.cross(Vc[Fc[:, 1]]-Vc[Fc[:, 0]], Vc[Fc[:, 2]]-Vc[Fc[:, 0]])
     vn = np.zeros_like(Vc)
     for k in range(3):
         np.add.at(vn, Fc[:, k], n3)
     vn /= np.linalg.norm(vn, axis=1)[:, None]
     out = []
-    for elev, azim, nm in VIEWS:
+    for elev, azim, nm in (VIEWS if views is None else views):
         e, a = np.radians(elev), np.radians(azim)
         d = np.array([np.cos(e)*np.cos(a), np.cos(e)*np.sin(a), np.sin(e)])
         right = np.array([-np.sin(a), np.cos(a), 0.0])
