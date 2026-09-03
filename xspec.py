@@ -187,6 +187,43 @@ def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers,
     return np.asarray(out)
 
 
+_W_SCORE = {}
+
+
+def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s):
+    _W_SCORE.update(cortex=cortex, target=target, p=p, profiles=profiles, save=save,
+                    kernel=kernel, band=band, frame_s=frame_s)
+
+
+def _score_one(A):
+    """One drawn realisation, scored. Returns the numbers, NOT the frames: a realisation
+    is 134 MB and only one draw's frames are ever kept, so shipping them back through the
+    pool would cost more than the run they came from."""
+    r = score_realisation(_W_SCORE["cortex"], _W_SCORE["target"], _W_SCORE["p"], A,
+                          save=_W_SCORE["save"], profiles=_W_SCORE["profiles"],
+                          kernel=_W_SCORE["kernel"], band=_W_SCORE["band"],
+                          frame_s=_W_SCORE["frame_s"])
+    return r["sim"], r["gap"], r["rank"]
+
+
+def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
+                    band=None, frame_s=None):
+    """Score several drawn realisations at once. -> [(sim, gap, rank), ...]
+
+    Draws are independent runs of the same medium under different samples of the same
+    S(f), so this is the same embarrassing parallelism as the impulses, and the same spawn
+    pool. A `run_fn` case - a switching medium, or a coupling operator - is NOT handled
+    here: the callback is a closure and does not pickle, so the caller stays serial.
+
+    Returns (pool, async result) rather than the values, so the caller can run the draw
+    whose frames it keeps in its own process while these are still going."""
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    pool = ctx.Pool(min(workers, len(draws_A)), initializer=_score_init,
+                    initargs=(cortex, target, p, profiles, save, kernel, band, frame_s))
+    return pool, pool.map_async(_score_one, list(draws_A))
+
+
 def transfer(resp, cols, nfreq, kernel=None, idx=None):
     """FFT the impulse responses -> H (nfreq, nVsub, K) and the bin weights.
 
@@ -340,7 +377,45 @@ def distance_reg(Dpiece, scale):
     return R
 
 
-def _project(T, nblock=1, share=False, freq_keep=None, psd=True):
+def _stack_conj(H):
+    """H (nf, nV, K) -> (Ph, Qh), contiguous and real, with H^H = Ph + i Qh.
+
+    Built once per solve. H never changes inside the solve, so every per-frequency
+    conjugate transpose the objective would otherwise take is hoisted out of the loop."""
+    return (np.ascontiguousarray(H.real.transpose(0, 2, 1)),
+            np.ascontiguousarray(-H.imag.transpose(0, 2, 1)))
+
+
+def _stack_cols(H):
+    """H (nf, nV, K) -> (Hr, Hi), each (nV, nf*K), contiguous and real."""
+    nV = H.shape[1]
+    return (np.ascontiguousarray(H.real.transpose(1, 0, 2).reshape(nV, -1)),
+            np.ascontiguousarray(H.imag.transpose(1, 0, 2).reshape(nV, -1)))
+
+
+def _cov_from_factor(Ph, Qh, sw, L):
+    """sum_f 2 w_f Re(H_f S_f H_f^H) with S_f = L_f L_f^H, as two REAL gemms.
+
+    S is PSD on the feasible set, so it factors, and then
+
+        2 w_f H_f S_f H_f^H = B_f B_f^H,     B_f = sqrt(2 w_f) H_f L_f
+
+    Stacking B^H over frequencies into Z (nf*K, nV) - contiguous, because Ph and Qh are
+    already stored transposed - and splitting real from imaginary,
+
+        sum_f Re(B_f B_f^H) = Zr^T Zr + Zi^T Zi
+
+    which is two real gemms in place of nf complex triple products: a quarter of the real
+    flops, and one large call rather than nf with an inner dimension of K."""
+    Lh = L.conj().transpose(0, 2, 1) * sw
+    Lr, Li = np.ascontiguousarray(Lh.real), np.ascontiguousarray(Lh.imag)
+    nV = Ph.shape[2]
+    Zr = (Lr @ Ph - Li @ Qh).reshape(-1, nV)
+    Zi = (Lr @ Qh + Li @ Ph).reshape(-1, nV)
+    return Zr.T @ Zr + Zi.T @ Zi
+
+
+def _project(T, nblock=1, share=False, freq_keep=None, psd=True, want_factor=False):
     """Project each frequency onto the feasible set, in place.
 
     `freq_keep` is a boolean over frequencies; excluded ones are set to zero, which is the
@@ -364,9 +439,15 @@ def _project(T, nblock=1, share=False, freq_keep=None, psd=True):
 
     `share` additionally constrains every block to be equal - the tighter claim that one
     input is played through a medium that changes, rather than input and medium switching
-    together. Averaging Hermitian blocks and then clipping keeps the result feasible."""
+    together. Averaging Hermitian blocks and then clipping keeps the result feasible.
+
+    `want_factor` returns L alongside, with L L^H = T to rounding. The eigendecomposition
+    the PSD clip already performs is what a factor costs, so it is free here and saves the
+    objective a Cholesky per frequency. T itself is bit-identical either way; only the
+    extra return value is new. With `psd=False` there is no factor and L is None."""
     nf = T.shape[0]
     K = T.shape[1] // nblock
+    L = np.zeros(T.shape, T.dtype) if (want_factor and psd) else None
     for f in range(nf):
         if freq_keep is not None and not freq_keep[f]:
             T[f] = 0.0
@@ -380,8 +461,10 @@ def _project(T, nblock=1, share=False, freq_keep=None, psd=True):
             for r in range(nblock):
                 M = 0.5 * (B[r] + B[r].conj().T)
                 ev, U = np.linalg.eigh(M)
-                T[f][r * K:(r + 1) * K, r * K:(r + 1) * K] = \
-                    (U * np.clip(ev, 0, None)) @ U.conj().T
+                sl = slice(r * K, (r + 1) * K)
+                T[f][sl, sl] = (U * np.clip(ev, 0, None)) @ U.conj().T
+                if L is not None:
+                    L[f][sl, sl] = U * np.sqrt(np.clip(ev, 0, None))
         else:
             M = 0.5 * (T[f] + T[f].conj().T)
             if not psd:
@@ -389,7 +472,9 @@ def _project(T, nblock=1, share=False, freq_keep=None, psd=True):
                 continue
             ev, U = np.linalg.eigh(M)
             T[f] = (U * np.clip(ev, 0, None)) @ U.conj().T
-    return T
+            if L is not None:
+                L[f] = U * np.sqrt(np.clip(ev, 0, None))
+    return (T, L) if want_factor else T
 
 
 def whiten(H, eps=1e-3):
@@ -433,7 +518,7 @@ def unwhiten(Q, L):
 
 def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
           val_H=None, val_Ct=None, val_every=5, S0=None, freq_keep=None, psd=True,
-          spec=None):
+          spec=None, ref=False):
     """Maximise corr(C(S), Ct) over S(f) >= 0, by projected gradient on the ratio.
 
     Correlation rather than squared error: with a free scale, least squares is minimised
@@ -489,7 +574,12 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
     times the channels is a harder problem at the same iteration count, and comparing its
     result against the single-block one then measures the optimiser rather than the model.
     R=3 strictly contains R=1 whenever one regime is the base medium, so a lower number
-    there is a convergence failure by construction."""
+    there is a convergence failure by construction.
+
+    `ref=True` runs the objective as per-frequency loops over complex H. That is what the
+    default path is checked against - it is the same arithmetic in a different order, so
+    the two agree to rounding rather than bit for bit, and a long solve can take a
+    different backtracking path once the difference reaches the accept test."""
     nf, nV, K = H.shape
     # white input to start, unless a warm start is supplied. The starting point matters:
     # this is a ratio objective on a cone, and projected gradient on it has no convergence
@@ -508,42 +598,69 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
         spec = spec / max(spec.sum(), 1e-300)
         Mf = np.stack([H[f].conj().T @ H[f] for f in range(nf)])
 
-    def _spec_fix(T):
-        """Rescale each frequency onto its target output power. Feasible, not Euclidean."""
+    def _spec_fix(T, L=None):
+        """Rescale each frequency onto its target output power. Feasible, not Euclidean.
+
+        A per-frequency POSITIVE scaling of S scales its factor by the square root, so L
+        is carried through in step rather than refactorised."""
         for f in range(nf):
             if spec[f] <= 0:
                 T[f] = 0.0
+                if L is not None:
+                    L[f] = 0.0
                 continue
             pw = float(np.real(np.trace(T[f] @ Mf[f]))) * w[f]
             if pw > 1e-300:
                 T[f] *= spec[f] / pw
+                if L is not None:
+                    L[f] *= np.sqrt(spec[f] / pw)
         return T
-    off = ~np.eye(nV, dtype=bool)
-    Ctn = Ct.copy(); Ctn[~off] = 0.0
+    Ctn = Ct.copy()
+    np.fill_diagonal(Ctn, 0.0)         # the diagonal is not part of the objective
     Ctn /= np.linalg.norm(Ctn)
 
-    def model(S):
-        C = np.zeros((nV, nV))
-        for f in range(nf):
-            C += w[f] * 2.0 * np.real((H[f] @ S[f]) @ H[f].conj().T)
+    # H is fixed for the whole solve, so its transposes are built once here rather than
+    # taken nf times per objective evaluation.
+    Ph, Qh = _stack_conj(H)
+    Hr, Hi = _stack_cols(H)
+    sw = np.sqrt(2.0 * np.asarray(w, float))[:, None, None]
+    w2 = (2.0 * np.asarray(w, float))[:, None, None]
+
+    def model(S, L=None):
+        if L is None or ref:
+            C = np.zeros((nV, nV))
+            for f in range(nf):
+                C += w[f] * 2.0 * np.real((H[f] @ S[f]) @ H[f].conj().T)
+        else:
+            C = _cov_from_factor(Ph, Qh, sw, L)
         C = C - C.mean(0, keepdims=True) - C.mean(1, keepdims=True) + C.mean()
-        C[~off] = 0.0
+        np.fill_diagonal(C, 0.0)           # the diagonal is not part of the objective
         return C
 
     def adjoint(M):
         """d<C(S), M>/dS, per frequency; M must already be masked and centred."""
         Mc = M - M.mean(0, keepdims=True) - M.mean(1, keepdims=True) + M.mean()
-        return np.stack([w[f] * 2.0 * (H[f].conj().T @ Mc @ H[f]) for f in range(nf)])
+        if ref:
+            return np.stack([w[f] * 2.0 * (H[f].conj().T @ Mc @ H[f])
+                             for f in range(nf)])
+        # Mc is REAL, so promoting it to complex costs four real gemms where two will do.
+        # One pass against the stacked H per part, then a small per-frequency contraction.
+        Yr = (Mc @ Hr).reshape(nV, nf, K).transpose(1, 0, 2)
+        Yi = (Mc @ Hi).reshape(nV, nf, K).transpose(1, 0, 2)
+        return ((Ph @ Yr - Qh @ Yi) + 1j * (Ph @ Yi + Qh @ Yr)) * w2
 
-    def obj(S):
-        C = model(S)
+    def obj(S, L=None):
+        C = model(S, L)
         n = np.linalg.norm(C)
         return (float((C * Ctn).sum() / n) if n > 0 else -1.0), C, n
 
+    SL = None
     if spec is not None:
-        S = _spec_fix(_project(S, nblock, share, freq_keep, psd))
-    val, C, n = obj(S)
-    step = 1.0 / max(np.linalg.norm(adjoint(Ctn)), 1e-30)
+        S, SL = _project(S, nblock, share, freq_keep, psd, want_factor=True)
+        _spec_fix(S, SL)
+    val, C, n = obj(S, SL)
+    A0 = adjoint(Ctn)                  # Ctn never changes, so this is loop-invariant
+    step = 1.0 / max(np.linalg.norm(A0), 1e-30)
 
 
     watching = val_H is not None and val_Ct is not None
@@ -553,38 +670,47 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
         yv = rankdata(np.asarray(val_Ct)[iu_v])
         yv = (yv - yv.mean()) / max(yv.std(), 1e-30)
 
-        def val_score(S):
-            Cv = np.zeros((val_H.shape[1],) * 2)
-            for f in range(nf):
-                Cv += w[f] * 2.0 * np.real((val_H[f] @ S[f]) @ val_H[f].conj().T)
+        vPh, vQh = _stack_conj(val_H)
+
+        def val_score(S, L=None):
+            if L is None or ref:
+                Cv = np.zeros((val_H.shape[1],) * 2)
+                for f in range(nf):
+                    Cv += w[f] * 2.0 * np.real((val_H[f] @ S[f]) @ val_H[f].conj().T)
+            else:
+                Cv = _cov_from_factor(vPh, vQh, sw, L)
             r = rankdata(Cv[iu_v])
             r = (r - r.mean()) / max(r.std(), 1e-30)
             return float(r @ yv / len(yv))
 
-        best_v, best_S, best_at = val_score(S), S.copy(), 0
+        best_v, best_S, best_at = val_score(S, SL), S.copy(), 0
+        best_L = None if SL is None else SL.copy()
     if trace is not None:
         trace.append(float(val))
     if verbose:
         print(f"    start (white input)  corr = {val:+.4f}")
     stalled_at = None
     for it in range(iters):
-        G = adjoint(Ctn) / n - (val / n) * adjoint(C / n)
+        G = A0 / n - (val / n) * adjoint(C / n)
         for _ in range(12):                        # backtracking on the step size
-            T = _project(S + step * G, nblock, share, freq_keep, psd)
+            T, TL = _project(S + step * G, nblock, share, freq_keep, psd,
+                             want_factor=True)
             if spec is not None:
-                T = _spec_fix(T)          # already normalised: spec sums to one
+                T = _spec_fix(T, TL)      # already normalised: spec sums to one
             tr = sum(np.trace(T[f]).real for f in range(nf))
             if spec is not None:
                 pass
             elif psd and tr > 0:
                 T = T / tr
+                if TL is not None:
+                    TL = TL / np.sqrt(tr)
             elif not psd:
                 nn = float(np.linalg.norm(T))    # trace can vanish without the cone
                 if nn > 0:
                     T = T / nn
-            v2, C2, n2 = obj(T)
+            v2, C2, n2 = obj(T, TL)
             if v2 > val:
-                S, val, C, n = T, v2, C2, n2
+                S, SL, val, C, n = T, TL, v2, C2, n2
                 step *= 1.6
                 if trace is not None:
                     trace.append(float(val))
@@ -594,21 +720,23 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
             stalled_at = it                         # no uphill step remains
             break
         if watching and (it % val_every == 0 or it == iters - 1):
-            v = val_score(S)
+            v = val_score(S, SL)
             if v > best_v:
                 best_v, best_S, best_at = v, S.copy(), it
+                best_L = None if SL is None else SL.copy()
         if verbose and (it % 25 == 0 or it == iters - 1):
             print(f"    iter {it:4d}  corr = {val:+.4f}"
-                  + (f"   held-out {val_score(S):+.4f}" if watching else ""), flush=True)
+                  + (f"   held-out {val_score(S, SL):+.4f}" if watching else ""),
+                  flush=True)
     if watching:
-        S = best_S
+        S, SL = best_S, best_L
     if trace is not None:
         rep = dict(final=float(val), steps=len(trace) - 1,
                    stalled_at=stalled_at, iters=iters)
         if watching:
             rep.update(held_out=float(best_v), stopped_at=int(best_at))
         trace.append(rep)
-    return S, model(S)
+    return S, model(S, SL)
 
 
 def in_original_basis(R, L):
@@ -939,12 +1067,19 @@ class ProfileDrive:
 
 
 def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=False,
-                      seed=0, profiles=None, run_fn=None, kernel=None):
+                      seed=0, profiles=None, run_fn=None, kernel=None, band=None,
+                      frame_s=None):
     """Hold each drawn sample over its block of steps, run, and score for real.
 
     `run_fn(drive, nsteps, save) -> (frames, dt)` replaces the plain integration, which is
     how a switching medium is scored without this module having to know about regimes.py
-    (which imports this one). p is then unused."""
+    (which imports this one). p is then unused.
+
+    `band` is the passband the TARGET was filtered to, as (lo_hz, hi_hz). The data XCP-D
+    produced is bandpassed, so the observable has to be too or the model is scored on
+    power the target cannot contain. It must be the same band whose response multiplied H
+    in transfer - the identity the whole convex solve rests on is that the scored system
+    is the solved one."""
     from input2 import RegionDrive
     from fc_moran import MoranMatch
     nsteps = len(A_frames) * save
@@ -963,6 +1098,11 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
     if kernel is not None:                  # the observable, not the field; see transfer
         import units
         frames = units.smooth_frames(frames, kernel)
+    if band is not None:
+        import bandpass
+        if frame_s is None:
+            raise ValueError("band needs frame_s; the filter is defined in Hz")
+        frames = bandpass.apply(frames, frame_s, band[0], band[1])
     Z, _ = target.model_z(frames)
     sim = float(target._prep(target.model_edges(Z=Z)[0]) @ target.y)
     mm = MoranMatch(cortex, target)

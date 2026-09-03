@@ -29,6 +29,44 @@ Spread was swept and 6 mm/s is where that sweep peaked (reach = spread × decay 
 COVARIANCE, which stopped the sensory arm at step 5 of 400 while subcortical ran to 399.
 Use `--select-iters` (realised held-out score) or disable it, never leave it on by default.
 
+**Rerunning this command today gives +0.7197 ± 0.0010** (gap 0.060, rank 22.4), because
+the solve was restructured on 2026-09-03 — see below. The +0.7204 ± 0.0009 above is what
+the PRE-CHANGE solve produced, and it still reproduces: the old `xspec.py` was swapped
+back in on 2026-09-03 and returned +0.7204 ± 0.0009, gap 0.060, rank 22.1, matching the
+recorded line exactly. Every score elsewhere in this file predates the change and came
+from that path, so they remain comparable with each other.
+
+### The solve, restructured (2026-09-03)
+
+`xspec.solve` evaluates the same objective by different arithmetic:
+
+- `_project` now returns the PSD factor `L` it already computes, so the covariance is
+  `sum_f Re(B_f B_f^H)` with `B_f = sqrt(2 w_f) H_f L_f`. Stacked over frequency and split
+  into real and imaginary parts that is two REAL gemms, `Zr^T Zr + Zi^T Zi`, in place of
+  nf complex triple products — a quarter of the real flops, in one large call.
+- the adjoint keeps the real `M` out of complex arithmetic.
+- `adjoint(Ctn)` is hoisted out of the loop. `Ctn` never changes, so this part is exact.
+
+`solve(ref=True)` restores the per-frequency loops. The two agree to 1e-15 at 30
+iterations on every branch — plain, `nblock=2`, `share`, `psd=False`, `freq_keep`, `spec`,
+held-out — and diverge to 6.5e-4 in the objective and 1.2e-2 in `S` by iteration 400, with
+`corr(C_fast, C_ref) = 0.999986`. The objective never converges and never stalls, so a
+rounding-level difference has 400 accepted steps to grow. That drift is the whole of the
+0.0007; nothing else about the run changed.
+
+`--workers` now defaults to `min(12, cpu_count)` and covers the extra draws as well as the
+impulses. Both pools were checked bit-identical against their serial paths, and the draw
+pool returns the same sim/gap/rank to four decimals. One machine, warm cache:
+
+| stage | before | after |
+|---|---|---|
+| solve, 400 iterations at nf 135 | 472 s | 86 s |
+| whole command | 11:50 | 2:51 |
+| impulse stage, COLD cache, 47 pieces | 126 s | 19 s |
+
+The impulse cache key does not record whether the responses came from the pool, which is
+why that path is checked for bit-identity rather than for agreement.
+
 ---
 
 ## 1. The clock (`timescale.py`)

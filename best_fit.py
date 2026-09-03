@@ -115,7 +115,8 @@ def held_out_score(t, frames, val, val_raw_ranks):
 
 
 def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, nb,
-                 sched_f, ps, dt, kern, cpl, Lw=None, keep_f=None, spec=None):
+                 sched_f, ps, dt, kern, cpl, Lw=None, keep_f=None, spec=None,
+                 band=None, frame_s=None):
     """Choose where to stop the solve, by simulating at each candidate and scoring on
     held-out vertices.
 
@@ -154,7 +155,7 @@ def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, n
         if cpl is not None and run_fn is None:
             run_fn = lambda dr, ns, sv: bo_step.fl.run(c, dr, p, ns, sv, coupling=cpl)
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, run_fn=run_fn,
-                                    kernel=kern)
+                                    kernel=kern, band=band, frame_s=frame_s)
         v = held_out_score(t, r["frames"], val, yv)
         scores[n] = v
         print(f"    {n:5d} iterations: held-out realised {v:+.4f}  "
@@ -198,9 +199,11 @@ def main():
     ap.add_argument("--whiten", type=float, default=0.0,
                     help="change of variables conditioning the solve (try 1e-3); "
                          "0 = off. See xspec.whiten")
-    ap.add_argument("--workers", type=int, default=0,
-                    help="processes for the impulse responses; they are independent per "
-                         "piece, so this is near-linear. 0 = serial")
+    ap.add_argument("--workers", type=int, default=min(12, os.cpu_count() or 1),
+                    help="processes for the impulse responses and for the extra draws; "
+                         "both are independent per piece / per draw, so this is near-"
+                         "linear. 1 (or 0) = serial. Impulses that hit the cache never "
+                         "reach the pool, so the default costs nothing on a rerun")
     ap.add_argument("--damp", type=float, default=None,
                     help="override interior damping per step (BEST_X carries 6.2e-04)")
     ap.add_argument("--impulse-frames", type=int, default=280, dest="impulse_frames",
@@ -279,6 +282,15 @@ def main():
     ap.add_argument("--band", default="",
                     help="restrict the input cross-spectrum to LO,HI in Hz "
                          "(e.g. 0.01,0.1). Needs --oversample to have a clock")
+    ap.add_argument("--bandpass", default="",
+                    help="passband the TARGET was filtered to, LO,HI in Hz (e.g. "
+                         "0.01,0.08 for any RBC/XCP-D target). Multiplies H by the "
+                         "filter's |H|^2 and applies the same filter to the realised "
+                         "frames, so the model is solved and scored on what survives "
+                         "the filter instead of on power the target cannot contain. "
+                         "Needs --oversample for a clock. Distinct from --band, which "
+                         "restricts where the INPUT may put power rather than what the "
+                         "observable keeps")
     ap.add_argument("--match-spectrum", action="store_true", dest="match_spectrum",
                     help="hold the model's OUTPUT power spectrum to the measured BOLD "
                          "spectrum (data/cache/bold_psd.npz). Convex, and a much tighter "
@@ -354,6 +366,17 @@ def main():
           + (f", impulse window {a.impulse_frames} frames "
              f"(decay {1.0/(10**x[0]*save):.0f})" if a.impulse_frames != 280 else ""))
 
+    bp = fs_bp = None
+    if a.bandpass:
+        if clock is None:
+            raise SystemExit("  --bandpass needs --oversample: the filter is defined in "
+                             "Hz and without a clock there is no mapping from frames")
+        bp = tuple(float(v) for v in a.bandpass.split(","))
+        if len(bp) != 2:
+            raise SystemExit("  --bandpass takes LO,HI in Hz")
+        fs_bp = clock["frame_s"]
+        print(f"  observable bandpassed {bp[0]}-{bp[1]} Hz, matching the target's filter")
+
     sub = xspec.medoid_subset(t, a.nvert)
     # held-out vertices serve two mechanisms that must not both run: selecting the
     # stopping point by realised score (--select-iters), or early stopping inside the
@@ -404,6 +427,16 @@ def main():
         Hv = (xspec.transfer(R, t.cols[val], a.nfreq, kernel=kern)[0]
               if val is not None else None)
         ref_frames, ps, dt = R.shape[1], None, None
+        if bp is not None:
+            # the filter is linear, so like the smoothing kernel it simply multiplies the
+            # transfer function - the solve is unchanged and costs nothing extra
+            import bandpass
+            br = bandpass.transfer_response(idx, ref_frames, clock["frame_s"], *bp)
+            H = H * br[:, None, None]
+            if Hv is not None:
+                Hv = Hv * br[:, None, None]
+            print(f"    filter response over the kept bins: {br.min():.3f}-{br.max():.3f}, "
+                  f"{int((br > 0.5).sum())} of {len(br)} bins above 0.5")
     else:
         ps = regimes.regime_set(c, p, regime_deltas(
             nb, a.regime_span, a.regime_map, a.regime_target, base=p))
@@ -461,7 +494,7 @@ def main():
         a.iters = select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct,
                                Tgt, nb, sched_f if nb > 1 else None,
                                ps if nb > 1 else None, dt if nb > 1 else None, kern, cpl,
-                               Lw, keep_f, spec)
+                               Lw, keep_f, spec, band=bp, frame_s=fs_bp)
     tr = []
     S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
                        share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
@@ -496,7 +529,20 @@ def main():
               f"{spearmanr(C[iu], raw[iu]).statistic:+.4f}")
 
     sims, gaps, rks = [], [], []
-    for d in range(a.draws):
+    # Draws 1.. are scored in a pool while draw 0 runs here. Draw 0 stays in this process
+    # because its frames and drive are the ones written to disk, and 134 MB per draw
+    # through a pipe would cost more than the realisation does. A run_fn case - switching
+    # medium, or coupling - keeps every draw here: the callback is a closure, so it does
+    # not pickle.
+    pool = res = None
+    if a.workers > 1 and a.draws > 1 and nb == 1 and cpl is None:
+        rest = [xspec.realise(S, idx, a.frames, ref_frames=ref_frames, seed=1000 + d)
+                for d in range(1, a.draws)]
+        pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
+                                          band=bp, frame_s=fs_bp)
+        print(f"  draws 2-{a.draws} scored over {min(a.workers, len(rest))} workers",
+              flush=True)
+    for d in range(1 if pool is not None else a.draws):
         if nb == 1:
             A = xspec.realise(S, idx, a.frames, ref_frames=ref_frames, seed=1000 + d)
             run_fn = None
@@ -510,13 +556,17 @@ def main():
             run_fn = (lambda dr, nsteps, sv: bo_step.fl.run(
                 c, dr, p, nsteps, sv, coupling=cpl))
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P,
-                                    run_fn=run_fn, kernel=kern)
+                                    run_fn=run_fn, kernel=kern, band=bp, frame_s=fs_bp)
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
         if d == 0:
             if nb > 1:
                 regimes.epoch_profile(r["frames"], sched_f, a.epoch, nb)
             np.save(os.path.join(RESULTS, f"frames_{a.tag}.npy"), r["frames"])
             np.save(os.path.join(RESULTS, f"drive_{a.tag}.npy"), r["drive"].Aser)
+    if pool is not None:
+        for sim, gap, rk in res.get():
+            sims.append(sim); gaps.append(gap); rks.append(rk)
+        pool.close(); pool.join()
     np.savez(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), S=S, idx=idx, x=x,
              save=save, labels=labels, tags=np.array(tags, dtype=object))
     print(f"\n  realised over {a.frames} frames, {a.draws} draws: "
