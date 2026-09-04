@@ -282,6 +282,11 @@ def main():
     ap.add_argument("--band", default="",
                     help="restrict the input cross-spectrum to LO,HI in Hz "
                          "(e.g. 0.01,0.1). Needs --oversample to have a clock")
+    ap.add_argument("--impulse-decays", type=float, default=3.0, dest="impulse_decays",
+                    help="how many decay times the impulse window must hold. The default "
+                         "of 3 is what every run before 2026-09-04 used and leaves 4.6%% "
+                         "error in H across a 0.01-0.08 Hz passband; 7 converges. Left at "
+                         "3 so recorded runs still reproduce - raise it explicitly")
     ap.add_argument("--bandpass", default="",
                     help="passband the TARGET was filtered to, LO,HI in Hz (e.g. "
                          "0.01,0.08 for any RBC/XCP-D target). Multiplies H by the "
@@ -344,11 +349,26 @@ def main():
                                spread_mm_s=a.spread_mm_s)
         x[3] = np.log10(clock["save"])
         x[0] = np.log10(clock["damp"])
-        # the window has to hold the decay, which at a finer `save` is many more FRAMES
-        # even though it is the same number of seconds
+        # The window has to hold the decay, which at a finer `save` is many more FRAMES
+        # even though it is the same number of seconds.
+        #
+        # 3 decay times is not enough once the observable is bandpassed. Cutting there
+        # leaves the response at exp(-3) = 5% of peak, and the truncation shows up as
+        # 4.6% mean error in H across 0.01-0.08 Hz - measured on the decay-25 medium
+        # against a 13-decay-time reference. Under a broadband objective that error was
+        # spread over every frequency; the passband IS the low-frequency end, so it now
+        # lands on exactly what is being fitted. 6-7 decay times converges: at 6.6 the
+        # same comparison gives 0.18%.
+        #
+        # A second constraint applies with --bandpass: a window shorter than one cycle of
+        # the lowest passband frequency cannot represent it. At decay 12 s the 3x rule
+        # gave 36 s against a 100 s cycle at 0.01 Hz.
         decay_fr = 1.0 / (clock["damp"] * clock["save"])
-        if a.impulse_frames < 3 * decay_fr:
-            a.impulse_frames = int(np.ceil(3 * decay_fr / 64.0) * 64)
+        need = a.impulse_decays * decay_fr
+        if a.bandpass:
+            need = max(need, 1.0 / (float(a.bandpass.split(",")[0]) * clock["frame_s"]))
+        if a.impulse_frames < need:
+            a.impulse_frames = int(np.ceil(need / 64.0) * 64)
         if a.pad < a.impulse_frames:
             a.pad = int(2 ** np.ceil(np.log2(a.impulse_frames)))
         a.frames = timescale.frames_for(a.seconds, clock["frame_s"])

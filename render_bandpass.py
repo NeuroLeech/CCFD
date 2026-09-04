@@ -31,6 +31,28 @@ from paths import RESULTS, VIDEOS
 import bandpass, timescale
 
 
+def resimulate_raw(c, tag, frame_s):
+    """-> (T, nV) the run's field with the bandpass OFF, from its own saved drive.
+
+    Nothing is re-solved and nothing is re-drawn: drive_<tag>.npy is the per-step amplitude
+    series score_realisation actually integrated, so feeding it back through the same
+    medium reproduces that realisation exactly. Only the filter is left off. The BOLD
+    smoothing kernel stays, because it is part of the observable in both rows."""
+    import bo_step, subparcels, units, fluid as fl
+    from xspec import ProfileDrive
+    z = np.load(os.path.join(RESULTS, f"xspec_{tag}.npz"), allow_pickle=True)
+    labels, tags, x = z["labels"], list(z["tags"]), z["x"]
+    p, save, _ = bo_step.unpack(x, c)
+    P = subparcels.taper_profiles(c, labels, len(tags))
+    Aser = np.asarray(np.load(os.path.join(RESULTS, f"drive_{tag}.npy")), np.float32)
+    d = ProfileDrive(c, P, Aser, 2e-4)
+    print(f"  resimulating {tag}: {len(Aser)} steps, save {save}, {len(tags)} pieces")
+    frames, _ = fl.run(c, d, p, len(Aser), save)
+    kern = units.smoothing_kernel(timescale.bold_fwhm_frames(frame_s, verbose=False),
+                                  verbose=False)
+    return units.smooth_frames(frames, kern)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tag", default="rbc_nobp")
@@ -41,14 +63,31 @@ def main():
     ap.add_argument("--clip", type=float, default=99.0)
     ap.add_argument("--band", default="0.01,0.08")
     ap.add_argument("--ndrive", type=int, default=6)
+    ap.add_argument("--resimulate", action="store_true",
+                    help="the tag was fitted WITH --bandpass, so its saved frames are "
+                         "already filtered and refiltering them would filter twice. Re-run "
+                         "the integration from the run's own saved drive with the filter "
+                         "off to recover the raw field: same medium, same drive, same "
+                         "realisation")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
     lo, hi = (float(v) for v in a.band.split(","))
     frame_s = timescale.TR / 4.0
     c = load_cortex("fsaverage5", verbose=False)
-    F = np.asarray(np.load(os.path.join(RESULTS, f"frames_{a.tag}.npy")), np.float32)
-    G = bandpass.apply(F, frame_s, lo, hi)
+    saved = np.asarray(np.load(os.path.join(RESULTS, f"frames_{a.tag}.npy")), np.float32)
+    if a.resimulate:
+        F = resimulate_raw(c, a.tag, frame_s)
+        G = bandpass.apply(F, frame_s, lo, hi)
+        # the reconstruction is only right if refiltering it returns what the run saved
+        m = min(len(G), len(saved))
+        r = float(np.corrcoef(G[:m].ravel(), saved[:m].ravel())[0, 1])
+        print(f"  resimulated raw field; refiltering it against the run's saved frames: "
+              f"r = {r:.6f}")
+        if r < 0.99:
+            raise SystemExit("  the reconstruction does not reproduce the saved run")
+    else:
+        F, G = saved, bandpass.apply(saved, frame_s, lo, hi)
 
     def power_in_band(X):
         Xc = X - X.mean(0, keepdims=True)
