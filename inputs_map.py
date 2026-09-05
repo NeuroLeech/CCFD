@@ -86,8 +86,11 @@ def main():
             ("grouped by thalamic nucleus", (nuc_map + 1)[t.cols].astype(float),
              nuc_cmap, (-0.5, len(NUCLEI) + 0.5)),
             ("geodesic distance to drive (mm)", dv, "viridis", (0, float(dv.max())))]
-    fig = plt.figure(figsize=(3.4 * len(proj), 2.4 * len(rows)))
-    gs = fig.add_gridspec(len(rows), len(proj), hspace=0.06, wspace=0.02)
+    # hspace 0.06 let the rotated row captions - which carry a second line with the
+    # colour range - run into the row below; "geodesic distance to drive (mm)" and
+    # "grouped by thalamic nucleus" overlapped outright
+    fig = plt.figure(figsize=(3.4 * len(proj), 2.7 * len(rows)))
+    gs = fig.add_gridspec(len(rows), len(proj), hspace=0.16, wspace=0.02)
     for r, (lab, vals, cm, lims) in enumerate(rows):
         surface_row(fig, gs, r, proj, vals, c, t.cols, cm, lims, lab)
     handles = [plt.Line2D([], [], marker="s", ls="", color=cols[g],
