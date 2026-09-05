@@ -18,8 +18,9 @@ simulated time against FC computed from 577 s of data.
 nilearn's release, so this command no longer scores what is recorded below — it gives
 +0.7102 ± 0.0005 against the new target. Under the passband the data was filtered to it
 gives +0.4701, and the swept optimum there is a different medium entirely: spread
-1.47 mm/s, decay 25 s, +0.6325. Everything in this section and in sections 1-9 was
-measured against the nilearn target and remains comparable with itself.
+1.47 mm/s, decay 25 s, **+0.6901 ± 0.0018** at a 2,308 s realisation. Everything in this
+section and in sections 1-9 was measured against the nilearn target at 577 s and remains
+comparable with itself.
 
 ```bash
 python best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
@@ -125,7 +126,7 @@ noise through this filter maps a 60× range of input decay (1–60 s) onto 4.29�
 and the empirical 4.06 s is below that whole range. The score is the usable handle, so
 both spread and decay were swept against it — decay is no longer pinned at 9.03 s.
 
-### The sweep, 40 runs (`bp_sweep.py`)
+### The sweep at 577 s, 40 runs (`bp_sweep.py`)
 
 sim over spread × decay, all bandpassed, 400 iterations, 2 draws:
 
@@ -146,9 +147,10 @@ Highest is **+0.6325 ± 0.0163 at spread 1.47 mm/s, decay 25 s** (`grid_s1.5_d25
 
 - **Spread is the sharper axis.** 2.95 is below every other row at every decay by margins
   outside scatter; 5.89 and above fall away steeply.
-- **sim is flat in decay above ~25 s** — 1.47 runs +0.597 to +0.633 across a 4× range,
-  non-monotonically, with per-run scatter up to 0.016. The maximum is not separated from
-  the plateau.
+- ~~**sim is flat in decay above ~25 s**~~ — 1.47 ran +0.597 to +0.633 across a 4× range
+  non-monotonically, with per-run scatter up to 0.016. **That plateau was sampling noise.**
+  At 2,308 s the same row rises monotonically to decay 25 with non-overlapping bars; see
+  below.
 - **The product is not sufficient.** At matched reach, spread 2.95 × decay 9.03 (26.6 mm)
   gives +0.5730 and spread 1.84 × decay 15 (27.6 mm) gives +0.6192 — 3× the scatter apart.
   `reach = spread × decay` does not summarise the pair under this objective.
@@ -168,6 +170,86 @@ rank **13.0**, FC r=0.5 at **9.1 mm** (20 subjects).
 decay from each saved `x`, and detects from the realisation's spectrum whether the
 observable was filtered — an unfiltered control caught by the same glob otherwise tops the
 ranking for the wrong reason. Its sim is draw 0 only, where the logs report the draw mean.
+
+### Realisation length was never required to be 577 s
+
+577 s matches one NKI run, but the target is a 100-subject Fisher-z average — close to the
+population covariance — while the model side was a single 577 s draw carrying its own
+estimation noise. Nothing makes the two share a duration. Realising longer from the SAME
+saved `S` (no re-solve, so the fit is identical and only the sampling changes):
+
+| frames | seconds | sim | rank | wall |
+|---|---|---|---|---|
+| 3,578 | 577 | +0.6488 | 15.2 | 24 s |
+| 7,156 | 1,154 | +0.6605 | 18.2 | 63 s |
+| 14,312 | 2,308 | +0.6899 | 19.7 | 229 s |
+| 28,624 | 4,616 | **+0.7004** | 20.9 | 1,288 s |
+
++0.052 for the identical fit, more than the whole spread × decay grid gained over its own
+starting point. A bandpassed model sampled for 4,616 s scores about what an unfiltered one
+sampled for 577 s does (+0.7107). Rank moves with it too, 15.2 → 20.9, so part of what
+reads as the model overshooting the empirical 13.0 is duration, not medium — and the
+empirical 13.0 is itself measured on ~900-frame runs. Cost scales worse than linearly.
+
+Distinct from `--pad`, which sets the transfer function's frequency resolution: that was
+tested at 16384 and landed inside the draw scatter.
+
+### The impulse window was too short for the passband
+
+The auto-bump set the window to exactly 3 decay times, cutting the response while still at
+exp(−3) = 5% of peak. Measured on the decay-25 medium against a 13-decay-time reference:
+
+| window | decay times | tail/peak | mean \|ΔH\|/\|H\| in 0.01–0.08 Hz |
+|---|---|---|---|
+| 512 (83 s) — what the 577 s grid used | 3.3 | 2.70e-02 | **4.63%** |
+| 1024 (165 s) | 6.6 | 6.63e-03 | 0.18% |
+| 2048 (330 s) | 13.2 | 4.94e-04 | reference |
+
+H is what the convex solve optimises against, so every bandpassed fit above carried that
+4.6%. Under a broadband objective it was spread over all frequencies; the passband IS the
+low-frequency end. The shortest cells were worse: spread 1.5 / decay 12 ran a **36 s**
+window against a **100 s** cycle at 0.01 Hz, because 224 frames just cleared 3 × 74 and no
+bump fired — so the bias ran along the decay axis being swept, not as a constant offset.
+`--impulse-decays` sets the multiplier, still defaulting to 3 so recorded runs reproduce;
+with `--bandpass` the window must also hold one cycle of the lowest passband frequency.
+
+### The grid re-run at 2,308 s with 7-decay windows (`g7_*`)
+
+|spread|d12|d15|d20|d25|
+|---|---|---|---|---|
+|1.47|+0.6357|+0.6546|+0.6771|**+0.6901 ± 0.0018**|
+|1.84|+0.6482|+0.6584|+0.6797|+0.6836|
+|2.58|+0.6406|+0.6485|+0.6439|+0.6508|
+|2.95|+0.6262|+0.6342|+0.6331|+0.6289|
+
+**+0.6901 ± 0.0018 at spread 1.47 mm/s, decay 25 s** — the same cell as at 577 s, so
+neither change moved the optimum. Against +0.4701 for the old 5.89 / 9.03 medium under the
+same filter, and +0.7102 unfiltered.
+
+- **The window fix is small and one-directional.** Against the four cells run at 2,308 s
+  with short windows: +0.6325→+0.6357, +0.6489→+0.6546, +0.6708→+0.6771, +0.6861→+0.6901.
+  Every one gains, +0.003 to +0.006 — about the draw scatter, and far less than length.
+- **Draw scatter collapses** to 0.0001–0.0072 from up to 0.0231. The whole 1.47 row is now
+  ordered with non-overlapping bars where decay 25/50/100 had been indistinguishable.
+- **The rows compress.** 2.95 is 0.06 below 1.47 at decay 25 but only 0.010 at decay 12, so
+  sim resolves spread less sharply than at 577 s. Moran gap still separates them cleanly
+  and monotonically — 0.065–0.076 at spread 1.47 against 0.131–0.133 at 2.95 — as does
+  rank, 17.4–20.5 against 11.2–12.2, with the empirical 13.0 nearest the WORST row.
+
+### Edge correlations
+
+`sim` is Spearman: `_prep` ranks both edge vectors, centres and normalises, so the score is
+a normalised dot product of ranks over the fixed 1,999,793-edge sample, both matrices
+double-centred (`metric=spearman, centre=double`). Pearson runs about 0.037 above it:
+
+| run | edge pearson | edge spearman | model edge sd |
+|---|---|---|---|
+| best bandpassed | +0.6863 | +0.6488 | 0.2311 |
+| unfiltered | +0.7599 | +0.7107 | 0.1801 |
+
+Target edge sd is 0.1302, so the model's edge distribution is **1.8× too wide** under the
+bandpass against 1.4× without it. Whether the model's FC is built by ranking the
+timecourses first barely matters — +0.6863 against +0.6852 for the same run.
 
 ---
 
