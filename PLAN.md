@@ -31,7 +31,9 @@ python best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
 **+0.7204 ± 0.0009** Spearman over 2M edges, 577 s realisation, Moran gap 0.060, field
 rank 22.1; 47 pieces driving 8,542 mm². The same configuration at `--spread-mm-s 3` gives
 +0.6679 ± 0.0033, and sensory at matched channel count and spread 3 gives +0.5695 ± 0.0162.
-Spread was swept and 6 mm/s is where that sweep peaked (reach = spread × decay = 53 mm).
+~~Spread was swept and 6 mm/s is where that sweep peaked~~ (reach = spread × decay =
+53 mm). **Superseded (§0):** that sweep ran against an unfiltered objective. Against the
+bandpassed one the peak is at **1.47 mm/s**, and 5.89 scores +0.4772 there.
 
 `--val-vert 0` matters: without it, `best_fit` turns on early stopping against a held-out
 COVARIANCE, which stopped the sensory arm at step 5 of 400 while subcortical ran to 399.
@@ -253,6 +255,13 @@ timecourses first barely matters — +0.6863 against +0.6852 for the same run.
 
 ---
 
+> **Sections 1–9 were all measured before 2026-09-04**, against the nilearn target, with
+> no bandpass on the observable, at a 577 s realisation and a 3-decay-time impulse window.
+> Section 0 changed all four. They remain comparable with each other and are not restated
+> here; individual claims that section 0 actively CONTRADICTS are marked inline below.
+> Claims merely measured under other conditions are left alone — that is what section 3's
+> own preamble already says about itself.
+
 ## 1. The clock (`timescale.py`)
 
 `c0` is not a speed knob and never was: `dt = CFL·d_min/c` means distance per step is
@@ -266,7 +275,10 @@ They differ by 99x. Under the first, a 1,120-frame window is 7.3 s and its lowes
 frequency is 0.137 Hz — above the entire resting-state band, so restricting the solver to
 what BOLD sees was not even expressible.
 
-**Both anchors are now measured from NKI:**
+**Both anchors are now measured from NKI:** — from *nilearn's* NKI. Re-measured on RBC's
+XCP-D preprocessing they read 1/e 4.06 s and slope −0.90 with 94.7% of power in band, but
+those describe the 0.01–0.08 Hz filter as much as the brain (§0).
+
 
 | quantity | value |
 |---|---|
@@ -275,13 +287,21 @@ what BOLD sees was not even expressible.
 | single-run field effective rank | 10.9–13.4 |
 | group FC effective rank | 90.2 |
 
-Decay is pinned to the data; spread is the one free parameter, with reach = spread × decay.
-At TR/4: frame 0.161 s, `save` 8, damping 2.23e-3, 3,578 frames = 577 s.
+~~Decay is pinned to the data; spread is the one free parameter~~, with reach = spread ×
+decay. At TR/4: frame 0.161 s, `save` 8, damping 2.23e-3, 3,578 frames = 577 s.
+**Superseded (§0):** decay was pinned to a 1/e measured on UNFILTERED nilearn data and
+applied to the medium's PRE-filter decay. Under the passband it is not recoverable from
+the filtered data either — a 60× range of input decay maps onto 4.29–7.70 s out — so both
+spread and decay are now swept against the score. Reach does not summarise the pair: at
+matched reach, spread 2.95 × decay 9.03 gives +0.5730 and 1.84 × 15 gives +0.6192.
 
 **Frequency resolution matters more than the medium did.** 0.01–0.03 Hz holds 63% of BOLD
 power and a 165 s window resolves three bins there. Padding 1024 → 4096 frames (661 s,
-0.0015 Hz bins) moved the score +0.291 → +0.504 with no model change. Zero-padding is free
-because the impulse has decayed by frame 224.
+0.0015 Hz bins) moved the score +0.291 → +0.504 with no model change. ~~Zero-padding is
+free because the impulse has decayed by frame 224.~~ **Corrected (§0):** at frame 224 the
+impulse is at 5% of peak, not zero, and that truncation is 4.6% error in H across
+0.01–0.08 Hz. Padding further does not recover it — 16384 landed inside the draw scatter —
+because zero-padding cannot restore a tail that was never integrated.
 
 ---
 
@@ -422,6 +442,14 @@ NEGATIVE: neither architecture (0.0075) nor target noise (0.0321) can account fo
 Accuracy split by the geodesic distance between an edge's endpoints has a minimum at
 10-30 mm. It is the deepest feature in the fit and it has not moved under anything tried.
 
+**Not re-measured since §0.** Everything here is the nilearn target, unfiltered, at 577 s,
+and the whole section turns on a length scale — the band ceiling of +0.9119 is a split-half
+of those 99 subjects, and the model's +0.5793 is a medium running at 5.89 mm/s. The
+bandpassed optimum runs at 1.47 mm/s with an in-band FC correlation length of 22 mm
+against 71 mm, which is the same scale this band sits at, so whether the dip survives is
+open rather than answered. `diag_edges.py` and `band_fail.py` on a `g7_*` tag would settle
+it.
+
 ### The curve, across input parameterisations
 
 Taper vs fixed-width Gaussian kernels, subcortical, spread 6, 47 pieces (`/tmp/prof.sh`):
@@ -561,7 +589,9 @@ correlation does not.
    empirical FC ≈ 0.2 then flattens, returning ~+0.28 where the data has +0.6. It is also
    over-dispersed overall (edge sd ratio 1.44 sensory, 1.60 subcortical) and shows a
    population of false-positive strong edges. `plot_edges.py`. Not itemised anywhere in the
-   ceiling budget — this is the live question.
+   ceiling budget — this is the live question. **Worse under the passband (§0):** against
+   the RBC target the ratio is 1.8× bandpassed against 1.4× unfiltered, so the filter
+   amplifies exactly this.
 2. **Data-driven splitting.** The remaining untested lever on the 10-30 mm band
    (section 4), and the only one that changes which vertices are grouped rather than the
    geometry of the grouping. `split_parcels` bisects the MESH graph by Fiedler vector, so
@@ -581,7 +611,9 @@ correlation does not.
    `_project` assumes EQUAL block sizes, so libraries varying the driven set need NNLS.
    Admissibility is a sharper test than the score: `Σ_target ⪰ w₁Σ₁` caps the current
    model's contribution at **5%** of a concatenation, because its covariance has effective
-   rank 25.6 against the target's 90.2.
+   rank 25.6 against the target's 90.2. **Recheck before reuse (§0):** that 25.6 is an
+   unfiltered 577 s figure. Bandpassed the same medium gives 4.1, and length alone moves
+   rank by a third, so the 5% cap is not a fixed property of the model.
 
 ---
 
@@ -627,12 +659,20 @@ across from a different configuration where the true value was ±0.005.
 
 Multi-draw mean **and** scatter; solve correlation (Pearson and Spearman vs the raw
 target); Moran gap; field rank; and the realisation length in SECONDS as well as frames.
-On the fMRI clock, quote 577 s (3,578 frames at TR/4) so it matches the data's duration.
+~~On the fMRI clock, quote 577 s (3,578 frames at TR/4) so it matches the data's
+duration.~~ **Superseded (§0):** matching the data's duration was never required — the
+target is a 100-subject average and only the model side carried the sampling noise.
+Length is worth +0.052 from 577 s to 4,616 s on an unchanged fit, so it has to be quoted
+with every score, and scores at different lengths are not comparable.
 
 Field rank has a reference now: a single fMRI run measures **10.9–13.4**. The group FC's
 90.2 is an average over 99 subjects and is NOT what one simulated run should match —
 `fc_score.attach_rank`'s docstring cites 95 for "the empirical FC" and that is the wrong
-comparison.
+comparison. **Two conditions on that reference (§0):** it is a nilearn number; on RBC's
+bandpassed runs the same measure gives **13.0** (8.8–17.9 over 20 subjects). And rank
+depends on how long the model was sampled — 15.2 at 577 s rising to 20.9 at 4,616 s for
+one unchanged fit — so a rank comparison is only meaningful at matched duration, which the
+empirical ~900-frame runs and a 577 s realisation roughly are.
 
 ---
 
