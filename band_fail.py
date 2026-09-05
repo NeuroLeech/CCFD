@@ -80,10 +80,21 @@ def main():
 
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
-    parcels, total = subparcels.region_set(c, a.regions, a.split)
-    labels, tags = subparcels.split_parcels(c, parcels, total, verbose=False)
+    # the pieces the RUN drove, not a reconstruction from --regions/--split. Rebuilding
+    # them silently scores against a different driven set whenever the flags do not match
+    # the run - and the --split default of 50 does not match the 40 these runs used. Same
+    # failure diag_distance had, where it reported a drive geometry the tag never had.
+    zp = os.path.join(RESULTS, f"xspec_{a.tag}.npz")
+    if os.path.exists(zp):
+        z = np.load(zp, allow_pickle=True)
+        labels, tags = z["labels"], list(z["tags"])
+        src = f"from xspec_{a.tag}.npz"
+    else:
+        parcels, total = subparcels.region_set(c, a.regions, a.split)
+        labels, tags = subparcels.split_parcels(c, parcels, total, verbose=False)
+        src = f"rebuilt from --regions {a.regions} --split {a.split}"
     driven = labels >= 0
-    print(f"  {a.tag}: {a.regions}, {len(tags)} pieces, "
+    print(f"  {a.tag}: {a.regions}, {len(tags)} pieces ({src}), "
           f"{int(driven.sum())} driven vertices; band {lo:.0f}-{hi:.0f} mm")
 
     # nearest driven vertex, and which PIECE (hence which Glasser parcel) it belongs to
@@ -134,10 +145,23 @@ def main():
     print(f"  corr(band, all-partner) {np.corrcoef(acc_b[ok], acc_a[ok])[0,1]:+.3f}"
           f"   - how much of the band miss is just a globally bad vertex")
 
+    # the cache name ends in the TARGET's vertex count, so it was hardcoded to 9217 and
+    # silently belonged to the nilearn target. Against the 9,310-vertex RBC target it
+    # loaded an array of the wrong length and crashed on the mask. Derive it, and check
+    # the length even then - a stale file with a coincidentally right name would be worse
+    # than none.
     rel = None
-    p = os.path.join(CACHE, "vertex_quality_1500_0_9217.npz")
-    if os.path.exists(p):
+    p = os.path.join(CACHE, f"vertex_quality_1500_0_{nV}.npz")
+    if not os.path.exists(p):
+        print(f"  per-vertex reliability: no {os.path.basename(p)} "
+              f"(vertex_quality.py builds it); skipping that correlation")
+    else:
         rel = np.load(p)["rel"]
+        if len(rel) != nV:
+            print(f"  per-vertex reliability: {os.path.basename(p)} holds {len(rel)} "
+                  f"vertices for a {nV}-vertex target; skipping")
+            rel = None
+    if rel is not None:
         m = ok & np.isfinite(rel)
         print(f"  corr(band accuracy, per-vertex reliability) "
               f"{np.corrcoef(acc_b[m], rel[m])[0,1]:+.3f}")
