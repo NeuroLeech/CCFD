@@ -150,11 +150,17 @@ def main():
     # loaded an array of the wrong length and crashed on the mask. Derive it, and check
     # the length even then - a stale file with a coincidentally right name would be worse
     # than none.
+    # vertex_quality keys its cache by vertex count and, since 2026-09-05, by which
+    # release the split-half subjects came from - both can produce the same nV, and a
+    # reliability built from the other release is not a ceiling on THIS target. Which one
+    # to want is readable off the target's own filename.
     rel = None
-    p = os.path.join(CACHE, f"vertex_quality_1500_0_{nV}.npz")
+    sfx = "_rbc" if "RBC" in os.path.basename(t.fc_path) else ""
+    p = os.path.join(CACHE, f"vertex_quality_1500_0_{nV}{sfx}.npz")
     if not os.path.exists(p):
-        print(f"  per-vertex reliability: no {os.path.basename(p)} "
-              f"(vertex_quality.py builds it); skipping that correlation")
+        print(f"  per-vertex reliability: no {os.path.basename(p)} for target "
+              f"{os.path.basename(t.fc_path)} (vertex_quality.py"
+              f"{' --source rbc' if sfx else ''} builds it); skipping that correlation")
     else:
         rel = np.load(p)["rel"]
         if len(rel) != nV:

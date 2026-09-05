@@ -33,6 +33,19 @@ from paths import RESULTS, CACHE
 import fc_score, fc_group_nki as nki
 
 
+def _load(src, idx):
+    """One subject's (nV, T) timeseries on the target's vertices, from either source.
+
+    `src` is a nilearn path or an rbc.Run. The two releases are different preprocessing of
+    overlapping people, so which one is used has to follow the TARGET - a reliability built
+    from nilearn subjects and cached under the RBC target's vertex count would be the same
+    silent mismatch the hardcoded 9217 filename in band_fail was."""
+    if isinstance(src, str):
+        return nki.load_subject(src)[idx]
+    import rbc
+    return rbc.load(src, verbose=False)[0][idx]
+
+
 def group_profiles(files, idx, part, metric="spearman"):
     """Group-average FC profile for every vertex against a common partner set.
 
@@ -41,7 +54,7 @@ def group_profiles(files, idx, part, metric="spearman"):
     acc = np.zeros((len(idx), len(part)), np.float64)
     ppos = np.searchsorted(idx, part)
     for k, p in enumerate(files, 1):
-        X = nki.load_subject(p)[idx]
+        X = _load(p, idx)
         Z = rankdata(X, axis=1).astype(np.float32) if metric == "spearman" else X.copy()
         Z -= Z.mean(1, keepdims=True)
         sd = Z.std(1, keepdims=True); sd[sd == 0] = 1.0
@@ -60,14 +73,28 @@ def main():
     ap.add_argument("--npart", type=int, default=1500,
                     help="common partner set each vertex's profile is taken against")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--source", default="nilearn", choices=("nilearn", "rbc"),
+                    help="which release the split-half subjects come from. This must "
+                         "match whatever the TARGET was built from: the reliability is a "
+                         "ceiling on that target, and the cache is keyed only by vertex "
+                         "count, which both releases share")
+    ap.add_argument("--cohort", type=int, default=100)
     a = ap.parse_args()
 
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=True)
-    files = nki.subject_files("left")
-    print(f"  {len(files)} subjects")
+    if a.source == "rbc":
+        import json, rbc
+        subs = json.load(open(os.path.join(
+            CACHE, f"rbc_cohort_{a.cohort}_seed0.json")))["subjects"]
+        files = rbc.cohort_runs(subs, specs=(("rest", "645"),))[("rest", "645")]
+    else:
+        files = nki.subject_files("left")
+    print(f"  {len(files)} subjects from {a.source}")
 
-    cache = os.path.join(CACHE, f"vertex_quality_{a.npart}_{a.seed}_{t.nV}.npz")
+    # the source belongs in the key: both releases can produce the same vertex count
+    sfx = "" if a.source == "nilearn" else f"_{a.source}"
+    cache = os.path.join(CACHE, f"vertex_quality_{a.npart}_{a.seed}_{t.nV}{sfx}.npz")
     if os.path.exists(cache):
         z = np.load(cache)
         rel, sd_map, part = z["rel"], z["sd"], z["part"]
@@ -100,7 +127,7 @@ def main():
         print("  temporal SD map:")
         sd_map = np.zeros(len(idx))
         for k, p in enumerate(files, 1):
-            sd_map += nki.load_subject(p)[idx].std(1)
+            sd_map += _load(p, idx).std(1)
             if k % 40 == 0:
                 print(f"    {k}/{len(files)}", flush=True)
         sd_map /= len(files)
