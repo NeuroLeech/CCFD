@@ -160,7 +160,18 @@ def main():
 
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=True)
-    labels, tags = subparcels.split_parcels(c, subparcels.SENSORY, a.split, verbose=False)
+    # the pieces the RUN drove. Hardcoding subparcels.SENSORY marked sensory cortex as
+    # driven for every tag, including the subcortically-driven ones - the third place this
+    # bug appeared, after diag_distance and band_fail.
+    zp = os.path.join(RESULTS, f"xspec_{a.tag}.npz")
+    if os.path.exists(zp):
+        z = np.load(zp, allow_pickle=True)
+        labels, tags = z["labels"], list(z["tags"])
+        print(f"  driven set from xspec_{a.tag}.npz: {len(tags)} pieces")
+    else:
+        labels, tags = subparcels.split_parcels(c, subparcels.SENSORY, a.split,
+                                                verbose=False)
+        print(f"  no saved solve for {a.tag}; driven set rebuilt from SENSORY")
     driven = (labels >= 0)[t.cols]
 
     fp = os.path.join(RESULTS, f"frames_{a.tag}.npy")

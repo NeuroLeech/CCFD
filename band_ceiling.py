@@ -38,11 +38,27 @@ def band_lists(cortex, cols, lo, hi, block=1024):
     return out
 
 
+def _load(src, idx):
+    """One subject's (nV, T) on the target's vertices, from either release.
+
+    `src` is a nilearn path or an rbc.Run - the same dispatch vertex_quality uses, and for
+    the same reason: which release is read has to follow the target, not the script."""
+    if isinstance(src, str):
+        return nki.load_subject(src)[idx]
+    import rbc
+    return rbc.load(src, verbose=False)[0][idx]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--band", default="10,20")
     ap.add_argument("--tag", default="pr_taper")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--source", default="nilearn", choices=("nilearn", "rbc"),
+                    help="which release the split-half subjects come from. The ceiling is "
+                         "a property of the TARGET, so this has to match whatever the "
+                         "target was built from")
+    ap.add_argument("--cohort", type=int, default=100)
     a = ap.parse_args()
     lo, hi = [float(v) for v in a.band.split(",")]
 
@@ -61,11 +77,22 @@ def main():
           f"vs sd over ALL partners {float(TFC[0].std()):.4f} (vertex 0)")
     del TFC
 
-    cache = os.path.join(CACHE, f"band_ceiling_{int(lo)}_{int(hi)}_{a.seed}.npz")
+    # the source belongs in the key: the ceiling is the target's, and both releases cover
+    # the same vertices, so a nilearn ceiling would load silently against an RBC target
+    sfx = "" if a.source == "nilearn" else f"_{a.source}"
+    cache = os.path.join(CACHE,
+                         f"band_ceiling_{int(lo)}_{int(hi)}_{a.seed}{sfx}.npz")
     if os.path.exists(cache):
         z = np.load(cache); ceil = z["ceil"]
     else:
-        files = nki.subject_files("left")
+        if a.source == "rbc":
+            import json, rbc
+            subs = json.load(open(os.path.join(
+                CACHE, f"rbc_cohort_{a.cohort}_seed0.json")))["subjects"]
+            files = rbc.cohort_runs(subs, specs=(("rest", "645"),))[("rest", "645")]
+        else:
+            files = nki.subject_files("left")
+        print(f"  {len(files)} subjects from {a.source}")
         rng = np.random.default_rng(a.seed)
         which = rng.permutation(len(files)) % 2          # same convention as holdout
         acc = [np.zeros((t.nV, t.nV), np.float32) for _ in range(2)]
@@ -73,7 +100,7 @@ def main():
         t0 = time.time()
         for s, path in enumerate(files):
             h = int(which[s])
-            X = nki.load_subject(path)[t.vertices]
+            X = _load(path, t.vertices)
             Z = rankdata(X, axis=1).astype(np.float32)
             Z -= Z.mean(1, keepdims=True)
             Z /= np.maximum(Z.std(1, keepdims=True), 1e-12)
