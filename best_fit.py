@@ -282,6 +282,11 @@ def main():
     ap.add_argument("--band", default="",
                     help="restrict the input cross-spectrum to LO,HI in Hz "
                          "(e.g. 0.01,0.1). Needs --oversample to have a clock")
+    ap.add_argument("--fc-split", type=int, default=0, dest="fc_split",
+                    help="weight the mesh edges by FC-profile similarity when bisecting "
+                         "pieces, using N common partners (try 2000). 0 = the geometric "
+                         "split. Pieces stay contiguous and area-balanced either way; "
+                         "only WHICH vertices end up together changes")
     ap.add_argument("--impulse-decays", type=float, default=3.0, dest="impulse_decays",
                     help="how many decay times the impulse window must hold. The default "
                          "of 3 is what every run before 2026-09-04 used and leaves 4.6%% "
@@ -335,7 +340,14 @@ def main():
     t = fc_score.default_target(c, centre=a.centre, verbose=True)
     mm = MoranMatch(c, t)
     parcels, split = subparcels.region_set(c, a.regions, a.split, a.spread_scale)
-    labels, tags = subparcels.split_parcels(c, parcels, split, verbose=False)
+    fc_split = None
+    if a.fc_split:
+        fc_split = subparcels.fc_profiles(c, t, npart=a.fc_split)
+        print(f"  splitting pieces by FC profile ({a.fc_split} common partners) rather "
+              f"than by mesh geometry alone")
+    labels, tags = subparcels.split_parcels(
+        c, parcels, split, verbose=False, fc=fc_split,
+        fc_key=f"_fc{a.fc_split}" if a.fc_split else "")
     P = (subparcels.taper_profiles(c, labels, len(tags)) if a.profile == "taper"
          else subparcels.gauss_profiles(c, labels, len(tags), a.profile_fwhm,
                                         mask=(labels >= 0) if a.profile_mask else None))

@@ -83,9 +83,75 @@ def _subgraph(cortex, verts):
     return (A + A.T).tocsr()
 
 
-def _bisect(cortex, verts, area):
-    """Split one vertex set in two along its Fiedler vector, balanced by area."""
-    A = _subgraph(cortex, verts)
+def fc_profiles(cortex, target, npart=2000, seed=0):
+    """-> (cortex.nV, npart) each vertex's FC profile against one common partner set.
+
+    A common partner set matters: two vertices are only comparable if their profiles are
+    taken against the SAME columns. Vertices the target does not cover keep a zero row and
+    are excluded by `have`."""
+    rng = np.random.default_rng(seed)
+    part = np.sort(rng.choice(target.nV, npart, replace=False))
+    T = np.asarray(target.target_fc())[:, part]
+    # cols, not vertices: `vertices` indexes the 10,242-vertex fsaverage5 space the data
+    # ships in, `cols` the cortex submesh with the medial wall cut out, which is what
+    # cortex.edges and cortex.A are indexed by
+    P = np.zeros((cortex.nV, npart), np.float32)
+    P[target.cols] = T
+    P -= P.mean(1, keepdims=True)
+    P /= np.maximum(np.linalg.norm(P, axis=1, keepdims=True), 1e-12)
+    have = np.zeros(cortex.nV, bool)
+    have[target.cols] = True
+    return P, have
+
+
+def _subgraph_fc(cortex, verts, fc, floor=1e-3, scale=1.0):
+    """Mesh adjacency of `verts`, each edge weighted by how similar its endpoints' FC
+    profiles are.
+
+    Only MESH edges ever carry weight, so a cut of this graph is a cut of the surface and
+    the pieces stay contiguous - the property the whole pipeline rests on and the reason
+    this is a reweighting rather than a clustering. The Fiedler vector then separates the
+    set where FC changes fastest ALONG the surface instead of where the geometry is
+    thinnest.
+
+    The scale is taken FROM THE SET being cut, which is what makes this do anything at
+    all. FC profiles are extremely smooth along the surface - across mesh edges inside a
+    parcel the profile correlation runs 0.91 to 0.999 - so an absolute map like
+    ((1+r)/2)**4 spans a factor of 1.1 and leaves the graph effectively unweighted, which
+    is what the first version of this did (adjusted Rand 0.988 against the geometry
+    split). Here d = 1 - r is divided by its own median over the subgraph's edges before
+    the exponential, so a typical edge gets exp(-1) whatever the parcel's smoothness and
+    only the relatively dissimilar edges are cheap to cut.
+
+    Floored so the graph cannot disconnect: a zero-weight edge would let the bisection
+    return a piece the mesh does not actually join."""
+    P, have = fc
+    pos = -np.ones(cortex.nV, np.int64)
+    pos[verts] = np.arange(len(verts))
+    E = cortex.edges
+    keep = (pos[E[:, 0]] >= 0) & (pos[E[:, 1]] >= 0)
+    ea, eb = E[keep, 0], E[keep, 1]
+    r = np.einsum("ij,ij->i", P[ea], P[eb])
+    ok = have[ea] & have[eb]
+    d = 1.0 - r
+    med = float(np.median(d[ok])) if ok.any() else 0.0
+    sig = scale * med
+    w = (np.maximum(np.exp(-d / sig), floor) if sig > 1e-12
+         else np.ones(len(d)))
+    w[~ok] = 1.0                             # uncovered vertices fall back to geometry
+    a, b = pos[ea], pos[eb]
+    n = len(verts)
+    A = sp.coo_matrix((w, (a, b)), shape=(n, n))
+    return (A + A.T).tocsr()
+
+
+def _bisect(cortex, verts, area, fc=None):
+    """Split one vertex set in two along its Fiedler vector, balanced by area.
+
+    With `fc` the mesh edges are weighted by FC-profile similarity, so the cut follows a
+    functional boundary; without it every edge weighs the same and the cut follows
+    geometry alone."""
+    A = _subgraph_fc(cortex, verts, fc) if fc is not None else _subgraph(cortex, verts)
     ncomp, lab = connected_components(A, directed=False)
     if ncomp > 1:                       # already in pieces: peel off the largest
         sizes = np.array([area[verts[lab == i]].sum() for i in range(ncomp)])
@@ -127,7 +193,8 @@ def _absorb_slivers(cortex, pieces, area, floor):
     return pieces
 
 
-def split_parcels(cortex, parcels=SENSORY, total=50, verbose=True):
+def split_parcels(cortex, parcels=SENSORY, total=50, verbose=True, fc=None,
+                  fc_key=""):
     """-> (labels over cortex vertices, list of (parcel, piece) tags).
 
     Piece count per parcel is its area divided by the common target, so the split is
@@ -136,7 +203,8 @@ def split_parcels(cortex, parcels=SENSORY, total=50, verbose=True):
     if len(key) > 120:                  # 70+ parcel ids overflow the 255-byte filename
         import hashlib
         key = f"{len(parcels)}p-{hashlib.sha1(key.encode()).hexdigest()[:12]}"
-    cache = os.path.join(CACHE, f"subparcels_{cortex.mesh}_{total}_{key}.npz")
+    cache = os.path.join(CACHE,
+                         f"subparcels_{cortex.mesh}_{total}_{key}{fc_key}.npz")
     if os.path.exists(cache):
         z = np.load(cache, allow_pickle=True)
         return z["labels"], list(z["tags"])
@@ -155,7 +223,7 @@ def split_parcels(cortex, parcels=SENSORY, total=50, verbose=True):
         pieces = [verts]
         while len(pieces) < k:
             i = int(np.argmax([area[q].sum() for q in pieces]))
-            a, b = _bisect(cortex, pieces[i], area)
+            a, b = _bisect(cortex, pieces[i], area, fc)
             if len(a) == 0 or len(b) == 0:
                 break
             pieces[i:i + 1] = [a, b]

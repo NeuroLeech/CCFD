@@ -253,6 +253,64 @@ Target edge sd is 0.1302, so the model's edge distribution is **1.8× too wide**
 bandpass against 1.4× without it. Whether the model's FC is built by ranking the
 timecourses first barely matters — +0.6863 against +0.6852 for the same run.
 
+### The fitted input is self-cancelling (`interference.py`)
+
+The medium is linear, so the field is a superposition of one contribution per piece and
+each can be formed separately from the cached impulse responses — no new simulation. Per
+vertex, `coherent = var_t(Σ_k f_k)` against `incoherent = Σ_k var_t(f_k)`: what the field
+does, against what it would do if the pieces never met.
+
+Summed over cortex the ratio is **0.552**, and **96.0% of vertices are below 1**. The
+pieces produce a little over half the variance they would produce independently. Frame by
+frame the cortex-summed cross term is **never positive** in 600 frames (mean −0.462, range
+−0.639 to −0.095), so this is a standing arrangement rather than a beat; locally 79.5% of
+vertex-frames cancel and about a fifth reinforce. Each vertex is fed by ~11 pieces
+(participation ratio of the variance share, median 10.8, p5–p95 3.7–21.5), and that is
+nearly independent of how much they cancel (r = +0.149).
+
+**No contributor resembles the result.** Each piece's contribution against the total, over
+vertices × time: max +0.236, median +0.107; `Σ r² = 0.636` where orthogonal pieces give
+1.0. Each piece's OWN FC against the target: max +0.278, median +0.176 — against the
+combination's +0.733. The fit is emergent, not carried by any source.
+
+Verified before use: the superposition reproduces the run's saved frames at r = 0.998965
+(sd ratio 1.008, the residual being the per-step drive against per-`save` responses), and
+the analytic route — `coherent` and `incoherent` straight from S and H — agrees with the
+time-domain one at 0.545 vs 0.552, per-vertex r 0.997/0.999. The analytic H must carry the
+BANDPASS as well as the smoothing kernel; with only the kernel it reads 0.837.
+
+### How much of that the fit requires (`xspec.incoherent_reg`, `family_member`)
+
+Incoherent power is linear in `diag(S)` with fixed weights, so it drops into the existing
+feasible-direction machinery: minimise it with the fit held within `eps` of the argmax,
+trace preserved. Not a penalty weight — `family_member`'s docstring gives the reason.
+
+| eps | fit | incoherent | coherent/incoherent | stopped on |
+|---|---|---|---|---|
+| 0 | +0.7564 | — | 0.544 | — |
+| 0.0002 | +0.7562 | −2.7% | 0.552 | fit |
+| 0.001 | +0.7554 | −10.2% | 0.578 | fit |
+| 0.01 | +0.7464 | −36.0% | 0.676 | fit |
+| 0.05 | +0.7064 | −62.6% | 0.783 | fit |
+| 0.1 | +0.6564 | −74.8% | 0.852 | fit |
+| 0.2 | +0.5564 | −84.9% | 0.942 | fit |
+| **0.35** | **+0.4064** | −90.3% | **0.999** | fit |
+| 0.5 | +0.3183 | −92.0% | 1.000 | **R** |
+
+**There is no slack**: every eps down to 0.0002 ends with the fit constraint binding, so
+cancellation cannot be reduced at zero cost. What is true is that the exchange rate is
+steep — 0.1% of fit buys a 10% reduction — and smooth over two and a half decades with no
+knee. The objective is a scale-invariant correlation of PATTERNS and never sees how much
+opposing power bought them, so the amount present at the argmax is only weakly determined.
+
+**Zero cancellation costs 46% of the fit.** A fully non-cancelling input exists and scores
++0.3183; beyond eps=0.35 the search stops on R rather than on the fit and lands in the same
+place at every larger eps, so a ratio above 1 is unreachable — these 47 pieces can be made
+not to interfere, never to reinforce.
+
+These are lower bounds on how much cancellation could be shed: `family_member` finds *a*
+member within eps, not provably the minimum, and stopped after ~30 accepted steps each time.
+
 ---
 
 > **Sections 1–9 were all measured before 2026-09-04**, against the nilearn target, with

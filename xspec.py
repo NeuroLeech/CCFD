@@ -310,6 +310,37 @@ def logdet_reg(delta=0.05):
     return R
 
 
+def incoherent_reg(H, w):
+    """Total power the pieces would produce if they never met. sign=-1 minimises it.
+
+    The fitted input is strongly self-cancelling: summed over cortex the field's variance
+    is about 0.55 of what the same 47 channels would give with their cross terms removed.
+    That could be structural - the target may only be reachable by opposing sources - or it
+    could be slack, because the objective is a scale-invariant ratio and never sees how
+    much cancellation it buys. This regulariser is how the two are told apart, since
+    minimising it AT EQUAL FIT asks whether an equally good input exists that cancels less.
+
+    Incoherent power summed over vertices is
+
+        sum_f w_f 2 sum_k ||H[f,:,k]||^2 S[f,k,k]
+
+    which is LINEAR in diag(S) with fixed non-negative weights, so the gradient is a
+    constant real diagonal per frequency and there is no barrier to tune. family_member
+    holds the trace, so this cannot be minimised by shrinking S; it can only move power
+    between channels, and the eps constraint stops it moving power somewhere that does not
+    fit."""
+    n = np.stack([w[f] * 2.0 * (np.abs(H[f]) ** 2).sum(0) for f in range(len(w))])
+
+    def R(S):
+        d = np.real(np.diagonal(S, axis1=1, axis2=2))
+        val = float((n * d).sum())
+        G = np.zeros_like(S)
+        for f in range(S.shape[0]):
+            G[f] = np.diag(n[f]).astype(S.dtype)
+        return val, G
+    return R
+
+
 def prank_reg():
     """Participation-ratio rank of the input. sign=+1 spreads power over modes.
 
