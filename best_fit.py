@@ -116,7 +116,7 @@ def held_out_score(t, frames, val, val_raw_ranks):
 
 def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, nb,
                  sched_f, ps, dt, kern, cpl, Lw=None, keep_f=None, spec=None,
-                 band=None, frame_s=None):
+                 band=None, frame_s=None, segment=None):
     """Choose where to stop the solve, by simulating at each candidate and scoring on
     held-out vertices.
 
@@ -155,7 +155,8 @@ def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, n
         if cpl is not None and run_fn is None:
             run_fn = lambda dr, ns, sv: bo_step.fl.run(c, dr, p, ns, sv, coupling=cpl)
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, run_fn=run_fn,
-                                    kernel=kern, band=band, frame_s=frame_s)
+                                    kernel=kern, band=band, frame_s=frame_s,
+                                    segment=segment)
         v = held_out_score(t, r["frames"], val, yv)
         scores[n] = v
         print(f"    {n:5d} iterations: held-out realised {v:+.4f}  "
@@ -320,6 +321,23 @@ def main():
                          "driven AREA matches the taper version and only the shape "
                          "differs. Without it a wide kernel drives far more cortex and "
                          "coverage is confounded with profile shape")
+    ap.add_argument("--fc-path", default="", dest="fc_path",
+                    help="pin the target FC matrix instead of taking the newest one "
+                         "matching fc_score's glob. Needed for anything in results/fc/"
+                         "task, which is deliberately outside that glob")
+    ap.add_argument("--medoid-from", default="", dest="medoid_from",
+                    help="take the solve and validation vertex subsets from THIS target "
+                         "rather than from the one being fitted. Two arms whose solved "
+                         "inputs are to be differenced have to have been solved on the "
+                         "same vertices; xspec.medoid_subset keys its cache on the "
+                         "vertex COUNT alone, so same-sized targets would otherwise "
+                         "share a subset by accident rather than by intent")
+    ap.add_argument("--segment-s", type=float, default=0.0, dest="segment_s",
+                    help="the target was estimated from demeaned blocks this many "
+                         "seconds long (18.1 for the checkerboard's 28-frame windows). "
+                         "Multiplies H by bandpass.segment_response and chops the "
+                         "realised frames the same way, so both sides lose the same low "
+                         "frequencies. Needs --oversample for a clock, like --bandpass")
     ap.add_argument("--tag", default="best")
     ap.add_argument("--best", action="store_true",
                     help="the pinned best sensory-only configuration (see BEST). Any "
@@ -337,7 +355,8 @@ def main():
         print("  --best: " + ", ".join(f"{k}={getattr(a, k)}" for k in BEST))
 
     c = load_cortex("fsaverage5", verbose=False)
-    t = fc_score.default_target(c, centre=a.centre, verbose=True)
+    t = (fc_score.FCTarget(c, fc_path=a.fc_path, centre=a.centre, verbose=True)
+         if a.fc_path else fc_score.default_target(c, centre=a.centre, verbose=True))
     mm = MoranMatch(c, t)
     parcels, split = subparcels.region_set(c, a.regions, a.split, a.spread_scale)
     fc_split = None
@@ -398,6 +417,15 @@ def main():
           + (f", impulse window {a.impulse_frames} frames "
              f"(decay {1.0/(10**x[0]*save):.0f})" if a.impulse_frames != 280 else ""))
 
+    seg_fr = 0
+    if a.segment_s:
+        if clock is None:
+            raise SystemExit("  --segment-s needs --oversample: the window is defined in "
+                             "seconds and without a clock there is no mapping to frames")
+        seg_fr = int(round(a.segment_s / clock["frame_s"]))
+        print(f"  target estimated from {a.segment_s:g}s demeaned blocks "
+              f"= {seg_fr} model frames")
+
     bp = fs_bp = None
     if a.bandpass:
         if clock is None:
@@ -409,12 +437,20 @@ def main():
         fs_bp = clock["frame_s"]
         print(f"  observable bandpassed {bp[0]}-{bp[1]} Hz, matching the target's filter")
 
-    sub = xspec.medoid_subset(t, a.nvert)
+    tm, mkey = t, None
+    if a.medoid_from:
+        tm = fc_score.FCTarget(c, fc_path=a.medoid_from, centre=a.centre, verbose=False)
+        if not np.array_equal(tm.vertices, t.vertices):
+            raise SystemExit("  --medoid-from is on different vertices from the target; "
+                             "the subsets would index different things")
+        mkey = os.path.basename(a.medoid_from).split("_hemi")[0]
+        print(f"  solve vertices taken from {mkey}")
+    sub = xspec.medoid_subset(tm, a.nvert, cache_key=mkey)
     # held-out vertices serve two mechanisms that must not both run: selecting the
     # stopping point by realised score (--select-iters), or early stopping inside the
     # solve on the predicted covariance. Selection supersedes it, so it wins.
     n_val = a.val_vert or (1000 if a.select_iters else 0)
-    val = xspec.validation_subset(t, sub, n_val) if n_val else None
+    val = xspec.validation_subset(tm, sub, n_val) if n_val else None
     n = len(sub)
     iu = np.triu_indices(n, 1)
     raw = np.asarray(t.target_fc()[np.ix_(sub, sub)], np.float64)
@@ -469,6 +505,17 @@ def main():
                 Hv = Hv * br[:, None, None]
             print(f"    filter response over the kept bins: {br.min():.3f}-{br.max():.3f}, "
                   f"{int((br > 0.5).sum())} of {len(br)} bins above 0.5")
+        if seg_fr:
+            import bandpass
+            sr = bandpass.segment_response(idx, ref_frames, clock["frame_s"], seg_fr)
+            H = H * sr[:, None, None]
+            if Hv is not None:
+                Hv = Hv * sr[:, None, None]
+            fb = np.asarray(idx, float) / (ref_frames * clock["frame_s"])
+            for hz in (0.01, 0.02, 0.03, 0.05):
+                k = int(np.argmin(np.abs(fb - hz)))
+                print(f"    segment weighting keeps {sr[k]**2:6.1%} of the power at "
+                      f"{fb[k]:.4f} Hz")
     else:
         ps = regimes.regime_set(c, p, regime_deltas(
             nb, a.regime_span, a.regime_map, a.regime_target, base=p))
@@ -526,7 +573,8 @@ def main():
         a.iters = select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct,
                                Tgt, nb, sched_f if nb > 1 else None,
                                ps if nb > 1 else None, dt if nb > 1 else None, kern, cpl,
-                               Lw, keep_f, spec, band=bp, frame_s=fs_bp)
+                               Lw, keep_f, spec, band=bp, frame_s=fs_bp,
+                               segment=seg_fr)
     tr = []
     S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
                        share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
@@ -571,7 +619,7 @@ def main():
         rest = [xspec.realise(S, idx, a.frames, ref_frames=ref_frames, seed=1000 + d)
                 for d in range(1, a.draws)]
         pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
-                                          band=bp, frame_s=fs_bp)
+                                          band=bp, frame_s=fs_bp, segment=seg_fr)
         print(f"  draws 2-{a.draws} scored over {min(a.workers, len(rest))} workers",
               flush=True)
     for d in range(1 if pool is not None else a.draws):
@@ -588,7 +636,8 @@ def main():
             run_fn = (lambda dr, nsteps, sv: bo_step.fl.run(
                 c, dr, p, nsteps, sv, coupling=cpl))
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P,
-                                    run_fn=run_fn, kernel=kern, band=bp, frame_s=fs_bp)
+                                    run_fn=run_fn, kernel=kern, band=bp, frame_s=fs_bp,
+                                    segment=seg_fr)
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
         if d == 0:
             if nb > 1:
@@ -599,8 +648,16 @@ def main():
         for sim, gap, rk in res.get():
             sims.append(sim); gaps.append(gap); rks.append(rk)
         pool.close(); pool.join()
+    # pad, ref_frames and the clock go in the file. Without them a reader has to guess
+    # what frequency a solved bin is, and piece_power's answer depends on that guess.
     np.savez(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), S=S, idx=idx, x=x,
-             save=save, labels=labels, tags=np.array(tags, dtype=object))
+             save=save, labels=labels, tags=np.array(tags, dtype=object),
+             pad=a.pad, ref_frames=ref_frames,
+             frame_s=(clock["frame_s"] if clock else np.nan),
+             band=np.array(bp if bp else (np.nan, np.nan)), segment=seg_fr,
+             fc_path=(a.fc_path or ""), H_w=w, regions=a.regions, split=a.split,
+             sub=sub, impulse_frames=a.impulse_frames, nfreq=a.nfreq,
+             medoid_from=(a.medoid_from or ""))
     print(f"\n  realised over {a.frames} frames, {a.draws} draws: "
           f"sim {np.mean(sims):+.4f} +- {np.std(sims):.4f}   "
           f"gap {np.mean(gaps):.3f}   rank {np.mean(rks):.1f}")

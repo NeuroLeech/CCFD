@@ -74,6 +74,85 @@ def transfer_response(idx, ref_frames, frame_s, lo=LO_HZ, hi=HI_HZ, order=ORDER)
     return response(f, frame_s, lo, hi, order)
 
 
+# --------------------------------------------------------------------- segmenting
+# A block-design run cannot be used whole if the question is about ONE condition: the
+# CHECKER frames are three 20 s stretches separated by fixation. Concatenating them and
+# demeaning each stretch is how an FC is built from one condition, and it costs the low
+# frequencies - a 18 s stretch cannot represent 0.01 Hz. Rather than argue about which
+# band survives, the same operation is applied to the model, and the amount lost is a
+# number rather than a caveat.
+
+
+def segment_power(freqs_hz, frame_s, seg_frames):
+    """Fraction of the power at each frequency that survives per-segment demeaning.
+
+    Removing the mean of every n-sample segment and then estimating the covariance from
+    the concatenation gives, for a stationary process with cross-spectrum P,
+
+        E[cov] = integral P(f) * W(f) df,     W(f) = 1 - |D_n(f)|^2 / n^2
+
+    with D_n the Dirichlet kernel sum_t exp(-2 pi i f t dt). This is exact, not a
+    phase-averaged approximation: the estimator itself averages over position within the
+    segment, and that average is what turns the two cross terms and the mean-square term
+    into a single |D_n|^2/n^2. W is 0 at DC, 1 at every multiple of 1/(n*dt), and in
+    between it is what a short window costs.
+    """
+    f = np.asarray(freqs_hz, float)
+    n = int(seg_frames)
+    dt = float(frame_s)
+    num = np.sin(np.pi * f * n * dt)
+    den = np.sin(np.pi * f * dt)
+    D = np.where(np.abs(den) < 1e-12, float(n), num / np.where(np.abs(den) < 1e-12, 1.0, den))
+    return np.clip(1.0 - (D / n) ** 2, 0.0, 1.0)
+
+
+def segment_response(idx, ref_frames, frame_s, seg_frames):
+    """The SIGNAL-level multiplier for H, on the bins `xspec.transfer` keeps.
+
+    sqrt of segment_power, because H is a signal-level transfer function and the
+    covariance carries its square - the same convention `response` follows by returning
+    |h|^2 for a filter applied forward and backward."""
+    f = np.asarray(idx, float) / (float(ref_frames) * float(frame_s))
+    return np.sqrt(segment_power(f, frame_s, seg_frames))
+
+
+def apply_segments(frames, seg_frames):
+    """Chop (T, V) into seg_frames-long segments, demean each along time, concatenate.
+
+    The trailing partial segment is dropped: a shorter segment has a different W and
+    would mix two estimators."""
+    X = np.asarray(frames)
+    n = int(seg_frames)
+    k = X.shape[0] // n
+    if k < 1:
+        raise ValueError(f"{X.shape[0]} frames is shorter than one {n}-frame segment")
+    Y = X[:k * n].reshape(k, n, X.shape[1]).astype(np.float32, copy=True)
+    Y -= Y.mean(1, keepdims=True)
+    return np.ascontiguousarray(Y.reshape(k * n, X.shape[1]))
+
+
+def _segment_selfcheck(frame_s=0.645, seg=28, ntrial=4000, seed=0):
+    """W(f) measured against W(f) predicted, one frequency at a time.
+
+    A sinusoid at f with random phase, demeaned per segment: the retained variance ratio
+    IS W(f), so this checks the formula rather than a consequence of it."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(seg * 40) * frame_s
+    print(f"  segment {seg} frames ({seg*frame_s:.1f}s) at frame {frame_s}s")
+    print(f"    {'f Hz':>8s} {'predicted':>10s} {'measured':>10s}")
+    ok = True
+    for f in (0.005, 0.01, 0.02, 0.03, 0.05, 1.0 / (seg * frame_s), 0.08, 0.15):
+        ph = rng.uniform(0, 2 * np.pi, ntrial)
+        X = np.cos(2 * np.pi * f * t[:, None] + ph[None, :])
+        Y = apply_segments(X, seg)
+        got = float((Y ** 2).mean() / (X[:Y.shape[0]] ** 2).mean())
+        pred = float(segment_power(f, frame_s, seg))
+        ok &= abs(got - pred) < 0.01
+        print(f"    {f:>8.4f} {pred:>10.4f} {got:>10.4f}")
+    print(f"  {'agree' if ok else 'DISAGREE'} to 0.01 at every frequency")
+    return ok
+
+
 def _selfcheck(frame_s=0.16125, n=16384, seed=0):
     """The two paths have to agree, or the solved system is not the scored one."""
     rng = np.random.default_rng(seed)
@@ -106,3 +185,5 @@ def _selfcheck(frame_s=0.16125, n=16384, seed=0):
 
 if __name__ == "__main__":
     _selfcheck()
+    print()
+    _segment_selfcheck()

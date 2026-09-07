@@ -52,13 +52,18 @@ def normal_scores(C, iu=None):
     return out - out.mean(0, keepdims=True) - out.mean(1, keepdims=True) + out.mean()
 
 
-def medoid_subset(target, n=1000, sketch=400, seed=0):
+def medoid_subset(target, n=1000, sketch=400, seed=0, cache_key=None):
     """Vertices chosen to represent the FC structure, not sampled at random.
 
     k-means on each vertex's FC profile (sketched against a few hundred random columns),
     then the medoid of each cluster. Fewer near-duplicate rows than a random draw, which
     both speeds the solve and generalises better to held-out vertices."""
-    cache = os.path.join(CACHE, f"medoids_{n}_{sketch}_{seed}_{target.nV}.npy")
+    # The key carries the vertex COUNT and, when asked, which matrix. Count alone is
+    # what every recorded run used and is left as the default so those reproduce, but two
+    # targets of the same size then share a subset silently - which is right only when
+    # that is intended. `cache_key` is how it is made intentional.
+    kx = "" if cache_key is None else f"_{cache_key}"
+    cache = os.path.join(CACHE, f"medoids_{n}_{sketch}_{seed}_{target.nV}{kx}.npy")
     if os.path.exists(cache):
         return np.load(cache)
     from sklearn.cluster import MiniBatchKMeans
@@ -190,9 +195,9 @@ def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers,
 _W_SCORE = {}
 
 
-def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s):
+def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s, segment):
     _W_SCORE.update(cortex=cortex, target=target, p=p, profiles=profiles, save=save,
-                    kernel=kernel, band=band, frame_s=frame_s)
+                    kernel=kernel, band=band, frame_s=frame_s, segment=segment)
 
 
 def _score_one(A):
@@ -202,12 +207,12 @@ def _score_one(A):
     r = score_realisation(_W_SCORE["cortex"], _W_SCORE["target"], _W_SCORE["p"], A,
                           save=_W_SCORE["save"], profiles=_W_SCORE["profiles"],
                           kernel=_W_SCORE["kernel"], band=_W_SCORE["band"],
-                          frame_s=_W_SCORE["frame_s"])
+                          frame_s=_W_SCORE["frame_s"], segment=_W_SCORE["segment"])
     return r["sim"], r["gap"], r["rank"]
 
 
 def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
-                    band=None, frame_s=None):
+                    band=None, frame_s=None, segment=None):
     """Score several drawn realisations at once. -> [(sim, gap, rank), ...]
 
     Draws are independent runs of the same medium under different samples of the same
@@ -220,7 +225,8 @@ def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
     import multiprocessing as mp
     ctx = mp.get_context("spawn")
     pool = ctx.Pool(min(workers, len(draws_A)), initializer=_score_init,
-                    initargs=(cortex, target, p, profiles, save, kernel, band, frame_s))
+                    initargs=(cortex, target, p, profiles, save, kernel, band, frame_s,
+                              segment))
     return pool, pool.map_async(_score_one, list(draws_A))
 
 
@@ -338,6 +344,53 @@ def incoherent_reg(H, w):
         for f in range(S.shape[0]):
             G[f] = np.diag(n[f]).astype(S.dtype)
         return val, G
+    return R
+
+
+def piece_power(S, idx, frame_s, band=None, pad=4096):
+    """Per-piece INPUT power, integrated over the frequency bins the solve used.
+
+    diag(S)[f, k] is piece k's input power density at bin f, so the power is the bin
+    weights times the diagonal, summed. Bin k of the rfft over the run's PADDED window is
+    k/(pad*frame_s) Hz - pad rather than the impulse length, since best_fit zero-pads
+    before the transform and the solved grid indexes that. `band` restricts the integral
+    to a frequency range in Hz.
+
+    The off-diagonal is not here and cannot be: S's cross-terms are the phase relations
+    between pieces, and this is a statement about magnitudes only.
+    """
+    f = np.asarray(idx, float) / (float(pad) * float(frame_s))
+    bw = np.gradient(np.asarray(idx, float))
+    dg = np.real(np.diagonal(np.asarray(S), axis1=1, axis2=2))
+    m = (np.ones(len(f), bool) if band is None
+         else (f >= band[0]) & (f <= band[1]))
+    return (bw[m, None] * dg[m]).sum(0)
+
+
+def share_reg(w, channels, K):
+    """Fraction of the total input power carried by `channels`. sign=+1 maximises it.
+
+    Numerator and denominator are both linear in diag(S) with fixed non-negative weights,
+    so this is as cheap as incoherent_reg and needs no barrier. Fed to family_member it
+    answers the question a single solve cannot: how far can the power in these channels
+    move WITHOUT the fit falling? A solve on a second target that lands inside that
+    interval has not shown that the target moved the input - it has shown the objective
+    never pinned it. Outside it, the target moved it.
+    """
+    m = np.zeros(K)
+    m[np.asarray(channels, int)] = 1.0
+    ww = np.asarray(w, float)
+
+    def R(S):
+        d = np.real(np.diagonal(S, axis1=1, axis2=2))
+        num = float((ww[:, None] * d * m[None, :]).sum())
+        den = float((ww[:, None] * d).sum())
+        if den <= 0:
+            return 0.0, np.zeros_like(S)
+        G = np.zeros_like(S)
+        for f in range(S.shape[0]):
+            G[f] = np.diag(ww[f] * (m * den - num) / den ** 2).astype(S.dtype)
+        return num / den, G
     return R
 
 
@@ -1099,7 +1152,7 @@ class ProfileDrive:
 
 def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=False,
                       seed=0, profiles=None, run_fn=None, kernel=None, band=None,
-                      frame_s=None):
+                      frame_s=None, segment=None):
     """Hold each drawn sample over its block of steps, run, and score for real.
 
     `run_fn(drive, nsteps, save) -> (frames, dt)` replaces the plain integration, which is
@@ -1134,6 +1187,13 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
         if frame_s is None:
             raise ValueError("band needs frame_s; the filter is defined in Hz")
         frames = bandpass.apply(frames, frame_s, band[0], band[1])
+    if segment:
+        # The target was estimated from short demeaned blocks; the model's covariance has
+        # to be estimated the same way, or the identity the solve rests on - that the
+        # scored system is the solved one - does not hold. bandpass.segment_response puts
+        # the matching weighting on H.
+        import bandpass
+        frames = bandpass.apply_segments(frames, int(segment))
     Z, _ = target.model_z(frames)
     sim = float(target._prep(target.model_edges(Z=Z)[0]) @ target.y)
     mm = MoranMatch(cortex, target)
