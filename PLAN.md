@@ -23,7 +23,7 @@ section and in sections 1-9 was measured against the nilearn target at 577 s and
 comparable with itself.
 
 ```bash
-python best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
+python fit/best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
   --pad 4096 --impulse-frames 224 --iters 400 --val-vert 0 --draws 2 \
   --regions subcortical --split 40 --profile taper
 ```

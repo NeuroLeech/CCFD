@@ -38,68 +38,86 @@ The run is the `Current best` of `PLAN.md`: 47 subcortically driven pieces over
 **+0.7204 ± 0.0009** Spearman over 2M edges. To rebuild it:
 
 ```bash
-python best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
+python fit/best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
   --pad 4096 --impulse-frames 224 --iters 400 --val-vert 0 --draws 2 \
   --regions subcortical --split 40 --profile taper
-python render_frames.py --tag pr_taper --start 200 --n 600 --save 16 --fps 20
+python viz/render_frames.py --tag pr_taper --start 200 --n 600 --save 16 --fps 20
 ```
 
 ## Layout
 
+The tree is five folders and no package: there is no install step and every script is run
+as a plain file from the repository root, `python fit/best_fit.py --tag ...`, importing
+what it needs by plain name. Each folder carries a copy of `_path.py`, which every runnable
+file imports first — Python puts only the script's own directory on `sys.path`, so without
+it a script in `analysis/` could not find `fit/xspec.py`.
+
+| folder | what lives there |
+|---|---|
+| `core/` | the mesh, the medium, the clock and the observable — `paths`, `mesh_cache`, `surf_ops`, `fluid`, `swe_rot`, `units`, `timescale`, `bandpass`, `ladder`, `regimes` |
+| `targets/` | reading scans and building the FC targets they are scored against — `rbc`, `fc_score`, `fc_group_nki`, `fc_group_rbc`, `fc_vertexwise`, `reliability`, `holdout`, `lagged`, `checkerboard` |
+| `fit/` | the input model and the convex solve — `xspec`, `best_fit`, `bo_step`, `subparcels`, `connectome`, `segments`, `family` |
+| `analysis/` | diagnostics and experiments — `diag_*`, `band_*`, `interference`, `zones`, `checkerboard_model`, `checkerboard_modulation`, `onoff_*`, `task_inputs` |
+| `viz/` | `render_*`, `plot_*`, `surface_plots` |
+
+`data/` holds the datasets and `results/` everything written; both are addressed through
+`core/paths.py`, which derives them from the repository root rather than from a working
+directory.
+
 | file | what it does |
 |---|---|
-| `paths.py` | every path, derived from the repo location |
-| `surf_ops.py` | surface loading, primal/dual (DEC) operators |
-| `intrinsic_delaunay.py` | metric repair; without it the scheme blows up in ~200 steps |
-| `mesh_cache.py` | builds and caches the `Cortex` object: mesh + atlas + repaired metric |
-| `swe_rot.py` | the solver: `RotSWE.step`, plus the absorbing rim sponge |
-| `fluid.py` | the medium: speed and damping graded by cortical maps, integration |
+| `core/paths.py` | every path, derived from the repo location |
+| `core/surf_ops.py` | surface loading, primal/dual (DEC) operators |
+| `core/intrinsic_delaunay.py` | metric repair; without it the scheme blows up in ~200 steps |
+| `core/mesh_cache.py` | builds and caches the `Cortex` object: mesh + atlas + repaired metric |
+| `core/swe_rot.py` | the solver: `RotSWE.step`, plus the absorbing rim sponge |
+| `core/fluid.py` | the medium: speed and damping graded by cortical maps, integration |
 | **the fit** | |
-| `best_fit.py` | reproduce the current fit; the entry point |
-| `xspec.py` | transfer function, the convex solve, realisation, scoring |
-| `subparcels.py` | equal-area splitting; which parcels are driven |
-| `bo_step.py` | Bayesian optimisation over the medium, in per-step units |
-| `coalitions.py` | read the solved `S(f)` back as amplitudes and time offsets |
+| `fit/best_fit.py` | reproduce the current fit; the entry point |
+| `fit/xspec.py` | transfer function, the convex solve, realisation, scoring |
+| `fit/subparcels.py` | equal-area splitting; which parcels are driven |
+| `fit/bo_step.py` | Bayesian optimisation over the medium, in per-step units |
+| `fit/coalitions.py` | read the solved `S(f)` back as amplitudes and time offsets |
 | **targets and controls** | |
-| `fc_vertexwise.py` | vertexwise FC from MSC surface data |
-| `fc_group_nki.py` | the NKI group target (99 usable subjects) |
-| `fc_centre.py` | double-centring: the linear analogue of global signal regression |
-| `fc_score.py` | `FCTarget`: alignment, edge sample, Spearman score |
-| `fc_moran.py` | spatial autocorrelation match, as a diagnostic |
-| `family.py` | the family of inputs consistent with the target, not just the argmax |
-| `fc_states.py` | windowed-FC states, occupancy, dwell, transitions |
-| `reliability.py` | split-half reliability of the target, and the ceiling it implies |
-| `holdout.py` | solve on one half of the subjects, score on the other |
-| `reach.py` | can this fluid produce the target's patterns at all? |
-| `diag_maps.py` | where the fit fails, drawn on the surface |
+| `targets/fc_vertexwise.py` | vertexwise FC from MSC surface data |
+| `targets/fc_group_nki.py` | the NKI group target (99 usable subjects) |
+| `targets/fc_centre.py` | double-centring: the linear analogue of global signal regression |
+| `targets/fc_score.py` | `FCTarget`: alignment, edge sample, Spearman score |
+| `targets/fc_moran.py` | spatial autocorrelation match, as a diagnostic |
+| `fit/family.py` | the family of inputs consistent with the target, not just the argmax |
+| `targets/fc_states.py` | windowed-FC states, occupancy, dwell, transitions |
+| `targets/reliability.py` | split-half reliability of the target, and the ceiling it implies |
+| `targets/holdout.py` | solve on one half of the subjects, score on the other |
+| `analysis/reach.py` | can this fluid produce the target's patterns at all? |
+| `analysis/diag_maps.py` | where the fit fails, drawn on the surface |
 | **input, by hand** | |
-| `input2.py` | input as K regions with timecourses supplied directly |
-| `input_model.py` | input as K regions driven through r shared latent factors |
-| `ladder.py` | a nested family of input processes; parcel geodesics |
-| `run_ou.py` | Ornstein-Uhlenbeck drive |
-| `run2.py` | minimal script: regions + your own timecourses + mp4 |
-| `play_fluid.py` | hand-tune the medium with the input held fixed |
+| `fit/input2.py` | input as K regions with timecourses supplied directly |
+| `fit/input_model.py` | input as K regions driven through r shared latent factors |
+| `core/ladder.py` | a nested family of input processes; parcel geodesics |
+| `core/run_ou.py` | Ornstein-Uhlenbeck drive |
+| `core/run2.py` | minimal script: regions + your own timecourses + mp4 |
+| `core/play_fluid.py` | hand-tune the medium with the input held fixed |
 | **pictures** | |
-| `render_frames.py` | video of a field a `best_fit` run already wrote to disk |
-| `surface_plots.py` | the movie / latent-map / medium-map helpers |
-| `render_regimes.py` | surface projections, videos of swept regimes |
-| `plot_fc_map.py`, `cortical_maps.py` | surface maps and the cortical map stack |
-| `get_msc.py` | reads MSC CIFTI-1 files (nibabel refuses these directly) |
+| `viz/render_frames.py` | video of a field a `best_fit` run already wrote to disk |
+| `viz/surface_plots.py` | the movie / latent-map / medium-map helpers |
+| `viz/render_regimes.py` | surface projections, videos of swept regimes |
+| `viz/plot_fc_map.py`, `core/cortical_maps.py` | surface maps and the cortical map stack |
+| `targets/get_msc.py` | reads MSC CIFTI-1 files (nibabel refuses these directly) |
 
 ## Running
 
 ```bash
-python mesh_cache.py                          # build and cache the mesh
-python fc_group_nki.py                        # build the group FC target
-python best_fit.py --frames 4480 --draws 3    # solve, realise, score
-python render_frames.py --tag best --n 500    # watch what it produced
+python core/mesh_cache.py                          # build and cache the mesh
+python targets/fc_group_nki.py                        # build the group FC target
+python fit/best_fit.py --frames 4480 --draws 3    # solve, realise, score
+python viz/render_frames.py --tag best --n 500    # watch what it produced
 ```
 
 `best_fit.py --regions {sensory,spread,sensory+dmn,dmn}` selects which parcels
 are driven; `PLAN.md` records what each of those returned and why the answer is
 less obvious than it looks.
 
-`run2.py` is the smaller entry point: set `REGIONS`, build an `(nsteps, K)`
+`core/run2.py` is the smaller entry point: set `REGIONS`, build an `(nsteps, K)`
 array of timecourses, run, write an mp4.
 
 Two things about the drive worth knowing, since neither is obvious from the code:
@@ -121,7 +139,7 @@ Included: the HCP-MMP1 left-hemisphere annotation (`data/annot`) and fsaverage5
 licences.
 
 Not included: MSC subject-01 resting-state scans (~2 GB, above GitHub's file
-size limit). Only the MSC path in `fc_vertexwise.py` needs them; the NKI group
+size limit). Only the MSC path in `targets/fc_vertexwise.py` needs them; the NKI group
 target that everything is now fitted to is fetched by nilearn. Get them from [OpenNeuro ds000224](https://openneuro.org/datasets/ds000224),
 `derivatives/surface_pipeline`, and put the `*_rest.dtseries.nii` and
 `*_tmask.txt` files in `data/msc/`.
@@ -132,4 +150,4 @@ demand and are not tracked.
 ## Requirements
 
 numpy, scipy, scikit-learn, nibabel, nilearn, matplotlib, hcp_utils,
-scikit-optimize (for `bo_step.py`). ffmpeg for video.
+scikit-optimize (for `fit/bo_step.py`). ffmpeg for video.
