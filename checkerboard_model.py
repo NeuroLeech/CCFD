@@ -45,7 +45,31 @@ import timescale
 
 TR = 0.645
 BLOCKS = [(20.0, 20.0), (60.0, 20.0), (100.0, 20.0)]     # CHECKER onsets/durations
-RUN_S = 239 * TR
+NT = 239                                                 # frames in one checkerboard run
+RUN_S = NT * TR
+
+
+def piece_weights(z, sel, mode, frame_s, band=(0.01, 0.08), pad=4096):
+    """Per-piece drive AMPLITUDE, mean 1.
+
+    `uniform` drives every piece equally, which is a choice and not a neutral one.
+    `solve`/`band` instead take the amplitude the resting solve gave each piece:
+    diag(S) is that piece's input POWER per bin, so sqrt of it summed over bins (or over
+    the passband) is the amplitude. Bin k of the rfft over the run's PADDED window is
+    k/(pad*frame_s) Hz - pad, not the impulse length, since best_fit zero-pads before the
+    transform and the solved grid indexes that.
+
+    What this cannot carry is the off-diagonal. S's cross-terms are the phase relations
+    between pieces, and the fitted input uses them heavily - it is 45% self-cancelling.
+    Driving every piece with the SAME boxcar imposes all-in-phase, which is exactly the
+    configuration the solve declined. So this varies magnitudes only."""
+    if mode == "uniform":
+        return np.ones(len(sel))
+    import xspec
+    p = xspec.piece_power(z["S"], z["idx"], frame_s,
+                          band=(None if mode == "solve" else band), pad=pad)[sel]
+    a = np.sqrt(np.maximum(p, 0.0))
+    return a / a.mean()
 
 
 def boxcar(t):
@@ -55,8 +79,25 @@ def boxcar(t):
     return x
 
 
-def model_response(c, tag, parcels=(1,), band=(0.01, 0.08), lag_max=16, verbose=True):
-    """-> (response map on the TR grid, lag frames, the observable, the boxcar)."""
+def piece_observables(c, tag, parcels=(1,), band=(0.01, 0.08), basis=None,
+                      cols=None, verbose=True):
+    """Each driven piece's OWN observable on the data's TR grid.
+
+    -> (Y, sel, tags, boxcar) with Y of shape (pieces, drives, 239, vertices).
+
+    The medium is linear and so is every step between the drive and the scored map: the
+    convolution with the impulse responses, the BOLD kernel, the passband, the downsample
+    to TR. So the field produced by any per-piece amplitude vector w over any mixture of
+    the basis time courses is exactly `sum_jb c_jb Y[j,b]`. Driving the pieces one at a
+    time is not an approximation of driving them together - it is the same field, kept in
+    its parts. That is what makes a search over drive SHAPE cost nothing once these are
+    formed: the expensive objects (impulse responses, smoothing, filtering) are built
+    once, and every candidate is a weighted sum of them.
+
+    `basis` is (model frames, nB) drive time courses; the default is the single boxcar.
+    `cols` restricts the returned vertices, since the comparison only ever uses the
+    target's.
+    """
     import xspec, bo_step, subparcels, units, bandpass
     from interference import _impulse_frames
     z = np.load(os.path.join(RESULTS, f"xspec_{tag}.npz"), allow_pickle=True)
@@ -73,41 +114,74 @@ def model_response(c, tag, parcels=(1,), band=(0.01, 0.08), lag_max=16, verbose=
 
     nfr = int(np.ceil(RUN_S / frame_s))
     t = np.arange(nfr) * frame_s
-    b = boxcar(t)
+    B = boxcar(t)[:, None] if basis is None else np.asarray(basis, np.float64)
+    if B.shape[0] != nfr:
+        raise SystemExit(f"  basis has {B.shape[0]} rows, expected {nfr} model frames")
 
     imp = _impulse_frames(x, save, frame_s)
     R = xspec.impulse_responses(c, sel, p, imp * save, save,
                                 profiles=P[sel], verbose=False)
     if verbose:
-        print(f"  {nfr} model frames ({nfr*frame_s:.0f} s), impulse window {R.shape[1]}")
+        print(f"  {nfr} model frames ({nfr*frame_s:.0f} s), impulse window {R.shape[1]}, "
+              f"{B.shape[1]} drive time course(s)")
 
-    f = np.zeros((nfr, c.nV), np.float32)
-    for j in range(len(sel)):
-        f += fftconvolve(b[:, None], R[j], axes=0)[:nfr]
-
-    # the same observable path the fit was scored through
     kern = units.smoothing_kernel(timescale.bold_fwhm_frames(frame_s, verbose=False),
                                   verbose=False)
-    f = units.smooth_frames(f, kern)
-    f = bandpass.apply(f, frame_s, band[0], band[1])
+    keep = slice(None) if cols is None else np.asarray(cols)
+    nV = c.nV if cols is None else len(keep)
+    Y = np.zeros((len(sel), B.shape[1], NT, nV), np.float32)
+    for j in range(len(sel)):
+        for b in range(B.shape[1]):
+            f = fftconvolve(B[:, b:b + 1], R[j], axes=0)[:nfr]
+            f = units.smooth_frames(f, kern)
+            f = bandpass.apply(f, frame_s, band[0], band[1])
+            Y[j, b] = f[::4][:NT][:, keep]
+    return Y, sel, tags, boxcar(np.arange(NT) * TR)
 
-    # onto the data's own grid before scoring, so both sides see the same sampling
-    Y = f[::4][:239]
-    tt = np.arange(len(Y)) * TR
-    bt = boxcar(tt)
 
-    y = Y.astype(np.float64) - Y.mean(0)
+def shift_boxcar(bt, lag):
+    """The boxcar delayed by `lag` TRs, mean removed and unit norm."""
+    bb = np.roll(np.asarray(bt, np.float64), lag)
+    bb[:lag] = 0.0
+    bb = bb - bb.mean()
+    n = np.linalg.norm(bb)
+    return bb / n if n > 0 else bb
+
+
+def correlate_map(Y, bt, lag):
+    """Per-vertex correlation between the observable and the lagged boxcar."""
+    y = np.asarray(Y, np.float64)
+    y = y - y.mean(0)
+    bb = shift_boxcar(bt, lag)
+    den = np.linalg.norm(y, axis=0)
+    return np.where(den > 0, (y.T @ bb) / np.maximum(den, 1e-30), 0.0)
+
+
+def best_lag_map(Y, bt, lag_max=16, verbose=True):
+    """-> (map at the lag with the highest peak, that lag in frames)."""
     best, rmap = None, None
     for s in range(lag_max + 1):
-        bb = np.roll(bt, s); bb[:s] = 0.0
-        bb = bb - bb.mean()
-        den = np.linalg.norm(y, axis=0) * np.linalg.norm(bb)
-        g = np.where(den > 0, (y.T @ bb) / np.maximum(den, 1e-30), 0.0)
+        g = correlate_map(Y, bt, s)
         if best is None or g.max() > best[1]:
             best, rmap = (s, g.max()), g
         if verbose:
             print(f"    lag {s*TR:5.2f}s  peak r {g.max():+.4f}", flush=True)
-    return rmap, best[0], Y, bt
+    return rmap, best[0]
+
+
+def model_response(c, tag, parcels=(1,), band=(0.01, 0.08), lag_max=16,
+                   weights="uniform", verbose=True):
+    """-> (response map on the TR grid, lag frames, the observable, the boxcar)."""
+    z = np.load(os.path.join(RESULTS, f"xspec_{tag}.npz"), allow_pickle=True)
+    Y, sel, tags, bt = piece_observables(c, tag, parcels=parcels, band=band,
+                                         verbose=verbose)
+    wk = piece_weights(z, sel, weights, timescale.TR / 4.0, band)
+    if verbose:
+        print(f"  drive weights ({weights}): " +
+              ", ".join(f"{tags[i]} {v:.3f}" for i, v in zip(sel, wk)))
+    Yc = np.tensordot(wk.astype(np.float32), Y[:, 0], axes=(0, 0))
+    rmap, lag = best_lag_map(Yc, bt, lag_max, verbose)
+    return rmap, lag, Yc, bt
 
 
 EDGES = (0, 5, 10, 15, 20, 30, 40, 50, 65, 80, 100, 120)
@@ -147,6 +221,8 @@ def main():
     ap.add_argument("--tag", default="g7_s1.5_d25")
     ap.add_argument("--parcels", default="1", help="Glasser ids to drive (1 = V1)")
     ap.add_argument("--lag-max", type=int, default=16, dest="lag_max")
+    ap.add_argument("--weights", default="uniform",
+                    choices=("uniform", "solve", "band"))
     ap.add_argument("--emp", default=None)
     a = ap.parse_args()
 
@@ -163,7 +239,8 @@ def main():
     print(f"  empirical: {emp_path}\n    {int(e['n'])} subjects, lag {float(e['lag_s']):.2f} s,"
           f" peak {emp.max():+.4f}")
 
-    rmap, lag, Y, bt = model_response(c, a.tag, parcels=parcels, lag_max=a.lag_max)
+    rmap, lag, Y, bt = model_response(c, a.tag, parcels=parcels, lag_max=a.lag_max,
+                                      weights=a.weights)
     mod = rmap[t.cols]
     print(f"\n  model: lag {lag*TR:.2f} s, peak {mod.max():+.4f}, min {mod.min():+.4f}")
 
@@ -211,11 +288,12 @@ def main():
         print(f"    falls to half by:  model {hm:.0f} mm,  empirical {he:.0f} mm"
               f"   (ratio {hm/he:.1f}x)")
 
-    out = os.path.join(RESULTS, f"checkerboard_model_{a.tag}.npz")
+    sfx = "" if a.weights == "uniform" else f"_{a.weights}"
+    out = os.path.join(RESULTS, f"checkerboard_model_{a.tag}{sfx}.npz")
     np.savez(out, model=mod, empirical=emp, cols=t.cols, lag=lag,
              parcels=np.array(parcels), Y=Y, boxcar=bt)
     print(f"\n  wrote {out}")
-    _plot(a.tag, c, t, mod, emp, Y, bt, lag)
+    _plot(a.tag + sfx, c, t, mod, emp, Y, bt, lag)
 
 
 def _plot(tag, c, t, mod, emp, Y, bt, lag):

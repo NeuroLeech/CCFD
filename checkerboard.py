@@ -33,6 +33,13 @@ import rbc
 TR = 0.645
 BLOCK_S = 20.0
 
+# Glasser's visual groupings - primary, early, dorsal and ventral stream, MT+ complex.
+# The ROI the response is also summarised inside, defined here because it is a statement
+# about the DATA rather than about any model of it.
+VISUAL = ("V1", "V2", "V3", "V4", "V6", "V8", "V3A", "V3B", "V3CD", "V4t", "V6A", "V7",
+          "VVC", "VMV1", "VMV2", "VMV3", "FFC", "PIT", "LO1", "LO2", "LO3", "MT", "MST",
+          "FST", "PH", "IPS1", "ProS", "DVT")
+
 
 def group_response(t, subs, lag_grid=(0, 16), on="CHECKER", verbose=True):
     """-> dict with the evoked epochs, the boxcar response map, and the lag used."""
@@ -83,11 +90,49 @@ def group_response(t, subs, lag_grid=(0, 16), on="CHECKER", verbose=True):
                 ep_len=ep_len, tr=TR, n=len(Z), events=ev0)
 
 
+def spearman_brown(r, m):
+    """Reliability of an average m times larger, from the reliability of this one."""
+    return m * r / (1.0 + (m - 1.0) * r)
+
+
+def half_maps(t, subs, lag, seed=0, on="CHECKER", verbose=True):
+    """Response maps from two disjoint halves of the subjects, at a FIXED lag.
+
+    The ceiling on any model's agreement with the group map. Built with the same estimator
+    the group map uses - per-subject correlation against the unconvolved boxcar, averaged
+    over subjects - because a reliability measured with a different estimator bounds a
+    quantity nobody is comparing against. The lag is the group lag, not a per-half argmax:
+    re-picking it per half would let each half chase its own noise and read high.
+    """
+    runs = rbc.cohort_runs(subs, specs=(("CHECKERBOARD", "645"),))[("CHECKERBOARD", "645")]
+    rng = np.random.default_rng(seed)
+    which = rng.permutation(len(runs)) % 2
+    acc = [np.zeros(t.nV), np.zeros(t.nV)]
+    n = [0, 0]
+    for k, (r, h) in enumerate(zip(runs, which), 1):
+        X, _, tr = rbc.load(r, verbose=False)
+        x = X[t.vertices].astype(np.float64)
+        x -= x.mean(1, keepdims=True)
+        b = rbc.boxcar(r, x.shape[1], tr, on=on)
+        bb = np.roll(b, lag).astype(np.float64); bb[:lag] = 0.0
+        bb -= bb.mean()
+        den = np.linalg.norm(x, axis=1) * np.linalg.norm(bb)
+        acc[h] += np.where(den > 0, (x @ bb) / np.maximum(den, 1e-30), 0.0)
+        n[h] += 1
+        if verbose and k % 20 == 0:
+            print(f"    {k}/{len(runs)} subjects", flush=True)
+        del X, x
+    return acc[0] / max(n[0], 1), acc[1] / max(n[1], 1), n
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--subjects", type=int, default=100)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--lag-max", type=int, default=16, dest="lag_max")
+    ap.add_argument("--ceiling", action="store_true",
+                    help="split-half reliability of the response map, and the ceiling "
+                         "it puts on any model's agreement with it")
     a = ap.parse_args()
 
     from mesh_cache import load_cortex
@@ -139,6 +184,29 @@ def main():
         m = (d >= lo) & (d < hi)
         if m.sum() > 20:
             print(f"    {lo:>3d}-{hi:<3d} mm  n={int(m.sum()):>4d}  mean r {resp[m].mean():+.4f}")
+
+    if a.ceiling:
+        from scipy.stats import spearmanr
+        cache = os.path.join(CACHE, f"checkerboard_halves_{len(subs)}_{t.nV}_{a.seed}.npz")
+        if os.path.exists(cache):
+            zz = np.load(cache)
+            A, B, nh = zz["A"], zz["B"], zz["n"]
+            print(f"\n  loaded {cache}")
+        else:
+            print(f"\n  split-half maps at the group lag ({int(r['lag_frames'])} frames):")
+            A, B, nh = half_maps(t, subs, int(r["lag_frames"]), seed=a.seed)
+            np.savez(cache, A=A, B=B, n=np.array(nh))
+            print(f"  wrote {cache}")
+        vis = np.isin(lab, [p for p in np.unique(lab) if p >= 0 and nm(int(p)) in VISUAL])
+        print(f"\n  ceiling on agreement with the {int(r['n'])}-subject map "
+              f"({int(nh[0])} vs {int(nh[1])} subjects per half):")
+        for what, m in (("whole cortex", slice(None)), ("visual cortex", vis)):
+            rh = float(np.corrcoef(A[m], B[m])[0, 1])
+            rn = spearman_brown(rh, len(subs) / (len(subs) / 2))
+            sh = float(spearmanr(A[m], B[m]).statistic)
+            print(f"    {what:<14s} half-vs-half pearson {rh:+.4f} (spearman {sh:+.4f})"
+                  f"  ->  {int(r['n'])}-subject reliability {rn:+.4f},"
+                  f"  ceiling sqrt = {np.sqrt(max(rn, 0)):+.4f}")
 
 
 if __name__ == "__main__":
