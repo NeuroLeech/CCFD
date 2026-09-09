@@ -14,7 +14,7 @@ simulated time against FC computed from 577 s of data.
 
 ## Current best
 
-**Read section 0 first.** As of 2026-09-04 the default target is the RBC cohort, not
+**Read section 0+ first, then section 0.** As of 2026-09-04 the default target is the RBC cohort, not
 nilearn's release, so this command no longer scores what is recorded below — it gives
 +0.7102 ± 0.0005 against the new target. Under the passband the data was filtered to it
 gives +0.4701, and the swept optimum there is a different medium entirely: spread
@@ -76,6 +76,610 @@ pool returns the same sim/gap/rank to four decimals. One machine, warm cache:
 
 The impulse cache key does not record whether the responses came from the pool, which is
 why that path is checked for bit-identity rather than for agreement.
+
+---
+
+## 0+. 2026-09-08 — the basis, the span, the solver
+
+**This section is newer than section 0 and supersedes it where they overlap.** Everything
+here is the `g7_s1.5_d25` configuration unless said otherwise: RBC target, subcortical,
+`--split 40`, taper, spread 1.47 mm/s, decay 25 s, bandpassed 0.01–0.08 Hz, `--bold-smooth`,
+7-decay impulse window, pad 4096, 2,308 s, 2 draws. That command reproduced in session as
+`sh_s40_n1` at **+0.6901 ± 0.0018, gap 0.065, rank 20.5**, matching the recorded line, so
+everything below is measured against a baseline that reproduced.
+
+**Nothing here beat it.** The best alternative tied within scatter at four times the
+parameters. The incumbent command is still the incumbent.
+
+### The input basis is one-hot, and the pieces are two rings deep
+
+`taper_profiles` erodes `labels == i`, and the pieces are disjoint, so `P_k(v)` is nonzero
+for exactly one `k`. Measured: max nonzero channels per vertex **1**, participation ratio
+**1.00**. The solve sets 47 amplitudes and never a shape — the drive's spatial profile
+inside a piece is frozen and identical for every input the model can express.
+
+At `--split 40` a piece is **2–4 erosion rings deep (median 2)** against a median
+equivalent diameter of 14.5 mm and 2.9 mm vertex spacing. With 2 rings the smoothstep takes
+u ∈ {0.5, 1.0}, so the outer ring sits at exactly 0.500 of peak. It is a two-level step,
+not a taper.
+
+| driven area, 1,532 vertices / 8,542 mm² | share | mean total drive |
+|---|---|---|
+| on an internal seam (piece meets piece) | 34.5% | 0.394 |
+| on the outer edge of the driven region | 32.4% | 0.404 |
+| piece interior | 33.1% | 0.864 |
+
+A third of the driven area sits at ~0.39 of peak because of where the atlas split fell, and
+no input can lift it. `gauss_profiles`' docstring claim of 24.6% of touched area under half
+the peak reproduces exactly.
+
+**This reframes §4's profile null.** Channels seen per vertex: taper 1.00, gauss FWHM 6
+1.05, gauss FWHM 10 masked 1.25, gauss FWHM 16 masked 1.71. The gauss-10 arm in §4's table
+is still nearly one-hot, so "profile SHAPE moves the score by less than the draw scatter"
+compared two bases that barely differ in overlap. It tested edge softness, not whether a
+vertex can be driven by more than one channel.
+
+Radial room by split, at constant 8,542 mm² footprint: `--split 40` → 47 pieces, 165 mm²,
+14.5 mm, 2–4 rings; `--split 20` → 26 pieces, 19.7 mm, 2–6; `--split 12` → 18 pieces,
+25.7 mm; `--split 8` and below → **17 pieces** (one per parcel), 510 mm², 25.5 mm, 2–6
+rings, median 3.
+
+### Concentric shells: within-piece shape, measured (`shell_profiles`, `--shells`)
+
+`subparcels.shell_profiles` splits each piece into `nshell` shells by normalised erosion
+depth using hat functions that partition unity in depth, so a piece's shells sum exactly to
+the profile `taper_profiles` gives it and `--shells 1` is **bit-identical** to it. A vertex
+is fed by up to two channels of its own piece, so the solve chooses the radial shape; core
+and belt in antiphase is a centre-surround, which a one-hot basis cannot express at any
+input. Same footprint throughout.
+
+| tag | pieces | shells | channels | sim | gap | field rank | solve pearson |
+|---|---|---|---|---|---|---|---|
+| `sh_s40_n1` | 47 | 1 | 47 | **+0.6901 ± 0.0018** | 0.065 | 20.5 | +0.7564 |
+| `sh_s1_n1` | 17 | 1 | 17 | +0.5802 ± 0.0041 | 0.107 | 16.8 | +0.6497 |
+| `sh_s1_n2` | 17 | 2 | 34 | +0.6073 ± 0.0019 | 0.111 | 16.0 | +0.6680 |
+| `sh_s1_n3` | 17 | 3 | 51 | +0.6138 ± 0.0017 | 0.103 | 16.1 | +0.6737 |
+| `sh_s40_n2` | 47 | 2 | 94 | +0.6910 ± 0.0011 | 0.079 | 19.0 | +0.7549 |
+
+- **At matched channel count**, 51 radial channels give +0.6138 against 47 tangential
+  channels' +0.6901 — 0.076 apart, forty times the draw scatter.
+- **Added to the incumbent**, 2 shells on the 47 pieces give +0.6910 ± 0.0011 against
+  +0.6901 ± 0.0018: +0.0009, inside scatter, for 4× the parameters (135 × 94² ≈ 1.19M real
+  against 298k). Gap moved the wrong way, 0.065 → 0.079; field rank 20.5 → 19.0.
+- The solve's **own in-sample objective went down**, +0.7564 → +0.7549, with 4× the free
+  parameters. The extra parameters were not consumed — 400 steps of a feasible-direction
+  method spreading the same atoms over twice the channels.
+- Within the shell arm returns fall off fast: 17 → 34 → 51 channels gives +0.5802 → +0.6073
+  → +0.6138, so the second shell buys +0.027 and the third +0.0065.
+- At `--split 40` a 2-ring piece cannot resolve 3 shells and collapses back toward one-hot:
+  participation 1.00 → 1.73 at 2 shells → 1.33 at 3.
+
+Position moved sim (+0.110 for 17 → 47 channels); within-piece shape did not (+0.0009).
+Not tested: the in-plane dipole / directional half of the same idea, which is the same
+class of change at fixed position.
+
+### The span is not the resolution floor (`psf_g7_s1.5_d25.npz`)
+
+Stacking `B_f = sqrt(2w_f) H_f` over frequency and orthonormalising gives `U`, whose
+projector is the point-spread of every field the model can produce, for any `S`.
+Conditions: this one used `nfreq 135` → 101 bins, where the saved runs use `nfreq 192` →
+135 bins.
+
+| retained directions | 5 | 10 | 20 | 47 | 100 | 200 | 400 | 600 |
+|---|---|---|---|---|---|---|---|---|
+| point spread, r = 0.5 (mm) | 33.1 | 28.2 | 24.8 | 21.1 | 16.0 | 11.3 | 7.8 | 6.1 |
+| σ/σ₁ | 0.810 | 0.651 | 0.487 | 0.271 | 0.0908 | 0.0191 | 0.00275 | 0.000794 |
+
+The basis crosses the data's 9.1 mm at ~350–400 directions, so **it can express the missing
+scale**; the cost is gain, 10⁻⁴ to 10⁻⁶ in power. White input gives r=0.5 at 21.8 mm and
+the realised field at 21.8 mm, both at the top-47 figure of 21.1.
+
+The realised field already spreads **wider** than white input would — variance inside the
+top-k directions is 0.2232 / 0.3680 / 0.6969 / 0.9368 / 0.9946 at k = 10 / 20 / 47 / 100 /
+200, where white input gives 0.4381 / 0.6468 / 0.8827 / 0.9838 / 0.9990. The solve is
+already pushing power down the gain spectrum.
+
+Target projected onto the top-k span, Spearman over the 900-vertex edge sample: rank 10
++0.172, 20 +0.318, 47 +0.616, 100 +0.818, 200 +0.914, 400 +0.962, 600 +0.976. **The model
+sits at +0.679 in that estimator with its variance spread over ~200 directions**, so it is
+not at its span ceiling. And that ceiling rises **monotonically with edge length at every
+rank** — it has no minimum in the middle, so the 10–30 mm dip is not a rank or conditioning
+artefact.
+
+### Cancellation does not set the spatial scale
+
+Dialling the fitted input's inter-channel coherence, `S(λ) = λS + (1−λ)diag(S)` — λ=1 the
+fit, λ=0 the same per-channel powers with every cross term removed:
+
+| λ | 0.00 | 0.25 | 0.50 | 0.75 | 1.00 | 1.25 | 1.50 |
+|---|---|---|---|---|---|---|---|
+| coherent/incoherent | 1.000 | 0.887 | 0.774 | 0.661 | 0.548 | 0.435 | 0.322 |
+| FC correlation length (mm) | 21.8 | 21.9 | 22.0 | 22.1 | 22.3 | 22.6 | — |
+| fit | +0.175 | +0.442 | +0.620 | +0.694 | +0.713 | +0.708 | +0.684 |
+| variance in top-47 span | 0.499 | 0.492 | 0.484 | 0.472 | 0.455 | 0.427 | 0.400 |
+
+Removing every cross term costs 0.54 of the fit and moves the correlation length by
+**0.5 mm**. λ ≥ 1.25 is not PSD. So cancellation buys the fit, not the spatial scale, and
+not the span occupancy either.
+
+### The dip is in the covariance→correlation step
+
+`solve` maximises `<C, Ct>/‖C‖` on the raw double-centred **covariance** with the diagonal
+zeroed. `sim` standardises to a **correlation**. Same solved `S`, same `H`, same 900
+vertices, pooled Spearman per band:
+
+| band mm | 0–5 | 5–10 | 10–15 | 15–20 | 20–30 | 30–40 | 40–60 | all |
+|---|---|---|---|---|---|---|---|---|
+| C as covariance | +0.253 | +0.523 | **+0.579** | **+0.517** | +0.538 | +0.624 | +0.702 | +0.713 |
+| C as correlation | +0.322 | +0.533 | **+0.380** | **+0.302** | +0.386 | +0.549 | +0.684 | +0.699 |
+| cost of normalising | +0.069 | +0.009 | −0.199 | −0.214 | −0.153 | −0.075 | −0.017 | −0.014 |
+| rank(σᵢσⱼ, C) | +0.977 | +0.943 | +0.782 | +0.568 | +0.245 | +0.095 | +0.067 | — |
+| sd log σᵢσⱼ | 0.418 | 0.428 | 0.421 | 0.414 | 0.396 | 0.385 | 0.360 | — |
+
+An iid draw from `C` at n = 100,000 reproduces the correlation row to three decimals
+(+0.318 / +0.532 / +0.379 / +0.302), and the realised 14,263-frame run gives +0.343 /
++0.512 / +0.368 / +0.306 — so this is **not sampling**. Realisation length is worth about
++0.02 overall (577 s +0.638, 2,301 s +0.679, analytic +0.699).
+
+**What picks the band is not the variance map's scale.** The nuisance injected is flat
+across bands (sd log σᵢσⱼ 0.42 → 0.31), and the log-variance map's own autocorrelation
+falls +0.899 → +0.383 over 0–60 mm, crossing half near 45 mm — four times the dip. What
+varies is how much of the covariance edge the variance product already explains:
+`rank(σᵢσⱼ, C)` runs +0.977 → +0.067, essentially the FC decay curve. Where it is near 1
+dividing removes almost everything and leaves clean correlation shape; where near 0 it
+changes nothing; the damage is maximal in between, on the shoulder of the model's own
+22 mm correlation decay. Partial normalisation `C/(σᵢσⱼ)^α` at 10–15 mm: +0.579, +0.584,
++0.576, +0.533, +0.380 for α = 0, 0.25, 0.5, 0.75, 1.0.
+
+Mean FC value by band, model correlation against target: +0.977/+0.809, +0.895/+0.548,
++0.770/+0.376, +0.626/+0.269, +0.429/+0.169, +0.257/+0.089, +0.145/+0.037. **The model is
+about twice the target at every distance past 5 mm, and saturated near 1 below 10 mm.**
+
+### The honeycomb does not reach the field
+
+The frozen drive texture (0.39 on a third of the driven area, 0.86 on another third, at a
+14.5 mm period) does not print through to the field's variance map:
+
+| driven vertices | n | mean drive | mean variance | var / interior |
+|---|---|---|---|---|
+| internal seam | 515 | 0.401 | 1.98e-07 | **0.912** |
+| outer edge | 493 | 0.410 | 1.77e-07 | 0.815 |
+| piece interior | 524 | 0.868 | 2.17e-07 | 1.000 |
+
+Drive contrast seam/interior is 0.461; the linear-response expectation for variance is
+0.213; measured 0.912. Spearman(total drive, variance) inside the driven region **−0.001**.
+Consistent with `interference.py`'s ~11 pieces per vertex: variance is dominated by the
+mixture arriving through the medium, not by the local taper value. Conditions: reach 37 mm
+against a 14.5 mm median piece, ratio 2.6.
+
+Band accuracy is not organised by seam distance either. Spearman(acc_band, d_seam) −0.013;
+partialling `d_drive`, −0.154, i.e. slightly worse *further* from a seam. Within the driven
+region (`d_drive` 0–0.5) accuracy across 0–8 mm from a seam is +0.510 / +0.508 / +0.518 —
+flat. The `d_drive` gradient §4 records does reproduce: +0.51 → +0.50s → +0.55s → +0.58 →
++0.588 down the strata.
+
+### The incumbent solver stops 0.029 below its own maximum (`xspec.solve_factor`)
+
+`solve` walks the PSD cone by projected gradient and stops on `--iters` — no gap, no
+gradient test. `solve_factor` writes `S_f = L_f L_fᴴ` and runs L-BFGS on `L`: no PSD
+projection (the constraint holds by construction), and the gradient is
+`2·Hs_fᴴ(M B_f)` where `B_f = Hs_f L_f` is already built for the objective, so it costs one
+extra gemm of the size the objective already pays.
+
+On identical `H` (135, 1000, 47), `w`, `Ct`:
+
+| | ρ | pearson vs raw | spearman vs raw | evaluations |
+|---|---|---|---|---|
+| `solve`, 400 PG steps | +0.732575 | +0.7564 | +0.7236 | — (83 s) |
+| `solve_factor`, rank 8 | **+0.761495** | **+0.7843** | **+0.7552** | 9,465 (644 s) |
+
+Terminating on `CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH`, not on budget.
+`rank(Σ_f S)` from the projected gradient is **47/47** — full — where rank 8 suffices; ρ at
+rank 16 matched rank 8 to 4e-05. Trace to convergence: +0.76027, +0.76093, +0.76116,
++0.76139, +0.761495.
+
+**But sim fell.** `fac_r8` end to end: **+0.6577 ± 0.0008, gap 0.042, field rank 8.9**,
+against the incumbent's +0.6901 ± 0.0018 / 0.065 / 20.5. In-sample objective up 0.029,
+realised score down 0.032.
+
+**That comparison is confounded and should not be read as "convergence hurts".**
+`--rank r` is a hard structural constraint — the optimisation variable is `L` of shape
+`(nf, K, r)`, so `rank(S_f) ≤ r` by construction, with no parameter able to express more.
+`fac_r8` therefore changed two things at once: the search converged *and* the input
+cross-spectrum was capped at 8 patterns per frequency where the incumbent ran uncapped at
+47. The realised field rank of 8.9 is below the empirical 13.0. **The run that isolates
+convergence is `--solver factor --rank 47`, and it has not been done.**
+
+Two invariances survive the factorisation and are why it terminates on the function
+tolerance rather than a vanishing gradient: ρ is scale-invariant, so ‖L‖ drifts freely —
+it reached 7,225 by nfev 8,000, and a falling `|grad|` may be nothing but that, so read
+`|grad|·‖L‖`; and `S` is unchanged by `L → LU` for unitary `U`, giving r² zero-gradient
+directions per frequency.
+
+### What this leaves
+
+`--iters 400` is a regularisation parameter with a measured size: the incumbent sits 0.029
+below the maximum of its own objective. Every configuration comparison in this file was
+scored at that same fixed step count, including the spread/decay grid and the shell runs
+above, so each carries some unmeasured amount of optimiser.
+
+---
+
+## 0++. 2026-09-08 (later) — the maps, the affinity target, affinity scoring
+
+### The speed/damping maps are the largest lever measured, not a null
+
+The brief carried "the speed/damping maps currently add little and it isn't known whether
+that is a scale mismatch or COEF_LIM clipping". Neither holds.
+
+**Not clipped.** `decode_maps` maps [0,1] linearly onto [-COEF_LIM, +COEF_LIM] and clips
+nothing; the only clipping in the codebase is in `regime_deltas`, which is the
+multi-regime path. The incumbent sits at `a = [-0.30, -0.05, 0.01]` and
+`b = [-0.03, 0.35, 0.35]` against `COEF_LIM = 0.45` — 67% and 78% of the box, strictly
+inside.
+
+**Not weak.** The realised medium varies by **2.34x (p5-p95) in speed and 4.87x in
+damping**, 5.74x and **18.1x** max/min across cortex. The box would allow 873x.
+
+`--maps-scale` puts one knob through all six coefficients (0 = no cortical grading,
+1 = incumbent, 1.28 = largest coefficient on COEF_LIM):
+
+| `--maps-scale` | sim | gap | field rank | solve pearson |
+|---|---|---|---|---|
+| 0 — flat medium | +0.6606 ± 0.0003 | 0.123 | 12.0 | +0.7081 |
+| **1.0 — incumbent** | **+0.6901 ± 0.0018** | 0.065 | 20.5 | +0.7564 |
+| 1.28 — on COEF_LIM | +0.6665 ± 0.0038 | 0.063 | 21.0 | +0.7422 |
+
+An interior maximum in sim and in the solve objective alike, sitting on the incumbent. So
+the grading is worth **+0.030 of sim** — thirty times what the shell basis moved, and
+comparable to the span of the whole spread × decay grid — and its overall STRENGTH is
+already optimal under the current objective despite the coefficients being the `bo_step`
+winner from before the clock retune, the RBC target and the passband.
+
+The flat medium's field rank of 12.0 is the closest to the empirical 13.0 of any run while
+scoring worst, another instance of rank and sim pulling apart. Its Moran gap of 0.123 says
+the grading is much of what holds the model's spatial autocorrelation in range.
+
+**What the knob cannot see is DIRECTION.** It scales all six together, so the mixture over
+myelin / thickness / sulc is still whatever the old search chose, and no alternative map
+basis has been tried. That is the open axis, and it now has a measured prize: a better
+grading competes against +0.030, not against nothing.
+
+### Fitting a low-rank affinity, scored against the raw FC (`affinity_lowrank`)
+
+`gradients.affinity_lowrank` builds the Margulies affinity — top (1-thresh) of each row,
+zero the rest and negatives, row-normalise, cosine — and reconstructs from the leading K
+eigenpairs. Only the solve sub-block is formed, via a LinearOperator on `W W^T`.
+
+Why the affinity rather than a plain PCA of FC: attenuation is multiplicative,
+`R_obs = D R D` with `a_i = sqrt(SNR/(1+SNR))`, and a low-rank truncation leaves `D`
+untouched since `D R D` has the same rank as `R`. The cosine removes it — row i is
+`a_i (R D)_i`, so `a_i` and `a_j` cancel exactly. The ROW-PERCENTILE threshold is what
+buys that; an absolute threshold would put the scale back.
+
+`--target-affinity K` changes only what the solve is handed, so scoring stayed on the raw
+FC and +0.6901 remained the comparator:
+
+| fit target | ceiling (Â vs raw) | solve pearson | sim | gap | rank | sim / ceiling |
+|---|---|---|---|---|---|---|
+| **raw FC — incumbent** | 1.000 | +0.7564 | **+0.6901 ± 0.0018** | 0.065 | 20.5 | 0.690 |
+| affinity K = 3 | +0.6472 | +0.5841 | +0.5587 ± 0.0039 | 0.108 | 8.5 | 0.863 |
+| affinity K = 10 | +0.8263 | +0.7295 | +0.6398 ± 0.0087 | 0.081 | 17.9 | 0.774 |
+| affinity K = 30 | +0.8551 | +0.7358 | +0.6418 ± 0.0023 | 0.077 | 19.9 | 0.751 |
+| affinity K = 90 | +0.8657 | +0.7338 | +0.6490 ± 0.0060 | 0.086 | 18.7 | 0.750 |
+
+The Â-vs-raw Spearman is a **ceiling**: a perfect fit to Â scores exactly there against
+raw. At K = 3 that ceiling (+0.6472) is already below the incumbent's achieved +0.7236, so
+that cell could not help whatever the model did.
+
+The decomposition is exact. The affinity IS the easier target — the model reaches **75% of
+its ceiling against 69% for the raw FC**, stable across K = 10-90 — but it asymptotes at
+0.866 agreement with the raw FC, and 0.75 x 0.866 = 0.649, the observed sim, against
+0.69 x 1.0 = 0.690. Efficiency up 9%, ceiling down 13%.
+
+**The protocol is what limits this, not the idea.** Fit-to-Â/score-to-raw structurally
+disadvantages any denoising: the denoised target is by construction further from raw, so
+the ceiling always falls and the method must overcome that from efficiency alone. It is
+the right test of "does this improve the number we report" and not of "does this get closer
+to the underlying field", and those come apart exactly when the target is noisy — which was
+the reason for trying it.
+
+### Scoring in affinity space (`--score-affinity`)
+
+`FCTarget.attach_affinity` / `.affinity_sim` score a realisation through the same recipe on
+both sides, reusing the same `self.i/self.j` edge sample, the same double-centring and the
+same rank-and-normalise `_prep` — the same estimator as `sim`, in a different space. The
+transform sits OUTSIDE the solve, so the objective stays linear in S and convex.
+`score_realisation` reports `sim_aff` whenever it is attached, so pooled draws get it too.
+
+Both sides use the affinity of the DOUBLE-CENTRED FC, which departs from the Margulies
+convention of the raw correlation matrix but keeps model and target identical.
+
+| fit target | **AFFINITY sim** | raw sim | gap | rank |
+|---|---|---|---|---|
+| raw FC — incumbent, 2 draws | +0.7326 ± 0.0108 | +0.6901 ± 0.0018 | 0.065 | 20.5 |
+| affinity K = 30, 2 draws | +0.7546 ± 0.0112 | +0.6418 ± 0.0023 | 0.077 | 19.9 |
+| affinity K = 90, 2 draws | +0.7585 ± 0.0063 | +0.6490 ± 0.0060 | 0.086 | 18.7 |
+| **raw FC — REFERENCE, 4 draws** | **+0.7300 ± 0.0083** | **+0.6915 ± 0.0026** | 0.073 | 19.7 |
+| affinity K = 90, 4 draws | +0.7489 ± 0.0108 | +0.6462 ± 0.0051 | 0.086 | 18.6 |
+
+**The printed ± is `np.std` across draws, not the standard error.** Earlier readings that
+used it directly as an SE understated the significance. With SEM = sd/sqrt(n), fitting the
+affinity leads by +0.0259 ± 0.0088 at 2 draws (2.9 sigma) and +0.0189 ± 0.0068 at 4
+(2.8 sigma) — the point estimate falls, the significance holds.
+
+**Adopted: fit AND score the K=90 affinity** (`--target-affinity 90 --score-affinity`).
+The fit target costs **2.0 s**, once per run — `affinity_lowrank` takes the top-90
+eigenpairs through a LinearOperator on `W W^T` and never forms it — so the compute
+objection to it does not apply. The remaining trade is +0.019 in affinity space against
+-0.045 in FC space, taken deliberately: the gradient decomposition is the currency the work
+will be reported in.
+
+**Reference for everything after this: `as_k90_4`** — AFFINITY sim **+0.7489 ± 0.0108**,
+raw sim +0.6462 ± 0.0051, gap 0.086, field rank 18.6, at 4 draws.
+
+Affinity costs, measured: `target_fc` 0.2 s, `affinity_rows` 0.5 s, `affinity_lowrank`
+K=90 **2.0 s once per run**, `affinity_edges` on 2M edges **16.0 s once per DRAW**. The
+16 s is the price of `--score-affinity` whichever target is fitted.
+
+Read with two cautions. Part of the gain is guaranteed rather than earned, since the
+objective and the metric are now aligned — though not all of it, because the fit is against
+a rank-K affinity while the score uses the full-rank one. And both affinity-fit arms are
+WORSE in FC space (+0.6418, +0.6490 against +0.6901), so this is a trade between metrics,
+not an improvement in both.
+
+**The affinity metric is noisier**: draw scatter ±0.006-0.011 against ±0.002-0.006 for the
+raw FC, so at two draws a difference needs roughly ±0.015 to mean anything and these sit
+just above it. AFFINITY numbers are NOT comparable to raw-FC sim; both are reported so the
+older record stays readable.
+
+
+### Two fancy-index chunks were holding multi-GB transients
+
+Affinity scoring needs full FC ROWS, so unlike the edge-sampled `sim` it has to form the
+model FC. Put into `score_realisation` — the function the draw pool calls — at the pool's
+default width, seven workers each opened a full-width BLAS matmul at once and the host went
+down.
+
+The size was not where it looked. `model_edges` and `affinity_edges` both index the edge
+endpoints in chunks of a FIXED 250,000, and `W[i[b]]` is a contiguous COPY of shape
+(chunk, row width). At 9,310 columns that is 9.3 GB per operand; in `model_edges` at a
+2,308 s realisation, with T = 14,263, it is **14.3 GB** — and `model_edges` is on every
+scoring path in the repo, so that transient long predates any of this. Both chunks are now
+sized from the row width against a 512 MB per-operand budget. Values are identical; only
+the loop count changes.
+
+Measured at 577 s, 3 draws:
+
+| | no affinity | with affinity |
+|---|---|---|
+| fixed 250,000 chunk | 20.07 GB / 51.8 s | 31.93 GB / 96.9 s |
+| 128 MB budget | 13.90 GB / 71.7 s | 15.37 GB / 89.8 s |
+| **512 MB budget** | **14.62 GB / 52.3 s** | **16.12 GB / 85.9 s** |
+
+512 MB keeps the original speed and 27% of the memory saving on the core path; 128 MB cost
+38% wall because chunks of ~8,900 give the einsum too little to work with. At 2,308 s the
+pool workers went from 8.7 GB each to 0.3-0.4 GB.
+
+`parallel_scores` also caps the pool when affinity scoring is attached. The first cap —
+2 workers x 2 threads — was an over-correction: the thread limit throttles `fl.run`, which
+is the bulk of a draw and has nothing to do with the affinity, turning a 25-minute arm into
+70+ minutes at 5-way load. It is now 4 workers x 4 threads.
+
+
+### A reduced solve ranks media correctly; a CONVERGED one does not
+
+The three `--maps-scale` media have known full-pipeline scores, so they are a ready-made
+test of whether a cheap surrogate preserves the ordering a medium search would rely on.
+Ordering to reproduce: **1 > 1.28 > 0** (+0.6901, +0.6665, +0.6606), the interior maximum
+being the feature that distinguishes "stronger grading is better" from "the incumbent is at
+an optimum". Impulse responses were cached for all three, so this isolates solve cost.
+
+| budget | s=0 | s=1 | s=1.28 | order | wall/medium |
+|---|---|---|---|---|---|
+| nvert 1000, 400 iters | +0.6875 | +0.7326 | +0.7159 | 1 > 1.28 > 0 | 85.1 s |
+| nvert 1000, 100 iters | +0.6524 | +0.7055 | +0.6866 | 1 > 1.28 > 0 | 22.5 s |
+| nvert 400, 400 iters | +0.6791 | +0.7396 | +0.7314 | 1 > 1.28 > 0 | 43.2 s |
+| nvert 400, 100 iters | +0.6386 | +0.7082 | +0.6969 | 1 > 1.28 > 0 | 11.2 s |
+| **nvert 400, 50 iters** | +0.6138 | +0.6896 | +0.6741 | **1 > 1.28 > 0** | **5.3 s** |
+| nvert 400, rank 8, 300 fev | +0.7760 | +0.7781 | +0.7616 | 1 > 0 > 1.28 | 8.6 s |
+| nvert 400, rank 8, 1500 fev | +0.7962 | +0.7881 | +0.7701 | **0 > 1 > 1.28** | 40.8 s |
+
+Every projected-gradient budget holds the order down to **5.3 s per medium, 16x faster**
+than the 1000/400 reference. It preserves rank and NOT spacing — at 400/50 the 1-vs-0 gap
+reads 0.076 against the reference's 0.045 — so it ranks media and cannot be read for effect
+sizes.
+
+**The factorised solve inverts the comparison.** Converged at rank 8 the FLAT medium scores
+highest (+0.7962) where the full pipeline puts it last (+0.6606 against +0.6901). Given
+enough input freedom and an exactly-maximised objective, an ungraded medium fits the
+covariance pattern as well as a graded one: the medium's contribution is absorbed into `S`.
+
+So `fac_r8`'s "higher objective, lower sim" is not a shifted number, it REVERSES model
+comparisons. The incumbent's under-convergence at 400 steps is load-bearing for model
+selection, and `--iters` is better read as what makes the objective discriminate between
+media than as a defect to be engineered away. Three points is a weak test — it says the
+surrogate is not broken, not that it tracks the pipeline across medium space.
+
+
+### The surrogate holds under the affinity target
+
+Re-run with the K=90 affinity as the solve target, same three media:
+
+| budget | s=0 | s=1 | s=1.28 | order | wall/medium |
+|---|---|---|---|---|---|
+| nvert 1000, 400 iters | +0.6943 | +0.7264 | +0.7038 | 1 > 1.28 > 0 | 91.3 s |
+| nvert 400, 100 iters | +0.6276 | +0.6865 | +0.6685 | 1 > 1.28 > 0 | 11.4 s |
+| **nvert 400, 50 iters** | +0.6051 | +0.6656 | +0.6447 | **1 > 1.28 > 0** | **5.5 s** |
+| nvert 400, 25 iters | +0.5790 | +0.6423 | +0.6184 | 1 > 1.28 > 0 | 3.1 s |
+
+Still unverified: **1 > 1.28 > 0** is the FC-space ordering; those three media have no
+full-pipeline scores under the adopted affinity configuration.
+
+### A medium search costs 31 s a candidate, and 82% of it is the impulses
+
+`xspec.impulse_responses(..., cache=False)` was added because the cache key carries `a` and
+`b`, so every candidate medium is a miss and each 47-piece set is **1.79 GB** against
+101 GB free — a search would fill the disk after ~56 candidates. Cold, uncached, 47 pieces
+over 8 workers: **25.1 s**, plus 5.5 s for the reduced solve. Further speedup belongs on
+the impulse stage, not the solve.
+
+### LB eigenmodes as a map basis (`cortical_maps.lb_modes`)
+
+Built from the SAME discrete operator the medium integrates — swe_rot's `grad` is
+`(h[Ej]-h[Ei])/d` and `divergence` accumulates `±l·ue` then divides by `A`, so
+`div(grad h)_i = (1/A_i) Σ_j w_ij (h_j - h_i)` with `w = l/d`. The modes are the
+generalised eigenvectors of `K φ = λ A φ`. `load_maps` resolves names `lb<k>`, so a
+map-graded medium takes a geometric basis with no change downstream; `fluid.map_fields`
+only asks for names and stacks what it gets. This grades a medium PROPERTY while the drive
+stays localised and anatomical — the opposite of driving eigenmodes directly, which returns
+a global pattern for a global input.
+
+**The basis is smoother than the anatomical maps, not more expressive.** Fraction of each
+map's variance inside the first J modes:
+
+| J | myelin | thickness | sulc | min wavelength |
+|---|---|---|---|---|
+| 4 | 0.368 | 0.423 | 0.014 | |
+| 16 | 0.591 | 0.607 | 0.077 | |
+| 32 | 0.678 | 0.671 | **0.185** | 75.5 mm |
+| 128 | 0.857 | 0.787 | 0.535 | |
+| 256 | 0.913 | 0.859 | **0.776** | 26.6 mm |
+
+Myelin and thickness are largely smooth; **sulc is not** — it varies at the gyral scale and
+needs hundreds of modes. The incumbent's damping is `b = [-0.03, 0.35, 0.35]` on
+myelin/thickness/**sulc**, so its two large coefficients sit on the map the eigenmode basis
+represents worst. At any tractable J the LB basis is a strictly smoother family that does
+NOT contain the current best medium, which bounds smooth grading rather than grading.
+
+---
+
+## 0+++. 2026-09-09 — searching the medium's grading (`fit/map_search.py`)
+
+`map_search.py` searches the speed/damping map coefficients with the reduced solve
+(nvert 400, 50 iterations, K=90 affinity target) as the objective, seeded at the incumbent
+so generation 0 contains the current best medium exactly. `--check-every` re-evaluates the
+best at a STRICT budget (nvert 1000, 400 iterations) and logs it beside the surrogate's
+claim, because the first search's gain did not survive.
+
+### The surrogate can be optimised against, and overstates by ~7x
+
+Anatomical + `lb1..lb8`, 22 coefficients, 169 candidates: surrogate **+0.069015**. Scored
+through the full pipeline (2,308 s, 4 draws, K=90 affinity fit and score) as `ms_bp`:
+
+| | AFFINITY sim | raw sim | gap | field rank |
+|---|---|---|---|---|
+| incumbent `as_k90_4` | +0.7489 ± 0.0108 | +0.6462 ± 0.0051 | 0.086 | 18.6 |
+| searched `ms_bp` | +0.7583 ± 0.0164 | +0.6340 ± 0.0118 | 0.070 | 27.4 |
+
+**+0.0094, and with SEM = sd/sqrt(4) the standard error on the difference is 0.0098 —
+0.96 sigma.** The surrogate promised +0.069 and delivered a seventh of it, indistinguishable
+from zero. The reduced solve ranks the three known media correctly (§0++) but that
+established it was not broken, NOT that it could be optimised against with 22 free
+parameters. Same family as the converged-solve inversion in §0++.
+
+The strict check exists to make that visible while a search runs. Measured ratios of
+strict to surrogate gain: 36-45% across capped and uncapped runs, against the 14% the
+pipeline delivered.
+
+### What the searches keep finding: myelin in both roles, opposite signs
+
+The incumbent uses ONE MAP PER ROLE — myelin sets speed (a=-0.300, b=-0.030), thickness and
+sulc set damping (b=+0.350 each, a within noise of zero). No map carries a substantial
+coefficient in both. Across cortex that gives **corr(log c, log sigma) = +0.332**, mildly
+POSITIVE.
+
+Every search so far moves off that arrangement the same way: damping onto myelin, sulc out
+of damping, and the speed/damping correlation flipped negative.
+
+| medium | corr(log c, log s) | speed | damping | reach |
+|---|---|---|---|---|
+| flat (`--maps-scale 0`) | — | 1.0x | 1.0x | 1.0x |
+| **incumbent** | **+0.332** | 5.7x | 18.1x | 19.0x |
+| anatomical, uncapped (63 cand) | -0.349 | 14.7x | 18.2x | 51.6x |
+| LB, uncapped (169 cand) | -0.425 | 12.1x | 39.1x | 230.0x |
+
+Anti-correlating speed and damping is the efficient way to manufacture reach heterogeneity,
+and the searches reach for it whatever basis they are given: the largest single `a-b` was
+`lb2` at -0.606 in the eigenmode run and **myelin at -0.629** in the anatomical one. With
+myelin's speed coefficient negative, a positive damping coefficient means high myelin =
+slower AND more damped = short reach; low myelin = fast, lightly damped, long reach. That is
+the unimodal-to-transmodal axis, and the same axis the affinity target is built from.
+
+### The flat control, and where the power actually is
+
+`--maps-scale 0` gives a uniform medium. All three at 2,308 s / 4 draws, K=90 affinity:
+
+| medium | AFFINITY sim | raw sim | gap | rank | raw power in 0.01-0.08 Hz | filter amp |
+|---|---|---|---|---|---|---|
+| flat | +0.7119 ± 0.0079 | +0.6200 ± 0.0042 | 0.135 | **10.9** | **9.8%** | 0.24x |
+| **incumbent** | +0.7489 ± 0.0108 | +0.6462 ± 0.0051 | 0.086 | 18.6 | 17.2% | 0.38x |
+| searched (LB) | +0.7583 ± 0.0164 | +0.6340 ± 0.0118 | 0.070 | 27.4 | 22.1% | 0.48x |
+
+- **flat -> incumbent: +0.0370 ± 0.0067, 5.5 sigma.** The grading does real work.
+- **incumbent -> searched: +0.0094 ± 0.0098, 0.96 sigma.** Twelve times the reach spread
+  buys nothing measurable.
+- In-band power rises MONOTONICALLY with grading strength, 9.8% -> 17.2% -> 22.1% across a
+  230-fold range of reach spread. Grading pulls the medium's temporal content INTO the
+  scored band rather than pushing it out — the opposite of the reading I first gave.
+- **Real BOLD carries 84% of its variance in 0.01-0.1 Hz (§1).** The most heavily graded
+  medium here reaches 22.1%. A 23-fold increase in reach heterogeneity bought 7 percentage
+  points and BOLD is 62 points further on. The multi-timescale mismatch is large and the
+  grading does not close it.
+
+`viz/render_bandpass.py --tag <tag> --resimulate` renders the pair; `resimulate_raw` now
+prefers the run's OWN saved map basis, since `x` encodes only three anatomical coefficients
+and a richer medium would otherwise be silently resimulated as the incumbent — same drive,
+wrong physics, and the two rows would differ in more than the filter. Videos:
+`bandpass_pair_{flat_bp,as_k90_4,ms_bp}_200-800.mp4`.
+
+### Capped and staged (`--reach-cap`, `--damping-cap`, `--stage`, `--init`)
+
+Caps bound the REALISED spread, computable without simulating. Enforced by scaling the free
+block by the largest t in [0,1] that satisfies both, by bisection on a linear form — not by
+rejection, so no evaluation is wasted, and `best_x` is stored already projected. An earlier
+version scaled `(a-b)`, which rewrites `a` and dragged speed along during the damping stage,
+defeating the staging; scaling only the free block fixes it. t=0 is always feasible.
+
+**Both caps are needed.** Reach is c/sigma, purely spatial: a medium can hold it constant
+while scaling c and sigma together, giving identical spatial structure and a wildly varying
+TIMESCALE. Since decay time is 1/sigma, the damping cap is what bounds temporal scales.
+
+Caps set at the incumbent's own values — reach 19.0x (it runs at 18.967x), damping 18.1x
+(18.064x) — so the search may rearrange its heterogeneity but not increase it.
+
+**Stage 1, damping (speed held), 98 candidates:**
+
+| map | a (held) | b incumbent | b stage-1 |
+|---|---|---|---|
+| myelin | -0.300 | -0.030 | **+0.158** |
+| thickness | -0.050 | +0.350 | +0.125 |
+| sulc | +0.010 | +0.350 | **+0.004** |
+
+surrogate +0.682439 (**+0.0168**), strict +0.733306 (**+0.0069**). Its damping spread is
+**3.458x against the incumbent's 18.064x** — constrained to the incumbent's limits, the
+search found a medium with a FIFTH of the temporal heterogeneity that scores slightly
+better, where the unconstrained runs had gone the other way to 39x.
+
+**Stage 2, speed (damping held), in progress.** At generation 5: surrogate +0.732154,
+strict +0.751920. Cumulative over the ORIGINAL incumbent: surrogate **+0.0665**, strict
+**+0.0255** — matching the unconstrained LB run's +0.069 surrogate while holding reach at
+19x and damping at 18.1x. Note `--init` reseeds the baseline, so stage 2's printed gains are
+against stage 1, not the original.
+
+**Neither staged medium has been scored through the pipeline yet.** Given the LB run
+delivered 14% of its surrogate claim, that re-score is what decides whether any of this
+holds.
+
+### Maps are z-scored, and right-skewed
+
+`load_maps` returns z-scored maps (means 2e-09, 0, -1e-09; sd 1.000), so c0 and sigma0 are
+the GEOMETRIC means of the realised fields — both ratios come out at 1.0000 — and there are
+always vertices on both sides. Not symmetrically: all three maps are right-skewed (myelin
+-2.52 to +3.97), so in the incumbent 58.1% of vertices are faster than baseline and 41.9%
+slower, and the arithmetic means sit above it (1.035 speed, 1.111 damping) since exp is
+convex. A coefficient buys a long fast tail and a short slow one. The z-scoring is also
+unweighted, so by area the maps are slightly off-centre (-0.076 to +0.045).
 
 ---
 

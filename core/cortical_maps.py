@@ -50,8 +50,59 @@ def _fill_holes(v, cortex, passes=8):
     return v
 
 
+def lb_modes(cortex, n=32, verbose=True):
+    """First `n` non-constant Laplace-Beltrami eigenmodes, z-scored. -> (n, nV).
+
+    Built from the SAME discrete operator the medium integrates, not a generic mesh
+    Laplacian: swe_rot's `grad` is (h[Ej]-h[Ei])/d and its `divergence` accumulates
+    +-l*ue then divides by A, so div(grad(h))_i = (1/A_i) sum_j w_ij (h_j - h_i) with
+    w = l/d. The modes are therefore the generalised eigenvectors of K phi = lam A phi,
+    K being the cotangent stiffness and A the vertex-area mass matrix, and a coefficient
+    on mode j grades exactly the operator the wave propagates through.
+
+    Used as a map BASIS for the speed/damping grading, where the drive stays localised and
+    anatomical. That is the opposite of driving eigenmodes directly, which would return a
+    global pattern for a global input and say nothing."""
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import eigsh
+    cache = os.path.join(CACHE, f"lb_modes_{cortex.mesh}_{n}.npy")
+    if os.path.exists(cache):
+        return np.load(cache)
+    E = np.asarray(cortex.edges, int)
+    w = np.asarray(cortex.l, float) / np.maximum(np.asarray(cortex.d, float), 1e-30)
+    nV = cortex.nV
+    i = np.concatenate([E[:, 0], E[:, 1], E[:, 0], E[:, 1]])
+    j = np.concatenate([E[:, 1], E[:, 0], E[:, 0], E[:, 1]])
+    v = np.concatenate([-w, -w, w, w])
+    K = sp.csr_matrix((v, (i, j)), shape=(nV, nV))
+    M = sp.diags(np.maximum(np.asarray(cortex.A, float), 1e-30))
+    ev, V = eigsh(K, k=n + 1, M=M, sigma=-1e-8, which="LM")
+    order = np.argsort(ev)
+    ev, V = ev[order][1:], V[:, order][:, 1:]          # drop the constant mode
+    P = V.T
+    P = (P - P.mean(1, keepdims=True)) / np.maximum(P.std(1, keepdims=True), 1e-30)
+    if verbose:
+        sl = 2 * np.pi / np.sqrt(np.maximum(ev, 1e-30))
+        print(f"  {n} LB modes: eigenvalue {ev[0]:.3e}-{ev[-1]:.3e}, "
+              f"wavelength 2pi/sqrt(lam) {sl[0]:.0f} -> {sl[-1]:.1f} mm")
+    np.save(cache, P)
+    return P
+
+
 def load_maps(cortex, names=NAMES, verbose=True):
     """-> dict name -> (nV,) z-scored map on the Cortex submesh."""
+    # "lb<k>" resolves to the k-th Laplace-Beltrami mode, so a map-graded medium can be
+    # given a geometric basis instead of an anatomical one with no change downstream:
+    # fluid.map_fields only ever asks load_maps for names and stacks what it gets back.
+    lb = sorted({int(nm[2:]) for nm in names if nm.startswith("lb") and nm[2:].isdigit()})
+    if lb:
+        P = lb_modes(cortex, max(max(lb), 8), verbose=verbose)
+        out = {f"lb{k}": P[k - 1] for k in lb}
+        rest = [nm for nm in names if not nm.startswith("lb")]
+        if rest:
+            out.update(load_maps(cortex, tuple(rest), verbose=verbose))
+        return out
+
     cache = os.path.join(CACHE, f"cortical_maps_{cortex.mesh}.npz")
     if os.path.exists(cache):
         z = np.load(cache)

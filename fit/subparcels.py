@@ -325,6 +325,52 @@ def gauss_profiles(cortex, labels, n_pieces, fwhm=10.0, cut=1e-3, mask=None,
     return P
 
 
+def shell_profiles(cortex, labels, n_pieces, nshell=1):
+    """Concentric shells inside each piece - core, belt, ... -> (n_pieces*nshell, nV).
+
+    The piece's envelope is unchanged; what changes is that it is now SPLIT across
+    `nshell` channels by normalised erosion depth, with hat functions that form a
+    partition of unity in depth. One piece's shells therefore sum exactly to the profile
+    `taper_profiles` gives it, and nshell=1 reproduces that function bit for bit - the
+    incumbent configuration is the zero setting of this knob rather than a neighbour of it.
+
+    `taper_profiles` is one-hot: a driven vertex is fed by exactly one channel, so the
+    drive's shape inside a piece is frozen and the solve sets only its amplitude. With
+    shells a vertex is fed by up to two channels of its own piece, so the radial shape is
+    something the solve chooses - a core and its belt in antiphase is a centre-surround,
+    which no input can express through a one-hot basis.
+
+    Shells need radial room. At `--split 40` the pieces are 2-4 erosion rings deep
+    (median 2), so nshell above 2 there is asking for structure the piece cannot resolve;
+    `--split 1` gives one piece per parcel, 25.5 mm across and 2-6 rings deep.
+
+    Channel order is piece-major: piece i's shells are rows i*nshell + j, with j=0 at the
+    border and j=nshell-1 at the core."""
+    from input2 import _erode_once
+    nb = np.zeros(cortex.nV)
+    np.add.at(nb, cortex.edges[:, 0], 1)
+    np.add.at(nb, cortex.edges[:, 1], 1)
+    P = np.zeros((n_pieces * nshell, cortex.nV), np.float32)
+    for i in range(n_pieces):
+        mask = labels == i
+        depth = np.zeros(cortex.nV)
+        cur, k = mask.copy(), 0
+        while cur.any():
+            k += 1
+            depth[cur] = k
+            cur = _erode_once(cur, cortex.edges, nb, cortex.nV)
+        if not k:
+            P[i * nshell] = mask.astype(np.float32)
+            continue
+        u = depth / k                                  # 0 outside the piece, (0, 1] in
+        env = u * u * (3.0 - 2.0 * u)
+        for j in range(nshell):
+            hat = (np.ones_like(u) if nshell == 1 else
+                   np.maximum(0.0, 1.0 - np.abs(u - j / (nshell - 1.0)) * (nshell - 1.0)))
+            P[i * nshell + j] = (env * hat).astype(np.float32)
+    return P
+
+
 def taper_profiles(cortex, labels, n_pieces):
     """Smooth profile per piece: 1 at its core, 0 at its border, same recipe as
     input2.parcel_tapers but for arbitrary vertex sets."""
