@@ -339,6 +339,45 @@ def main():
                          "Multiplies H by bandpass.segment_response and chops the "
                          "realised frames the same way, so both sides lose the same low "
                          "frequencies. Needs --oversample for a clock, like --bandpass")
+    ap.add_argument("--score-affinity", action="store_true", dest="score_affinity",
+                    help="also score in affinity space, where the ceiling is 1 rather "
+                         "than the 0.866 a raw-FC score imposes on an affinity fit. Both "
+                         "numbers are reported; they are different metrics and the "
+                         "affinity one is NOT comparable to a raw-FC sim")
+    ap.add_argument("--target-affinity", type=int, default=0, dest="target_affinity",
+                    help="fit a rank-K reconstruction of the FC's cosine affinity instead "
+                         "of the FC. Scoring is untouched, so the run is still measured "
+                         "against the raw target and the number stays comparable")
+    ap.add_argument("--affinity-thresh", type=float, default=0.90, dest="affinity_thresh")
+    ap.add_argument("--map-search", default="", dest="map_search",
+                    help="results/mapsearch_<tag>.npz from fit/map_search.py: takes the "
+                         "map basis and the searched speed/damping coefficients from it. "
+                         "The search ran against a REDUCED solve (400 vertices, 50 "
+                         "iterations) that preserves rank and not spacing, so its gain "
+                         "does not transfer and the medium has to be scored here")
+    ap.add_argument("--maps-scale", type=float, default=1.0, dest="maps_scale",
+                    help="scale the six speed/damping map coefficients in BEST_X. 0 is a "
+                         "medium with no cortical grading at all, 1 the incumbent, and "
+                         "1.28 puts the largest coefficient on COEF_LIM. Those "
+                         "coefficients are the bo_step winner and predate the clock "
+                         "retune, the RBC target and the passband, so what they "
+                         "contribute under the current objective is unmeasured")
+    ap.add_argument("--solver", default="gradient", choices=("gradient", "factor"),
+                    help="'gradient' is the incumbent projected-gradient walk on the PSD "
+                         "cone, stopping on --iters. 'factor' writes S = L L^H and runs "
+                         "L-BFGS on L to convergence, so the stopping point is a "
+                         "tolerance rather than a step count and the rank is declared")
+    ap.add_argument("--rank", type=int, default=8,
+                    help="rank of L for --solver factor")
+    ap.add_argument("--maxfun", type=int, default=20000,
+                    help="evaluation budget for --solver factor")
+    ap.add_argument("--shells", type=int, default=1,
+                    help="split each piece into this many concentric shells by erosion "
+                         "depth, so the solve chooses the drive's RADIAL shape instead of "
+                         "only its amplitude. 1 reproduces taper_profiles exactly. Needs "
+                         "radial room: pieces are 2-4 rings deep at --split 40 and 2-6 "
+                         "at --split 1, and a shell count past the ring count collapses "
+                         "back to one-hot")
     ap.add_argument("--tag", default="best")
     ap.add_argument("--best", action="store_true",
                     help="the pinned best sensory-only configuration (see BEST). Any "
@@ -359,6 +398,10 @@ def main():
     t = (fc_score.FCTarget(c, fc_path=a.fc_path, centre=a.centre, verbose=True)
          if a.fc_path else fc_score.default_target(c, centre=a.centre, verbose=True))
     mm = MoranMatch(c, t)
+    if a.score_affinity:
+        t.attach_affinity(a.affinity_thresh)
+        print(f"  scoring in affinity space as well (row threshold "
+              f"{a.affinity_thresh:g}); the two numbers are different metrics")
     parcels, split = subparcels.region_set(c, a.regions, a.split, a.spread_scale)
     fc_split = None
     if a.fc_split:
@@ -368,9 +411,16 @@ def main():
     labels, tags = subparcels.split_parcels(
         c, parcels, split, verbose=False, fc=fc_split,
         fc_key=f"_fc{a.fc_split}" if a.fc_split else "")
-    P = (subparcels.taper_profiles(c, labels, len(tags)) if a.profile == "taper"
-         else subparcels.gauss_profiles(c, labels, len(tags), a.profile_fwhm,
-                                        mask=(labels >= 0) if a.profile_mask else None))
+    if a.profile == "taper":
+        P = subparcels.shell_profiles(c, labels, len(tags), a.shells)
+        if a.shells > 1:
+            tags = [f"{t}s{j}" for t in tags for j in range(a.shells)]
+            print(f"  {a.shells} concentric shells per piece: {len(P)} channels over the "
+                  f"same {len(labels[labels >= 0])} driven vertices. The shells of a piece "
+                  f"sum to the profile --shells 1 would have given it")
+    else:
+        P = subparcels.gauss_profiles(c, labels, len(tags), a.profile_fwhm,
+                                      mask=(labels >= 0) if a.profile_mask else None)
     x = BEST_X.copy()
     clock = None
     if a.oversample:
@@ -410,9 +460,31 @@ def main():
               f"{a.impulse_frames} frames ({a.impulse_frames*clock['frame_s']:.0f}s, "
               f"decay {decay_fr:.0f} frames), pad {a.pad}, realise {a.frames} frames "
               f"({a.seconds:.0f}s)")
+    if a.maps_scale != 1.0:
+        import fluid as _fl
+        x[4:10] = x[4:10] * a.maps_scale
+        print(f"  map coefficients scaled by {a.maps_scale:g}: "
+              f"a {np.round(x[4:7], 3)}, b {np.round(x[7:10], 3)} "
+              f"(COEF_LIM {_fl.COEF_LIM})")
     if a.damp is not None:
         x[0] = np.log10(a.damp)
     p, save, _ = bo_step.unpack(x, c)
+    ms = None
+    if a.map_search:
+        ms = np.load(a.map_search, allow_pickle=True)
+        mp = tuple(str(v) for v in ms["maps"])
+        bx = np.asarray(ms["best_x"], float)
+        p = dict(p); p["maps"] = mp
+        p["a"], p["b"] = bx[:len(mp)], bx[len(mp):]
+        import fluid as _fl
+        cf, sg = _fl.map_fields(c, p)
+        print(f"  medium from {os.path.basename(a.map_search)}: {len(mp)} maps "
+              f"({', '.join(mp)})")
+        print(f"    surrogate rho {float(ms['best']):+.6f} against incumbent "
+              f"{float(ms['r0']):+.6f} ({float(ms['best'])-float(ms['r0']):+.6f}) "
+              f"over {int(ms['n'])} candidates")
+        print(f"    speed {cf.min():.3f}-{cf.max():.3f} ({cf.max()/cf.min():.1f}x), "
+              f"damping {sg.min():.2e}-{sg.max():.2e} ({sg.max()/sg.min():.1f}x)")
     print(f"  {len(P)} pieces, save {save} steps/frame, per-step damping "
           f"{10**x[0]:.2e}, rotation {10**x[1]:.2e}, sponge {10**x[2]:.2e}"
           + (f", impulse window {a.impulse_frames} frames "
@@ -557,7 +629,20 @@ def main():
         if spec.sum() <= 0:
             raise SystemExit("  no solved frequency lies in the measured BOLD range")
 
-    Tgt = normal_scores(raw, iu) if a.target == "normal" else raw
+    fit_src = raw
+    if a.target_affinity:
+        import gradients
+        A = gradients.affinity_lowrank(t.target_fc(), a.target_affinity,
+                                       thresh=a.affinity_thresh, sub=sub)
+        A = A - A.mean(0, keepdims=True) - A.mean(1, keepdims=True) + A.mean()
+        print(f"  fitting a rank-{a.target_affinity} affinity "
+              f"(row threshold {a.affinity_thresh:g}) instead of the FC; it correlates "
+              f"with the raw target at spearman "
+              f"{__import__('scipy.stats', fromlist=['x']).spearmanr(A[iu], raw[iu]).statistic:+.4f}. "
+              f"This changes only what the solve is handed; the metric is whatever "
+              f"--score-affinity selects")
+        fit_src = A
+    Tgt = normal_scores(fit_src, iu) if a.target == "normal" else fit_src
     Lw = None
     if a.whiten > 0:
         H, Lw = xspec.whiten(H, a.whiten)
@@ -577,10 +662,14 @@ def main():
                                Lw, keep_f, spec, band=bp, frame_s=fs_bp,
                                segment=seg_fr)
     tr = []
-    S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
-                       share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
-                       val_H=None if a.select_iters else Hv,
-                       val_Ct=None if a.select_iters else val_Ct)
+    if a.solver == "factor":
+        S, C = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
+                                  trace=tr, log_every=max(1, a.maxfun // 10))
+    else:
+        S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
+                           share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
+                           val_H=None if a.select_iters else Hv,
+                           val_Ct=None if a.select_iters else val_Ct)
     if Lw is not None:
         S = xspec.unwhiten(S, Lw)
     from scipy.stats import spearmanr
@@ -609,7 +698,7 @@ def main():
         print(f"  rank iteration {it+1}: spearman vs raw "
               f"{spearmanr(C[iu], raw[iu]).statistic:+.4f}")
 
-    sims, gaps, rks = [], [], []
+    sims, gaps, rks, affs = [], [], [], []
     # Draws 1.. are scored in a pool while draw 0 runs here. Draw 0 stays in this process
     # because its frames and drive are the ones written to disk, and 134 MB per draw
     # through a pipe would cost more than the realisation does. A run_fn case - switching
@@ -640,14 +729,18 @@ def main():
                                     run_fn=run_fn, kernel=kern, band=bp, frame_s=fs_bp,
                                     segment=seg_fr)
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
+        if "sim_aff" in r:
+            affs.append(r["sim_aff"])
         if d == 0:
             if nb > 1:
                 regimes.epoch_profile(r["frames"], sched_f, a.epoch, nb)
             np.save(os.path.join(RESULTS, f"frames_{a.tag}.npy"), r["frames"])
             np.save(os.path.join(RESULTS, f"drive_{a.tag}.npy"), r["drive"].Aser)
     if pool is not None:
-        for sim, gap, rk in res.get():
+        for sim, gap, rk, sa in res.get():
             sims.append(sim); gaps.append(gap); rks.append(rk)
+            if sa == sa:                       # NaN when the target has no affinity
+                affs.append(sa)
         pool.close(); pool.join()
     # pad, ref_frames and the clock go in the file. Without them a reader has to guess
     # what frequency a solved bin is, and piece_power's answer depends on that guess.
@@ -658,10 +751,14 @@ def main():
              band=np.array(bp if bp else (np.nan, np.nan)), segment=seg_fr,
              fc_path=(a.fc_path or ""), H_w=w, regions=a.regions, split=a.split,
              sub=sub, impulse_frames=a.impulse_frames, nfreq=a.nfreq,
-             medoid_from=(a.medoid_from or ""))
+             medoid_from=(a.medoid_from or ""),
+             maps=np.array(p.get("maps", ()), dtype=object),
+             map_a=np.asarray(p.get("a", ()), float),
+             map_b=np.asarray(p.get("b", ()), float))
     print(f"\n  realised over {a.frames} frames, {a.draws} draws: "
-          f"sim {np.mean(sims):+.4f} +- {np.std(sims):.4f}   "
-          f"gap {np.mean(gaps):.3f}   rank {np.mean(rks):.1f}")
+          + (f"AFFINITY sim {np.mean(affs):+.4f} +- {np.std(affs):.4f}   " if affs else "")
+          + f"sim {np.mean(sims):+.4f} +- {np.std(sims):.4f}   "
+          + f"gap {np.mean(gaps):.3f}   rank {np.mean(rks):.1f}")
 
 
 if __name__ == "__main__":

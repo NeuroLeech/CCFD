@@ -95,7 +95,7 @@ def validation_subset(target, sub, n=1000, seed=1):
 
 
 def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=None,
-                      verbose=True, dt=None, coupling=None, workers=0):
+                      verbose=True, dt=None, coupling=None, workers=0, cache=True):
     """(K, nframes, nV) response of the field to one impulse in each region.
 
     `profiles` overrides the parcel tapers with an explicit (K, nV) profile matrix, which
@@ -117,9 +117,11 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
     key = (f"{cortex.mesh}_sig{p['sig0']:.6g}_c{p['c0']:.6g}_Ld{p['Ld']:.6g}"
            f"_spg{p.get('sponge_scale', 1.0):.4g}_a{np.round(p.get('a', 0), 3)}"
            f"_b{np.round(p.get('b', 0), 3)}_{len(regions)}_{nsteps}_{save}{ptag}{dtag}{ctag}")
-    cache = os.path.join(CACHE, "impulse_" + key.replace(" ", "") + ".npy")
-    if os.path.exists(cache):
-        return np.load(cache)
+    cache_f = os.path.join(CACHE, "impulse_" + key.replace(" ", "") + ".npy")
+    # `cache=False` for medium SEARCHES. The key carries a and b, so every candidate is a
+    # miss, and one 47-piece set is 1.79 GB - a few dozen candidates fill the disk.
+    if cache and os.path.exists(cache_f):
+        return np.load(cache_f)
     if profiles is None:
         T, ids = parcel_tapers(cortex, verbose=False)
         pos = {int(q): i for i, q in enumerate(ids)}
@@ -147,7 +149,8 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
                 print(f"  impulse {k:3d}: peak {np.abs(fr[0]).max():.3f} -> "
                       f"end {np.abs(fr[-1]).max():.2e}", flush=True)
         out = np.asarray(out)
-    np.save(cache, out)
+    if cache:
+        np.save(cache_f, out)
     return out
 
 
@@ -209,7 +212,7 @@ def _score_one(A):
                           save=_W_SCORE["save"], profiles=_W_SCORE["profiles"],
                           kernel=_W_SCORE["kernel"], band=_W_SCORE["band"],
                           frame_s=_W_SCORE["frame_s"], segment=_W_SCORE["segment"])
-    return r["sim"], r["gap"], r["rank"]
+    return r["sim"], r["gap"], r["rank"], r.get("sim_aff", float("nan"))
 
 
 def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
@@ -225,9 +228,33 @@ def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
     whose frames it keeps in its own process while these are still going."""
     import multiprocessing as mp
     ctx = mp.get_context("spawn")
-    pool = ctx.Pool(min(workers, len(draws_A)), initializer=_score_init,
-                    initargs=(cortex, target, p, profiles, save, kernel, band, frame_s,
-                              segment))
+    n = min(workers, len(draws_A))
+    env = {}
+    if getattr(target, "aff_y", None) is not None:
+        # Affinity scoring costs a (V, T) x (T, V) matmul and three V x V arrays PER DRAW,
+        # where plain scoring only einsums over sampled edges and never forms a V x V
+        # matrix at all. Running that at full pool width put every worker into a
+        # multi-threaded BLAS call at once - 7 workers x N threads on a machine with far
+        # fewer cores - and took the host down. Children inherit the environment at spawn,
+        # so the limit is set here and restored immediately; the parent keeps the BLAS it
+        # has already loaded.
+        # Capping at 2 workers x 2 threads was an over-correction: the thread limit
+        # throttles fl.run, which is the bulk of a draw, not just the affinity matmul, and
+        # 2 workers serialises the draws on top of that. With the fancy-index chunks now
+        # sized from row width the multi-GB transients are gone (8.7 GB per worker
+        # measured at 2,308 s), so what is left to avoid is thread oversubscription.
+        n = min(n, 4)
+        for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                  "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            env[k] = os.environ.get(k)
+            os.environ[k] = "4"
+    try:
+        pool = ctx.Pool(n, initializer=_score_init,
+                        initargs=(cortex, target, p, profiles, save, kernel, band,
+                                  frame_s, segment))
+    finally:
+        for k, v in env.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
     return pool, pool.map_async(_score_one, list(draws_A))
 
 
@@ -824,6 +851,98 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
     return S, model(S, SL)
 
 
+def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
+                 ftol=1e-18, gtol=1e-16, maxcor=40, log_every=0, trace=None):
+    """The same objective as `solve`, maximised over S = L L^H with L the free variable.
+
+    `solve` walks the PSD cone by projected gradient and stops on an iteration count, with
+    no optimality certificate, so `--iters` is a regularisation parameter rather than a
+    convergence criterion. Factorising removes the constraint instead of enforcing it -
+    S = L L^H is PSD for any L - so the problem is smooth and unconstrained and L-BFGS can
+    build its own curvature model, which is what the anisotropy of the stacked H asks for.
+
+    The gradient reuses arithmetic the objective already pays. With A_f the quantity
+    `solve`'s adjoint forms,
+
+        d rho / d L_f  =  2 A_f L_f  =  2 Hs_f^H (M (Hs_f L_f))
+
+    and Hs_f L_f is the B_f already built to evaluate rho, so a gradient costs one extra
+    gemm of the size the objective costs.
+
+    `rank` is declared rather than emergent. Two invariances survive: rho is scale
+    invariant, so ||L|| drifts freely and a falling |grad| may be nothing but L growing -
+    read |grad| * ||L|| instead; and S is unchanged by L -> L U for unitary U, r^2
+    zero-gradient directions per frequency. Neither obstructs the maximum, both make the
+    Hessian singular, and together they are why termination comes on the function
+    tolerance rather than on a vanishing gradient.
+
+    -> (S, C), the pair `solve` returns, S normalised to unit total trace."""
+    from scipy.optimize import minimize
+    nf, nV, K = H.shape
+    r = int(rank)
+    Ctn = Ct.copy()
+    np.fill_diagonal(Ctn, 0.0)
+    Ctn /= np.linalg.norm(Ctn)
+    Hs = H * np.sqrt(2.0 * np.asarray(w, float))[:, None, None]
+    Hsc = np.ascontiguousarray(Hs.conj().transpose(0, 2, 1))
+    half = nf * K * r
+    nfev = [0]
+
+    def _dcz(M):
+        M = M - M.mean(0, keepdims=True) - M.mean(1, keepdims=True) + M.mean()
+        np.fill_diagonal(M, 0.0)
+        return M
+
+    def _cov(L):
+        X = (Hs @ L).transpose(1, 0, 2).reshape(nV, nf * r)
+        return _dcz(X.real @ X.real.T + X.imag @ X.imag.T), X
+
+    def fg(Lv):
+        nfev[0] += 1
+        L = Lv[:half].reshape(nf, K, r) + 1j * Lv[half:].reshape(nf, K, r)
+        C, X = _cov(L)
+        n = np.linalg.norm(C)
+        if n <= 0:
+            return 1e3, np.zeros_like(Lv)
+        rho = float((C * Ctn).sum() / n)
+        M = _dcz(Ctn / n - rho * C / (n * n))
+        Y = (M @ X).reshape(nV, nf, r).transpose(1, 0, 2)
+        G = 2.0 * (Hsc @ Y)
+        g = -np.concatenate([G.real.ravel(), G.imag.ravel()])
+        if log_every and nfev[0] % log_every == 0:
+            if trace is not None:
+                trace.append(float(rho))
+            print(f"      nfev {nfev[0]:>6d}  rho {rho:+.8f}  "
+                  f"|grad|*|L| {np.linalg.norm(g) * np.linalg.norm(Lv):.4e}", flush=True)
+        return -rho, g
+
+    rng = np.random.default_rng(seed)
+    L0 = rng.standard_normal(2 * half) * (1.0 / np.sqrt(K * r))
+    res = minimize(fg, L0, jac=True, method="L-BFGS-B",
+                   options=dict(maxiter=maxfun, maxfun=maxfun, maxcor=maxcor,
+                                ftol=ftol, gtol=gtol))
+    L = res.x[:half].reshape(nf, K, r) + 1j * res.x[half:].reshape(nf, K, r)
+    S = L @ np.conj(L).transpose(0, 2, 1)
+    tr = sum(np.trace(S[f]).real for f in range(nf))
+    if tr > 0:
+        S, L = S / tr, L / np.sqrt(tr)
+    C, _ = _cov(L)
+    rho_f = float((C * Ctn).sum() / np.linalg.norm(C))
+    if trace is not None:
+        # same shape of report `solve` leaves, so best_fit reads either the same way.
+        # `steps` is L-BFGS iterations and `iters` the budget, so "stopped early" here
+        # means the tolerance was met rather than the count exhausted.
+        trace.append(float(rho_f))
+        trace.append(dict(final=rho_f, steps=int(res.nit), iters=int(maxfun),
+                          stalled_at=None, rank=r, nfev=int(res.nfev)))
+    if verbose:
+        msg = res.message.decode() if isinstance(res.message, bytes) else res.message
+        print(f"    factored solve: rank {r}, corr = "
+              f"{float((C * Ctn).sum() / np.linalg.norm(C)):+.6f}, "
+              f"{res.nfev} evaluations ({msg})")
+    return S, C
+
+
 def in_original_basis(R, L):
     """Wrap a regulariser so it constrains S, while the solve runs on Q = L^H S L.
 
@@ -1198,5 +1317,8 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
     Z, _ = target.model_z(frames)
     sim = float(target._prep(target.model_edges(Z=Z)[0]) @ target.y)
     mm = MoranMatch(cortex, target)
-    return dict(sim=sim, gap=mm.gap(Z), rank=target.effective_rank(frames[target.burn:]),
-                frames=frames, drive=d)
+    out = dict(sim=sim, gap=mm.gap(Z), rank=target.effective_rank(frames[target.burn:]),
+               frames=frames, drive=d)
+    if getattr(target, "aff_y", None) is not None:
+        out["sim_aff"] = target.affinity_sim(Z)
+    return out

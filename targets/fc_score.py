@@ -114,6 +114,9 @@ def _rank_z(X, rank=True):
     return R, flat
 
 
+_EDGE_BUDGET = 512e6      # bytes per fancy-index operand in model_edges
+
+
 class FCTarget:
     """Empirical FC on the vertices a model run actually produces, plus a scoring function.
 
@@ -187,12 +190,17 @@ class FCTarget:
         return _rank_z(np.ascontiguousarray(frames[self.burn:, self.cols].T),
                        rank=(self.metric == "spearman"))
 
-    def model_edges(self, frames=None, chunk=250_000, Z=None, flat=None):
+    def model_edges(self, frames=None, chunk=None, Z=None, flat=None):
         """Model FC on the sampled edges -> (n_edges,) float32. Spearman or Pearson
         according to self.metric, which model_z has already honoured."""
         if Z is None:
             Z, flat = self.model_z(frames)
         T, V = Z.shape[1], Z.shape[0]
+        # Z[self.i[b]] is a fancy-index COPY of (chunk, T). The fixed 250,000 that used to
+        # be the default made that 14.3 GB at a 2,308 s realisation - the whole of the
+        # process's 20 GB peak - for arithmetic that does not need it. Size it from T.
+        if chunk is None:
+            chunk = max(4096, int(_EDGE_BUDGET / (T * Z.itemsize)))
         if self.i is None:
             S = (Z @ Z.T) / T
             if self.centre == "double":
@@ -239,6 +247,48 @@ class FCTarget:
         lam * max(0, (min_rank - rank) / min_rank), zero once the floor is cleared."""
         self.rank_min, self.rank_lambda = float(min_rank), float(lam)
         return self
+
+    def attach_affinity(self, thresh=0.90):
+        """Also score in affinity space, where the ceiling is 1 rather than 0.87.
+
+        Fitting a rank-K affinity and scoring against the RAW FC measured at +0.649
+        against +0.690 for fitting the FC directly, and the decomposition said why: the
+        model reaches 75% of the affinity's ceiling against 69% of the FC's, so the
+        affinity is the easier target, but it agrees with the raw FC only at 0.866 and
+        that proxy gap costs more than the easier fit returns. Scoring in the same space
+        removes the gap - the transform is applied to both sides, so nothing is being
+        compared across representations.
+
+        This is a metric change, not a model change: numbers from it are NOT comparable to
+        a raw-FC sim. `score_realisation` reports both, so the FC number stays on record.
+
+        Costs a 9310^2 matmul per draw, so it is opt-in; and each scoring process holds
+        two nV x nV float32 matrices while it runs, which bounds how many draws can be
+        pooled at once."""
+        import gradients
+        self.aff_thresh = float(thresh)
+        W = gradients.affinity_rows(self.target_fc(), thresh)
+        if self.i is not None:
+            y = gradients.affinity_edges(W, self.i, self.j)
+        else:
+            y = (W @ W.T)[np.triu_indices(self.nV, 1)]
+        del W
+        self.aff_y = self._prep(np.asarray(y, np.float32))
+        return self
+
+    def affinity_sim(self, Z):
+        """Affinity-space similarity from the z-scored model rows `Z` (V, T)."""
+        import gradients
+        S = (Z @ Z.T).astype(np.float32) / np.float32(Z.shape[1])
+        if self.centre == "double":
+            S = double_centre(S, inplace=True)
+        W = gradients.affinity_rows(S, self.aff_thresh, copy=False)   # S is ours to eat
+        if self.i is not None:
+            x = gradients.affinity_edges(W, self.i, self.j)
+        else:
+            x = (W @ W.T)[np.triu_indices(self.nV, 1)]
+        del W, S
+        return float(self._prep(np.asarray(x, np.float32)) @ self.aff_y)
 
     @staticmethod
     def effective_rank(frames):

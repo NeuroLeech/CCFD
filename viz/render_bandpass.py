@@ -44,6 +44,16 @@ def resimulate_raw(c, tag, frame_s):
     z = np.load(os.path.join(RESULTS, f"xspec_{tag}.npz"), allow_pickle=True)
     labels, tags, x = z["labels"], list(z["tags"]), z["x"]
     p, save, _ = bo_step.unpack(x, c)
+    # `x` carries only the three anatomical map coefficients, so a run whose medium was
+    # graded over a larger basis (fit/map_search.py) would be silently resimulated as the
+    # INCUMBENT medium - same drive, wrong physics, and the two rows would then differ in
+    # more than the filter. best_fit saves the basis it actually used; prefer it.
+    if "maps" in z.files and len(z["maps"]):
+        mp = tuple(str(v) for v in z["maps"])
+        p = dict(p); p["maps"] = mp
+        p["a"] = np.asarray(z["map_a"], float)
+        p["b"] = np.asarray(z["map_b"], float)
+        print(f"  medium from the run's own basis: {len(mp)} maps ({', '.join(mp)})")
     P = subparcels.taper_profiles(c, labels, len(tags))
     Aser = np.asarray(np.load(os.path.join(RESULTS, f"drive_{tag}.npy")), np.float32)
     d = ProfileDrive(c, P, Aser, 2e-4)
