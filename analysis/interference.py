@@ -107,6 +107,13 @@ def main():
     import fc_score
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
+    nfr_avail = int(len(np.load(os.path.join(RESULTS, f"drive_{a.tag}.npy"))) //
+                    int(np.load(os.path.join(RESULTS, f"xspec_{a.tag}.npz"),
+                                allow_pickle=True)["save"]))
+    if a.start + a.n > nfr_avail:
+        a.n = max(nfr_avail - a.start, 1)
+        print(f"  window clamped to frames {a.start}-{a.start + a.n} "
+              f"({nfr_avail} available)")
     r = contributions(c, a.tag, window=(a.start, a.start + a.n))
     tot, var_k, nfr = r["tot"], r["var_k"], r["nfr"]
 
