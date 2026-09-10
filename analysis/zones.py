@@ -363,7 +363,7 @@ def _plot(tag, c, t, names, f_fit, lab_fit, lab_emp, lab_mod, contested):
 
     proj = _proj(c.V, c.F)
     nG = len(names)
-    cols = plt.cm.tab10(np.linspace(0, 1, 10))[:nG]
+    cols = plt.cm.tab20(np.linspace(0, 1, nG))
     cmap = ListedColormap(cols)
 
     rows = [("attributed zone\n(Shapley share)", lab_fit.astype(float), cmap, (-0.5, nG - 0.5)),
