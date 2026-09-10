@@ -37,18 +37,42 @@ def test_manifest_entries_exist():
     assert entries, "empty manifest"
     names = [e["name"] for e in entries]
     assert len(names) == len(set(names)), "duplicate nucleus names"
+    for e in entries:
+        assert e["label"] in ascending.THOMAS_LEFT, e["name"]
 
 
-@pytest.mark.skipif(not os.path.exists(ascending.MANIFEST), reason="atlas manifest missing")
-def test_masks_load_native():
+def test_nucleus_masks_are_thomas_onehots():
     entries = ascending.load_manifest()
     names, masks, affs = ascending.nucleus_masks(entries, verbose=False)
     assert len(names) == len(entries) == len(masks) == len(affs)
     for nm, m, af in zip(names, masks, affs):
         assert m.max() > 0, f"{nm} mask is empty"
-        assert m.min() >= -1e-6, f"{nm} mask has negative values"
-        assert m.max() <= 1.0 + 1e-6, f"{nm} mask exceeds 1"
+        assert np.all(np.isin(m, (0.0, 1.0))), f"{nm} mask is not a one-hot"
         assert af.shape == (4, 4)
+    assert masks[0].shape == (394, 466, 378), "not the THOMAS native grid"
+
+
+def _subfields_cached():
+    import glob
+    return bool(glob.glob(os.path.join(ascending.CACHE, "thalamus_subfields_*.npz")))
+
+
+@pytest.mark.skipif(not _subfields_cached(), reason="subfields cache missing")
+def test_relay_fields_anatomy():
+    c = _cortex()
+    names, F = ascending.load_fields(c, verbose=False)
+    lab = np.asarray(c.lab)
+    assert len(F) == 12 and F.shape[1] == c.nV
+    for nm, f in zip(names, F):
+        assert f.max() > 0, f"{nm} field is empty"
+    vpl = F[names.index("VPL")]
+    s1 = np.isin(lab, [9, 51, 52])                     # 3b, 1, 2
+    assert vpl[s1].sum() / vpl.sum() > 0.3, \
+        f"VPL field does not concentrate on S1 ({vpl[s1].sum()/vpl.sum():.3f})"
+    cm = F[names.index("CM")]
+    m1 = np.isin(lab, [8, 55])                         # 4, 6mp
+    assert cm[m1].sum() / cm.sum() > 0.5, \
+        f"CM field does not concentrate on motor cortex ({cm[m1].sum()/cm.sum():.3f})"
 
 
 @pytest.mark.skipif(not os.path.exists(ascending.FIB_PATH), reason="FIB missing")

@@ -71,16 +71,18 @@ def rebuild(tag, c, t, verbose=True):
 
     p, save_x, _ = bo_step.unpack(x, c)
     assert save_x == save, (save_x, save)
-    P = subparcels.taper_profiles(c, labels, len(tags))
+    P = (np.asarray(z["profiles"], np.float32) if "profiles" in z
+         else subparcels.taper_profiles(c, labels, len(tags)))
 
     # the clock only enters here through the BOLD smoothing kernel; p and save come from x
-    clock = timescale.plan(4, decay_s=9.03, spread_mm_s=6, verbose=False)
-    kern = units.smoothing_kernel(timescale.bold_fwhm_frames(clock["frame_s"]))
+    frame_s = (float(z["frame_s"]) if np.isfinite(float(z["frame_s"]))
+               else timescale.TR / 4.0)
+    kern = units.smoothing_kernel(timescale.bold_fwhm_frames(frame_s))
     decay_fr = 1.0 / (10.0 ** x[0] * save)
-    imp = 224
+    imp = int(z.get("impulse_frames", 224) or 224)
     if imp < 3 * decay_fr:
         imp = int(np.ceil(3 * decay_fr / 64.0) * 64)
-    pad = 4096
+    pad = int(z.get("pad", 4096) or 4096)
     if verbose:
         print(f"  {tag}: {len(tags)} pieces, save {save}, damping {10**x[0]:.2e}, "
               f"decay {decay_fr:.0f} frames, impulse window {imp}, pad {pad}, "
@@ -94,20 +96,39 @@ def rebuild(tag, c, t, verbose=True):
     return dict(H=H, w=w, S=S, tags=tags, labels=labels, P=P, p=p, save=save)
 
 
-def group_index(tags):
-    """-> (group names, list of channel-index arrays, piece-count per group).
+def _ascending_role(nm):
+    import ascending
+    for e in ascending.load_manifest():
+        if e["name"] == nm:
+            return e.get("role", "")
+    return ""
 
-    Piece tags are '<parcel>_<n>', so the parcel each channel came from is its prefix."""
+
+def group_table(tags, labels, P):
+    """-> [(name, role, channel indices, driven mask over cortex vertices)].
+
+    Legacy tags are '<parcel>_<n>' and map through NUCLEI; driven = parcels in the group.
+    Ascending tags are '<nucleus>:<mode>' and group by nucleus name directly; driven =
+    vertices touched by any of the group's profile rows. P is the (K, nV) profile matrix
+    from the run file."""
+    tags = [str(s) for s in tags]
+    if tags and ":" in tags[0] and not tags[0].split(":")[0].isdigit():
+        names = sorted({t.split(":")[0] for t in tags})
+        return [(nm, _ascending_role(nm),
+                 np.flatnonzero([t.split(":")[0] == nm for t in tags]),
+                 np.abs(np.asarray(P)[
+                     [i for i, t in enumerate(tags) if t.split(":")[0] == nm]]).sum(0) > 0)
+                for nm in names]
     parcel = np.array([int(s.split("_")[0]) for s in tags])
-    names, idxs = [], []
-    for nm, ps, _role in NUCLEI:
-        k = np.flatnonzero(np.isin(parcel, ps))
-        names.append(nm)
-        idxs.append(k)
-    seen = np.concatenate(idxs)
+    out = []
+    for nm, ps, role in NUCLEI:
+        g = np.flatnonzero(np.isin(parcel, ps))
+        driven = np.isin(labels, np.flatnonzero(np.isin(parcel, ps)))
+        out.append((nm, role, g, driven))
+    seen = np.concatenate([o[2] for o in out])
     assert len(seen) == len(tags) and len(set(seen.tolist())) == len(tags), \
         "the nucleus grouping does not partition the driven pieces"
-    return names, idxs
+    return out
 
 
 def group_quadratic(H, w, S, gidx, chunk=2048):
@@ -224,8 +245,10 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
     R = rebuild(a.tag, c, t)
-    H, w, S, tags, labels = R["H"], R["w"], R["S"], R["tags"], R["labels"]
-    names, gidx = group_index(tags)
+    H, w, S, tags, labels, P = R["H"], R["w"], R["S"], R["tags"], R["labels"], R["P"]
+    groups = group_table(tags, labels, P)
+    names = [g[0] for g in groups]
+    gidx = [g[2] for g in groups]
     nG = len(names)
 
     # ---- the rebuild has to be checked before anything is attributed to it -----------
@@ -256,9 +279,9 @@ def main():
     print(f"\n  {'group':<10s} {'role':<19s} {'pieces':>6s} {'mm2':>7s}"
           f" {'own':>8s} {'shapley':>8s} {'loo':>8s}")
     area = np.asarray(c.A, float)
-    for g, (nm, ps, role) in enumerate(NUCLEI):
-        mm2 = float(sum(area[c.lab == q].sum() for q in ps))
-        print(f"  {nm:<10s} {role:<19s} {len(gidx[g]):>6d} {mm2:>7.0f}"
+    for g, (nm, role, gidx_g, driven_g) in enumerate(groups):
+        mm2 = float(area[driven_g].sum())
+        print(f"  {nm:<10s} {role:<19s} {len(gidx_g):>6d} {mm2:>7.0f}"
               f" {att['own'][:, g].sum()/tot:>7.1%} {att['shapley'][:, g].sum()/tot:>7.1%}"
               f" {att['loo'][:, g].sum()/tot:>7.1%}")
 
@@ -278,11 +301,9 @@ def main():
           f"{'r50 S=I':>8s} {'contested':>10s}")
     srt = np.sort(f_fit, 1)
     contested = ok_fit & ((srt[:, -1] - srt[:, -2]) < a.margin)
-    piece_of = np.array([int(s.split("_")[0]) for s in tags])
     dist, radii = {}, {}
-    for g, (nm, ps, _role) in enumerate(NUCLEI):
-        driven = np.isin(labels, np.flatnonzero(np.isin(piece_of, ps)))
-        d = distance_to_drive(c, driven)[t.cols]
+    for g, (nm, _role, _gidx_g, driven_g) in enumerate(groups):
+        d = distance_to_drive(c, driven_g)[t.cols]
         dist[nm] = d
         rr = [half_max_radius(fr, d) for fr in (f_fit[:, g], f_geo[:, g])]
         radii[nm] = rr
@@ -296,9 +317,8 @@ def main():
     # ---- the rule that both sides can answer: seed FC territory ----------------------
     Tfc = t.target_fc()
     seeds = []
-    for g, (nm, ps, _role) in enumerate(NUCLEI):
-        driven = np.isin(labels, np.flatnonzero(np.isin(piece_of, ps)))
-        seeds.append(np.flatnonzero(driven[t.cols]))
+    for g, (nm, _role, _gidx_g, driven_g) in enumerate(groups):
+        seeds.append(np.flatnonzero(driven_g[t.cols]))
     # the model side has to be the SAME object as the target side - Spearman FC, double
     # centred - or the two winner-take-all maps are answering different questions
     Mfc = t.model_fc(F)

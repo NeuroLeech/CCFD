@@ -46,8 +46,10 @@ def contributions(c, tag, imp_frames=None, window=None, band=(0.01, 0.08), verbo
     z = np.load(os.path.join(RESULTS, f"xspec_{tag}.npz"), allow_pickle=True)
     x, save, labels, tags = z["x"], int(z["save"]), z["labels"], list(z["tags"])
     p, _, _ = bo_step.unpack(x, c)
-    P = subparcels.taper_profiles(c, labels, len(tags))
-    frame_s = timescale.TR / 4.0
+    P = (np.asarray(z["profiles"], np.float32) if "profiles" in z
+         else subparcels.taper_profiles(c, labels, len(tags)))
+    frame_s = (float(z["frame_s"]) if np.isfinite(float(z["frame_s"]))
+               else timescale.TR / 4.0)
     K = len(tags)
 
     A = np.asarray(np.load(os.path.join(RESULTS, f"drive_{tag}.npy")), np.float64)

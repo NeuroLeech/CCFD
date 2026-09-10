@@ -18,12 +18,21 @@ from paths import DATA, CACHE
 
 ATLAS_DIR = os.path.join(DATA, "atlases")
 FIB_PATH = os.path.join(DATA, "hcp1021.fib.gz")
+# The 1 mm HCP1065 template (Zenodo 6324701): the basis fields are tracked through it.
+THAL_FIB = os.path.join(DATA, "hcp1065_1mm.fib.gz")
 MANIFEST = os.path.join(ATLAS_DIR, "ascending_manifest.json")
 
 WB_COMMAND = os.environ.get(
     "WB_COMMAND", os.path.expanduser("~/Downloads/workbench/bin_macosxub/wb_command"))
 DSI_STUDIO = os.environ.get(
     "DSI_STUDIO", "/Applications/DSI Studio.app/Contents/MacOS/dsi_studio")
+
+# THOMAS (Najdenovska 2018) thalamic nuclei, DSI Studio's LUT: odd labels are left.
+THOMAS = os.path.join(ATLAS_DIR, "dsistudio", "THOMAS.nii.gz")
+THOMAS_LEFT = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]
+# HCP-MMP is cortex-only and ships with DSI Studio in the FIB's ICBM152 space.
+HCP_MMP = os.path.join(os.path.dirname(DSI_STUDIO), "atlas", "human",
+                       "HCP-MMP.nii.gz")
 
 
 def load_manifest(variant="ascending_v1"):
@@ -75,31 +84,25 @@ def _grid(fib=FIB_PATH):
 
 
 def nucleus_masks(entries, verbose=True):
-    """-> (names, masks, affines): each nucleus's mask in its NATIVE space (not resampled),
-    normalised to max 1. `label` entries are one-hot from a labelled volume; `label: null`
-    entries are already probability maps. The native (MNI) affine is carried so dsi_studio
-    can register each seed onto the FIB via its srow matrix."""
+    """-> (names, masks, affines): each nucleus's mask as a THOMAS one-hot in the
+    atlas's native 0.5 mm space, normalised to max 1. The native affine is carried so
+    dsi_studio can register each seed onto the FIB via its srow matrix."""
     import nibabel as nib
+    img = nib.load(THOMAS)
+    d = np.asarray(img.dataobj)
     names, masks, affs = [], [], []
     for e in entries:
-        img = nib.load(os.path.join(ATLAS_DIR, e["file"]))
-        d = np.asarray(img.dataobj).astype(np.float32)
-        if e.get("label") is not None:
-            m = (d == int(e["label"])).astype(np.float32)
-        else:
-            m = d
-        mx = float(m.max())
-        if mx > 0:
-            m = m / mx
+        m = (d == int(e["label"])).astype(np.float32)
         names.append(e["name"])
-        masks.append(m.astype(np.float32))
+        masks.append(m)
         affs.append(np.asarray(img.affine, float))
         if verbose:
             print(f"  {e['name']:<12s} {int((m > 0).sum())} voxels in native space")
     return names, masks, affs
 
 
-def _run_dsi(seed_nii, output_dir, seed_count, fib=FIB_PATH, threads=8):
+def _run_dsi(seed_nii, output_dir, seed_count, fib=FIB_PATH, threads=8,
+             method=0, turn=45.0, otsu=None):
     """Deterministic tracking seeded from one nucleus mask through the group FIB.
 
     Returns the written .tt.gz path. `output_dir` is a directory: DSI Studio names the
@@ -108,9 +111,11 @@ def _run_dsi(seed_nii, output_dir, seed_count, fib=FIB_PATH, threads=8):
         raise SystemExit(f"  dsi_studio not found at {DSI_STUDIO}; export DSI_STUDIO")
     os.makedirs(output_dir, exist_ok=True)
     cmd = [DSI_STUDIO, "--action=trk", f"--source={fib}", f"--seed={seed_nii}",
-           f"--seed_count={seed_count}", "--method=0", "--turning_angle=45",
-           "--min_length=10", "--max_length=300", f"--thread_count={threads}",
-           f"--output={output_dir}"]
+           f"--seed_count={seed_count}", f"--method={method}",
+           f"--turning_angle={turn}", "--min_length=10", "--max_length=300",
+           f"--thread_count={threads}", f"--output={output_dir}"]
+    if otsu is not None:
+        cmd.append(f"--otsu_threshold={otsu}")
     subprocess.run(cmd, check=True, capture_output=True)
     out = os.path.join(output_dir, os.path.basename(fib) + ".tt.gz")
     if not os.path.exists(out):
@@ -182,8 +187,8 @@ def _endpoint_density(tt_path, fib=FIB_PATH):
     return V
 
 
-def _to_surface(name, V, tmpdir):
-    """Endpoint-density volume (FIB/ICBM152 grid) -> metric on full fsaverage5 (10242).
+def _vol_to_surface(V, affine, name, tmpdir):
+    """MNI-mm volume -> metric on full fsaverage5 (10242 vertices).
 
     neuromaps ships fsaverage5 white and pial surfaces in MNI152 space, vertex-identical
     to the FreeSurfer fsaverage5 the rest of the project uses (fc_vertexwise checks this),
@@ -192,7 +197,7 @@ def _to_surface(name, V, tmpdir):
     import nibabel as nib
     from neuromaps.datasets import fetch_atlas, get_atlas_dir
     dens = os.path.join(tmpdir, f"{name}_density.nii.gz")
-    nib.save(nib.Nifti1Image(V, _grid()[1]), dens)
+    nib.save(nib.Nifti1Image(np.asarray(V, np.float32), affine), dens)
     fetch_atlas("fsaverage", "10k")
     d = get_atlas_dir("fsaverage")
     white = f"{d}/tpl-fsaverage_den-10k_hemi-L_white.surf.gii"
@@ -205,6 +210,20 @@ def _to_surface(name, V, tmpdir):
     out = os.path.join(tmpdir, f"{name}.func.gii")
     wb("-volume-to-surface-mapping", dens, mid, out, "-ribbon-constrained", white, pial)
     return np.asarray(nib.load(out).darrays[0].data, np.float32)
+
+
+def _to_surface(name, V, tmpdir, fib=FIB_PATH):
+    """Endpoint-density volume (FIB grid) -> metric on full fsaverage5. Tractography path.
+
+    Streamlines terminate at the WM/GM boundary, so at 1 mm their endpoint voxels sit up
+    to ~3 mm outside the white-pial ribbon and ribbon-constrained mapping would drop
+    them. The density is dilated by 3 mm first (matching what a 2 mm voxel implicitly
+    does), which assigns each endpoint to the nearest ribbon without touching the
+    subcortical endpoint clusters, which are further away."""
+    from scipy.ndimage import maximum_filter
+    vs = float(np.abs(np.diag(_grid(fib)[1])).min())
+    V = maximum_filter(np.asarray(V, np.float32), size=int(round(3.0 / vs) * 2 + 1))
+    return _vol_to_surface(V, _grid(fib)[1], name, tmpdir)
 
 
 def projection_fields(entries, seed_count=20000, cache=True, verbose=True):
@@ -242,10 +261,22 @@ def projection_fields(entries, seed_count=20000, cache=True, verbose=True):
 
 
 def load_fields(c, verbose=True):
-    """Cached fields for the manifest, on the given cortex. -> (names, fields)."""
-    entries = load_manifest()
-    names, F = projection_fields(entries, verbose=verbose)
-    return names, np.asarray(F[:, :c.nV], np.float32)
+    """Per-nucleus cortical projection fields from the 1 mm FIB, on the given cortex.
+
+    -> (names, fields). Built by seeding the whole left thalamus (200k seeds,
+    probabilistic, turn 60, otsu 0.35) and attributing each streamline to the THOMAS
+    nucleus at its seed; cached in data/cache. Each field is normalised to unit max so
+    the coverage threshold tau is comparable across nuclei; the solve sets the
+    per-nucleus amplitude."""
+    names, F = thalamus_subfields(fib=THAL_FIB, verbose=verbose)
+    F = np.asarray(F[:, :c.nV], np.float32)
+    for i in range(F.shape[0]):
+        mx = float(F[i].max())
+        if mx > 0:
+            F[i] = F[i] / mx
+    return names, F
+
+
 
 
 def support(c, f, tau):
@@ -350,6 +381,200 @@ def modal_channels(c, names, fields, tau, budget=80, k_max=4, verbose=True):
     return np.asarray(P, np.float32), tags, frac, dict(k_n=k_n)
 
 
+def _left_thalamus_seed(tmpdir):
+    """Union of the LEFT THOMAS labels, in THOMAS native space -> seed nifti path."""
+    import nibabel as nib
+    img = nib.load(THOMAS)
+    m = np.isin(np.asarray(img.dataobj), THOMAS_LEFT).astype(np.float32)
+    p = os.path.join(tmpdir, "left_thalamus_mni.nii.gz")
+    nib.save(nib.Nifti1Image(m, np.asarray(img.affine, float), img.header), p)
+    return p
+
+
+def _cortical_mask(fib=FIB_PATH):
+    """HCP-MMP parcels (cortex only) resampled onto the FIB grid -> bool volume."""
+    import nibabel as nib
+    from scipy.ndimage import affine_transform
+    key = hashlib.sha1((fib + HCP_MMP).encode()).hexdigest()[:12]
+    cache = os.path.join(CACHE, f"cortical_mask_{key}.npz")
+    if os.path.exists(cache):
+        return np.load(cache)["m"] > 0
+    img = nib.load(HCP_MMP)
+    d = (np.asarray(img.dataobj) > 0).astype(np.float32)
+    shape, aff = _grid(fib)
+    T = np.linalg.inv(np.asarray(img.affine, float)) @ aff
+    m = affine_transform(d, T, output_shape=shape, order=0)
+    np.savez(cache, m=m)
+    return m > 0.5
+
+
+def _seed_on_grid(seed_nii, fib=FIB_PATH):
+    """Seed volume resampled onto the FIB grid -> bool volume."""
+    import nibabel as nib
+    from scipy.ndimage import affine_transform
+    img = nib.load(seed_nii)
+    shape, aff = _grid(fib)
+    T = np.linalg.inv(np.asarray(img.affine, float)) @ aff
+    m = affine_transform((np.asarray(img.dataobj) > 0).astype(np.float32),
+                         T, output_shape=shape, order=0)
+    return m > 0.5
+
+
+def thalamus_gate(seed_count=150000, method=0, turn=45.0, otsu=None, threads=None,
+                  fib=FIB_PATH, verbose=True):
+    """Seed the whole LEFT thalamus and measure whether tracks reach cortex.
+
+    -> dict with the total streamlines, the length distribution (mm, 2 mm FIB voxels),
+    the fraction of streamlines whose far endpoint lands in the HCP-MMP cortical ribbon,
+    and the fraction that never left the seed."""
+    threads = threads or os.cpu_count()
+    cort = _cortical_mask(fib)
+    shape, _ = _grid(fib)
+    with tempfile.TemporaryDirectory() as td:
+        seed = _left_thalamus_seed(td)
+        if verbose:
+            print(f"  seed: left thalamus ({int(np.asarray(__import__('nibabel').load(seed).dataobj).sum())} 0.5-mm voxels), "
+                  f"{seed_count} seeds, method {method}, turn {turn:g}, otsu {otsu}")
+        tt = _run_dsi(seed, os.path.join(td, "out"), seed_count, fib=fib,
+                      threads=threads, method=method, turn=turn, otsu=otsu)
+        streams = _parse_tt(tt)
+        seed_v = _seed_on_grid(seed, fib)
+        n = len(streams)
+        if verbose:
+            print(f"  parsed {n} streamlines")
+        if n == 0:
+            return dict(total=0, far_cortex_frac=np.nan, both_in_seed_frac=np.nan,
+                        len_median_mm=np.nan, len_p90_mm=np.nan, len_max_mm=np.nan)
+        lens = []
+        cort_hit = 0
+        dead = 0
+        vs = float(np.abs(np.diag(_grid(fib)[1])).min())
+        for s in streams:
+            lens.append(float(np.linalg.norm(np.diff(s, axis=0), axis=1).sum() * vs))
+            e0 = np.round(s[0]).astype(int)
+            e1 = np.round(s[-1]).astype(int)
+            def ok(e):
+                return all(0 <= e[i] < shape[i] for i in range(3))
+            in0 = ok(e0) and seed_v[tuple(e0)]
+            in1 = ok(e1) and seed_v[tuple(e1)]
+            if in0 and in1:
+                dead += 1
+                continue
+            hit = ((ok(e0) and cort[tuple(e0)]) or (ok(e1) and cort[tuple(e1)]))
+            cort_hit += int(hit)
+        lens = np.asarray(lens)
+        r = dict(
+            total=n, cort_hit_frac=float(cort_hit / n),
+            both_in_seed_frac=float(dead / n),
+            len_median_mm=float(np.median(lens)), len_p90_mm=float(np.percentile(lens, 90)),
+            len_max_mm=float(lens.max()))
+        if verbose:
+            print(f"  streamlines with an end in the cortical ribbon: "
+                  f"{r['cort_hit_frac']:.2%} ({cort_hit}/{n})")
+            print(f"  both endpoints in seed (never escaped): {r['both_in_seed_frac']:.2%}")
+            print(f"  length mm: median {r['len_median_mm']:.0f}, "
+                  f"p90 {r['len_p90_mm']:.0f}, max {r['len_max_mm']:.0f}")
+        return r
+
+
+def thalamus_field(seed_count=200000, method=1, turn=60.0, otsu=0.35, threads=None,
+                   cache=True, verbose=True, fib=FIB_PATH):
+    """The ONE vertex-level thalamic cortical projection field.
+
+    Seeded from the whole left thalamus (THOMAS odd labels) through the group FIB with
+    the gate-winning settings (probabilistic, turn 60, otsu 0.35 -> ~36% of streamlines
+    end in the cortical ribbon); streamline endpoints rasterise into a density volume and
+    map to fsaverage5 through the ribbon. Returns the (10242,) full-hemisphere field."""
+    threads = threads or os.cpu_count()
+    key = hashlib.sha1(
+        f"{seed_count},{method},{turn},{otsu},{os.path.basename(fib)}".encode()
+    ).hexdigest()[:12]
+    cache_f = os.path.join(CACHE, f"thalamus_field_{key}.npz")
+    if cache and os.path.exists(cache_f):
+        f = np.load(cache_f)["field"]
+        if verbose:
+            print(f"  loaded {cache_f}")
+        return f
+    with tempfile.TemporaryDirectory() as td:
+        seed = _left_thalamus_seed(td)
+        tt = _run_dsi(seed, os.path.join(td, "out"), seed_count, fib=fib,
+                      threads=threads, method=method, turn=turn, otsu=otsu)
+        V = _endpoint_density(tt, fib=fib)
+        f = _to_surface("thalamus", V, td, fib=fib)
+    np.savez(cache_f, field=f)
+    if verbose:
+        print(f"  wrote {cache_f}")
+    return f
+
+
+def _first_in_seed_label(s, th_d, th_T, names):
+    """THOMAS label of the first stored point inside the left-thalamus mask.
+
+    DSI Studio walks each seed in both directions and stores the full path, so the
+    stream's first point is a walk END (usually brainstem), not the seed. Walking from
+    the start, the first point with a THOMAS label is the seed itself."""
+    import nibabel as nib
+    for p in s:
+        v = np.round(nib.affines.apply_affine(th_T, p)).astype(int)
+        if all(0 <= v[i] < th_d.shape[i] for i in range(3)):
+            l = int(th_d[tuple(v)])
+            if l in names:
+                return l
+    return -1
+
+
+def thalamus_subfields(seed_count=200000, method=1, turn=60.0, otsu=0.35, threads=None,
+                       verbose=True, fib=FIB_PATH):
+    """-> (names, fields (M, c.nV)): per-nucleus cortical endpoint fields.
+
+    Each streamline is attributed to the THOMAS nucleus at its SEED (the first stored
+    point inside the left-thalamus mask); both walk ends rasterise, so a nucleus's field
+    is where its streamlines reach the cortical ribbon."""
+    import nibabel as nib
+    threads = threads or os.cpu_count()
+    key = hashlib.sha1(
+        f"sub{seed_count},{method},{turn},{otsu},{os.path.basename(fib)}".encode()
+    ).hexdigest()[:12]
+    cache_f = os.path.join(CACHE, f"thalamus_subfields_{key}.npz")
+    th = nib.load(THOMAS)
+    th_d = np.asarray(th.dataobj)
+    th_T = np.linalg.inv(np.asarray(th.affine, float)) @ _grid(fib)[1]
+    with tempfile.TemporaryDirectory() as td:
+        seed = _left_thalamus_seed(td)
+        tt = _run_dsi(seed, os.path.join(td, "out"), seed_count, fib=fib,
+                      threads=threads, method=method, turn=turn, otsu=otsu)
+        streams = _parse_tt(tt)
+        shape = _grid(fib)[0]
+        V = np.zeros((len(THOMAS_LEFT),) + shape, np.float32)
+        n_att = np.zeros(len(THOMAS_LEFT), int)
+        for s in streams:
+            l = _first_in_seed_label(s, th_d, th_T, THOMAS_LEFT)
+            if l < 0:
+                continue
+            i = THOMAS_LEFT.index(l)
+            n_att[i] += 1
+            for e in (s[0], s[-1]):
+                v = np.round(e).astype(int)
+                if all(0 <= v[j] < shape[j] for j in range(3)):
+                    V[i, v[0], v[1], v[2]] += 1.0
+        from mesh_cache import load_cortex
+        c = load_cortex("fsaverage5", verbose=False)
+        F = np.stack([_to_surface(f"nuc{l}", V[i], td, fib=fib)[c.old]
+                      for i, l in enumerate(THOMAS_LEFT)])
+        lut = {1: "AV", 3: "VA", 5: "VLa", 7: "VLp", 9: "VPL", 11: "Pul",
+               13: "LGN", 15: "MGN", 17: "CM", 19: "MD", 21: "Hb", 23: "MTT"}
+        names = [lut[l] for l in THOMAS_LEFT]
+        if verbose:
+            for nm, na in zip(names, n_att):
+                print(f"  {nm:<5s} {na:>7d} streamlines attributed, "
+                      f"field mass {F[names.index(nm)].sum():.0f}")
+    np.savez(cache_f, names=np.array(names, dtype=object), fields=F,
+             n_attributed=n_att)
+    if verbose:
+        print(f"  wrote {cache_f}")
+    return names, F
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--fields", action="store_true",
@@ -362,11 +587,35 @@ def main():
     ap.add_argument("--budget", type=int, default=80)
     ap.add_argument("--coverage", type=float, default=0.0,
                     help="pick tau for this driven-area fraction (overrides --tau)")
+    ap.add_argument("--quality", action="store_true",
+                    help="quality gate: seed the whole left thalamus and report where "
+                         "the streamlines end")
+    ap.add_argument("--fib", default=FIB_PATH,
+                    help="FIB file to track through (default: the 2 mm template)")
+    ap.add_argument("--method", type=int, default=0, choices=(0, 1),
+                    help="tracking method: 0 deterministic, 1 probabilistic (gate only)")
+    ap.add_argument("--turn", type=float, default=45.0,
+                    help="turning angle in degrees (gate only)")
+    ap.add_argument("--otsu", type=float, default=None,
+                    help="otsu threshold override (gate only)")
+    ap.add_argument("--thalamus", action="store_true",
+                    help="build the whole-thalamus cortical projection field (cached)")
     a = ap.parse_args()
 
     entries = load_manifest()
     from mesh_cache import load_cortex
     c = load_cortex("fsaverage5", verbose=False)
+    if a.quality:
+        thalamus_gate(a.seed_count, method=a.method, turn=a.turn, otsu=a.otsu,
+                      fib=a.fib)
+        return
+    if a.thalamus:
+        f = thalamus_field(a.seed_count, method=a.method, turn=a.turn,
+                           otsu=a.otsu if a.otsu is not None else 0.35, fib=a.fib)
+        on = f[c.old]
+        print(f"  field over {int((on > 0).sum())} cortex vertices, "
+              f"peak {on.max():.0f}, sum {on.sum():.0f}")
+        return
     if a.fields:
         names, fields = projection_fields(entries, seed_count=a.seed_count)
         print(f"  {len(names)} projection fields on {fields.shape[1]} vertices")

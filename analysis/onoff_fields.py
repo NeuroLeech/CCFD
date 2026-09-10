@@ -107,7 +107,8 @@ def rebuild_H(c, z, cols, workers=8):
     x, save = z["x"], int(z["save"])
     labels, tags = z["labels"], [str(s) for s in z["tags"]]
     p, _, _ = bo_step.unpack(x, c)
-    P = subparcels.taper_profiles(c, labels, len(tags))
+    P = (np.asarray(z["profiles"], np.float32) if "profiles" in z
+         else subparcels.taper_profiles(c, labels, len(tags)))
     frame_s, pad = float(z["frame_s"]), int(z["pad"])
     resp = xspec.impulse_responses(c, list(range(len(P))), p,
                                    int(z["impulse_frames"]) * save, save,

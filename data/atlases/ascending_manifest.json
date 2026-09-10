@@ -1,29 +1,64 @@
 {
   "ascending_v1": [
-    {"name": "LGN", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 9, "role": "visual"},
-    {"name": "MGN", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 10, "role": "auditory"},
-    {"name": "VPL", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 7, "role": "somatosensory"},
-    {"name": "VPM", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 18, "role": "somatosensory"},
-    {"name": "VA", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 4, "role": "motor"},
-    {"name": "VLa", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 5, "role": "motor"},
-    {"name": "VLP", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 6, "role": "somatosensory"},
-    {"name": "Pul", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 8, "role": "visual"},
-    {"name": "AV", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 2, "role": "limbic"},
-    {"name": "CM", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 11, "role": "arousal"},
-    {"name": "CL", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 17, "role": "arousal"},
-    {"name": "MD-Pf", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 12, "role": "prefrontal"},
-    {"name": "Hb", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 13, "role": "limbic"},
-    {"name": "MTT", "file": "thalamicseg/atlas_with_CL_VPM.nii.gz", "label": 14, "role": "limbic"},
-    {"name": "LC", "file": "aan/AAN_LC_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "DR", "file": "aan/AAN_DR_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "MnR", "file": "aan/AAN_MnR_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "VTA", "file": "aan/AAN_VTA_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "LDTg", "file": "aan/AAN_LDTg_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "PBC", "file": "aan/AAN_PBC_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "PTg", "file": "aan/AAN_PTg_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "PnO", "file": "aan/AAN_PnO_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "mRt", "file": "aan/AAN_mRt_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "PAG", "file": "aan/AAN_PAG_MNI152_1mm_v2p0.nii", "label": null, "role": "arousal"},
-    {"name": "amygdala", "file": "harvardoxford/HarvardOxford-sub-maxprob-1mm.nii.gz", "label": 10, "role": "limbic"}
+    {
+      "name": "AV",
+      "label": 1,
+      "role": "limbic"
+    },
+    {
+      "name": "VA",
+      "label": 3,
+      "role": "motor"
+    },
+    {
+      "name": "VLa",
+      "label": 5,
+      "role": "motor"
+    },
+    {
+      "name": "VLp",
+      "label": 7,
+      "role": "motor"
+    },
+    {
+      "name": "VPL",
+      "label": 9,
+      "role": "somatosensory"
+    },
+    {
+      "name": "Pul",
+      "label": 11,
+      "role": "visual"
+    },
+    {
+      "name": "LGN",
+      "label": 13,
+      "role": "visual"
+    },
+    {
+      "name": "MGN",
+      "label": 15,
+      "role": "auditory"
+    },
+    {
+      "name": "CM",
+      "label": 17,
+      "role": "arousal"
+    },
+    {
+      "name": "MD",
+      "label": 19,
+      "role": "prefrontal"
+    },
+    {
+      "name": "Hb",
+      "label": 21,
+      "role": "limbic"
+    },
+    {
+      "name": "MTT",
+      "label": 23,
+      "role": "limbic"
+    }
   ]
 }

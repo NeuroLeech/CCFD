@@ -24,6 +24,7 @@ data/rbc/
 data/atlases/aan/
 data/atlases/harvardoxford/
 data/atlases/thalamicseg/
+data/atlases/dsistudio/
 data/*.fib.gz
 
 # Scratch notebook: 1.7 MB of stored cell output, and nothing else reads it.
