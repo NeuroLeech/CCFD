@@ -1,0 +1,9 @@
+url: https://zenodo.org/record/6324701/files/HCP1065.2mm.fib.gz?download=1
+resolved: 2026-09-10
+variant: 2mm HCP1065 group FIB (78x94x68, 2mm isotropic, QSDR, ICBM152 2009a space)
+note: brain.labsolver.org/hcp_template.html has no HCP1021 link; its 1-mm links are dead
+      (OneDrive/SharePoint 403, GitHub ICBM152_adult.fib.gz 404). Per plan fallback, took the
+      2-mm variant from the Zenodo record (6324701) that the page itself links, choosing the
+      newest HCP group template (HCP1065, successor lineage of the HCP1021 template) over
+      HCP842 (old FSL-space registration).
+verified: dsi_studio --action=ana reports fib_ver 0, dim 78 94 68, vs 2 2 2, qsdr yes

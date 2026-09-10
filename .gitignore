@@ -19,5 +19,12 @@ venv/
 # RBC (ReproBrainChart) DataLad clones: NKI only. Large, and fetched on demand.
 data/rbc/
 
+# Ascending-input atlases and the group dMRI template. The manifest JSON and
+# fib_source.txt in data/atlases/ stay tracked; the downloaded volumes do not.
+data/atlases/aan/
+data/atlases/harvardoxford/
+data/atlases/thalamicseg/
+data/*.fib.gz
+
 # Scratch notebook: 1.7 MB of stored cell output, and nothing else reads it.
 *.ipynb
