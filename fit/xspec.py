@@ -94,6 +94,17 @@ def validation_subset(target, sub, n=1000, seed=1):
     return np.sort(rng.choice(rest, min(n, len(rest)), replace=False))
 
 
+def profile_tag(profiles):
+    """Short content hash of a profile matrix, for cache keys.
+
+    The old key carried only (K, sum) - two different bases with the same channel count
+    and total drive collided silently. The hash makes the key content-addressed."""
+    import hashlib
+    h = hashlib.sha1(
+        np.ascontiguousarray(profiles, np.float32).tobytes()).hexdigest()[:12]
+    return f"prof{profiles.shape[0]}x{float(profiles.sum()):.3f}h{h}"
+
+
 def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=None,
                       verbose=True, dt=None, coupling=None, workers=0, cache=True):
     """(K, nframes, nV) response of the field to one impulse in each region.
@@ -105,7 +116,7 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
     The cache key has to carry dt. Two regimes can share every entry of `p` that appears
     in the key and still be different systems if they are stepped at different rates, and
     a silently reused response would make H describe a system nobody simulated."""
-    ptag = "" if profiles is None else f"_prof{profiles.shape[0]}x{float(profiles.sum()):.3f}"
+    ptag = "" if profiles is None else "_" + profile_tag(profiles)
     # a regional patch changes the medium without touching any of the scalars below, so
     # without this a patched run silently loads unpatched responses
     for nm in ("damp_patch", "speed_patch"):
