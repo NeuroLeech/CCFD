@@ -74,56 +74,104 @@ def _grid(fib=FIB_PATH):
         return _grid_from_dsi(fib)
 
 
-def nucleus_masks(entries, fib=FIB_PATH, verbose=True):
-    """-> (names, masks): each mask resampled onto the FIB grid, normalised to max 1.
-
-    `label` entries are one-hot from a labelled volume (nearest neighbour); `label: null`
-    entries are already probability maps (linear interpolation)."""
+def nucleus_masks(entries, verbose=True):
+    """-> (names, masks, affines): each nucleus's mask in its NATIVE space (not resampled),
+    normalised to max 1. `label` entries are one-hot from a labelled volume; `label: null`
+    entries are already probability maps. The native (MNI) affine is carried so dsi_studio
+    can register each seed onto the FIB via its srow matrix."""
     import nibabel as nib
-    from scipy.ndimage import affine_transform
-    shape, aff = _grid(fib)
-    names, out = [], []
+    names, masks, affs = [], [], []
     for e in entries:
         img = nib.load(os.path.join(ATLAS_DIR, e["file"]))
         d = np.asarray(img.dataobj).astype(np.float32)
         if e.get("label") is not None:
             m = (d == int(e["label"])).astype(np.float32)
-            order = 0
         else:
             m = d
-            order = 1
-        T = np.linalg.inv(np.asarray(img.affine, float)) @ aff   # fib voxel -> atlas voxel
-        m = affine_transform(m, T, output_shape=shape, order=order)
         mx = float(m.max())
         if mx > 0:
             m = m / mx
         names.append(e["name"])
-        out.append(m.astype(np.float32))
+        masks.append(m.astype(np.float32))
+        affs.append(np.asarray(img.affine, float))
         if verbose:
-            print(f"  {e['name']:<12s} mass {m.sum():.0f} voxels on the FIB grid")
-    return names, np.asarray(out)
+            print(f"  {e['name']:<12s} {int((m > 0).sum())} voxels in native space")
+    return names, masks, affs
 
 
-def _run_dsi(seed_nii, out_trk, seed_count, fib=FIB_PATH, threads=8):
-    """Deterministic tracking seeded from one nucleus mask through the group FIB."""
+def _run_dsi(seed_nii, output_dir, seed_count, fib=FIB_PATH, threads=8):
+    """Deterministic tracking seeded from one nucleus mask through the group FIB.
+
+    Returns the written .tt.gz path. `output_dir` is a directory: DSI Studio names the
+    tract file `<source_basename>.tt.gz` inside it."""
     if not os.path.exists(DSI_STUDIO):
         raise SystemExit(f"  dsi_studio not found at {DSI_STUDIO}; export DSI_STUDIO")
+    os.makedirs(output_dir, exist_ok=True)
     cmd = [DSI_STUDIO, "--action=trk", f"--source={fib}", f"--seed={seed_nii}",
-           f"--seed_count={seed_count}", "--method=0", "--turn_angle=45",
+           f"--seed_count={seed_count}", "--method=0", "--turning_angle=45",
            "--min_length=10", "--max_length=300", f"--thread_count={threads}",
-           f"--output={out_trk}"]
+           f"--output={output_dir}"]
     subprocess.run(cmd, check=True, capture_output=True)
-    return out_trk
+    out = os.path.join(output_dir, os.path.basename(fib) + ".tt.gz")
+    if not os.path.exists(out):
+        raise SystemExit(f"  dsi_studio wrote no tract file under {output_dir}")
+    return out
 
 
-def _endpoint_density(trk_path, fib=FIB_PATH):
-    """Rasterise streamline ENDPOINTS onto the FIB grid. Both ends count."""
-    import nibabel as nib
-    trk = nib.streamlines.load(trk_path)
-    shape, aff = _grid(fib)
-    inv = np.linalg.inv(aff)
-    pts = [p for s in trk.streamlines for p in (s[0], s[-1])]
-    xyz = np.round(nib.affines.apply_affine(inv, np.asarray(pts))).astype(np.int64)
+# The on-disk .tt.gz container: a gzipped sequence of entries, each
+#   uint32 type (0=double 10=float 20=uint32 30=int16 40=uint16 50=uint8 60=uint64)
+#   uint32 rows, uint32 cols, uint32 n_subdata, uint32 name_len
+#   name bytes, then rows*cols values of the type's size.
+# Tract blocks ("track", "track1", ...) are type 50 (uint8) with the streamlines
+# delta-encoded: per tract, uint32 count then int32 x,y,z of the first point (all x32),
+# then count-3 int8 coordinate deltas. Coordinates are FIB VOXEL indices.
+
+_TT_TYPE_SIZE = {0: 8, 10: 4, 20: 4, 30: 2, 40: 2, 50: 1, 60: 8}
+
+
+def _parse_tt(tt_path):
+    """-> list of (n, 3) float32 streamline arrays, in FIB voxel coordinates."""
+    import gzip, struct
+    with gzip.open(tt_path, "rb") as f:
+        raw = f.read()
+    entries = {}
+    pos, n = 0, len(raw)
+    while pos < n:
+        typ, rows, cols, nsub, namelen = struct.unpack_from("<IIIII", raw, pos)
+        pos += 20
+        name = raw[pos:pos + namelen].rstrip(b"\x00").decode()
+        pos += namelen
+        elsize = _TT_TYPE_SIZE[typ]
+        nbytes = rows * cols * elsize
+        entries[name] = raw[pos:pos + nbytes]
+        pos += nbytes
+    streams = []
+    for k, buf in entries.items():
+        if k != "track" and not k.startswith("track"):
+            continue
+        p = 0
+        L = len(buf)
+        while p + 16 <= L:
+            count = struct.unpack_from("<I", buf, p)[0]
+            x, y, z = struct.unpack_from("<iii", buf, p + 4)
+            n_pts = count // 3
+            if n_pts < 1 or p + 16 + max(0, count - 3) > L:
+                break
+            flat = np.empty(count, np.float32)
+            flat[0], flat[1], flat[2] = x, y, z
+            d = np.frombuffer(buf, np.int8, count - 3, offset=p + 16)
+            for j in range(3, count):
+                flat[j] = flat[j - 3] + int(d[j - 3])
+            streams.append((flat.reshape(n_pts, 3)) / 32.0)
+            p += 16 + (count - 3)
+    return streams
+
+
+def _endpoint_density(tt_path, fib=FIB_PATH):
+    """Rasterise streamline ENDPOINTS (voxel coords) onto the FIB grid. Both ends count."""
+    shape, _ = _grid(fib)
+    pts = [p for s in _parse_tt(tt_path) for p in (s[0], s[-1])]
+    xyz = np.round(np.asarray(pts)).astype(np.int64)
     ok = ((xyz[:, 0] >= 0) & (xyz[:, 0] < shape[0]) &
           (xyz[:, 1] >= 0) & (xyz[:, 1] < shape[1]) &
           (xyz[:, 2] >= 0) & (xyz[:, 2] < shape[2]))
@@ -135,43 +183,28 @@ def _endpoint_density(trk_path, fib=FIB_PATH):
 
 
 def _to_surface(name, V, tmpdir):
-    """Endpoint-density volume -> metric on the full fsaverage5 left (10242 vertices).
+    """Endpoint-density volume (FIB/ICBM152 grid) -> metric on full fsaverage5 (10242).
 
-    The density volume lives on the FIB (ICBM152) grid; it is resampled to
-    MNI152NLin6Asym and ribbon-constrained-mapped with templateflow's fsaverage5
-    surfaces, which live in that space. If templateflow lacks fsaverage5 surfaces the
-    mapping runs at 164k and is resampled with the standard FreeSurfer spheres."""
+    neuromaps ships fsaverage5 white and pial surfaces in MNI152 space, vertex-identical
+    to the FreeSurfer fsaverage5 the rest of the project uses (fc_vertexwise checks this),
+    so ribbon-constrained volume-to-surface maps the MNI-mm density straight onto the
+    model's own vertices. midthickness is the mean of white and pial."""
     import nibabel as nib
-    import templateflow.api as tf
+    from neuromaps.datasets import fetch_atlas, get_atlas_dir
     dens = os.path.join(tmpdir, f"{name}_density.nii.gz")
     nib.save(nib.Nifti1Image(V, _grid()[1]), dens)
-    mni = tf.get("MNI152NLin6Asym", resolution="01", suffix="T1w")
-    res = os.path.join(tmpdir, f"{name}_mni.nii.gz")
-    wb("-volume-resample", dens, mni, "CUBIC", res)
-    try:
-        mid = tf.get("MNI152NLin6Asym", density="fsaverage5", hemi="L",
-                     suffix="midthickness")
-        white = tf.get("MNI152NLin6Asym", density="fsaverage5", hemi="L",
-                       suffix="white")
-        pial = tf.get("MNI152NLin6Asym", density="fsaverage5", hemi="L", suffix="pial")
-        out = os.path.join(tmpdir, f"{name}.func.gii")
-        wb("-volume-to-surface-mapping", res, mid, out, "-ribbon-constrained",
-           white, pial)
-        return np.asarray(nib.load(out).darrays[0].data, np.float32)
-    except Exception:
-        import nilearn.datasets as nd
-        mid = tf.get("MNI152NLin6Asym", density="fsaverage", hemi="L",
-                     suffix="midthickness")
-        white = tf.get("MNI152NLin6Asym", density="fsaverage", hemi="L", suffix="white")
-        pial = tf.get("MNI152NLin6Asym", density="fsaverage", hemi="L", suffix="pial")
-        out164 = os.path.join(tmpdir, f"{name}_164k.func.gii")
-        wb("-volume-to-surface-mapping", res, mid, out164, "-ribbon-constrained",
-           white, pial)
-        sph164 = nd.fetch_surf_fsaverage("fsaverage")["sphere_left"]
-        sph5 = nd.fetch_surf_fsaverage("fsaverage5")["sphere_left"]
-        out = os.path.join(tmpdir, f"{name}.func.gii")
-        wb("-metric-resample", out164, sph164, sph5, "ADAP_BARY_AREA", out)
-        return np.asarray(nib.load(out).darrays[0].data, np.float32)
+    fetch_atlas("fsaverage", "10k")
+    d = get_atlas_dir("fsaverage")
+    white = f"{d}/tpl-fsaverage_den-10k_hemi-L_white.surf.gii"
+    pial = f"{d}/tpl-fsaverage_den-10k_hemi-L_pial.surf.gii"
+    mid = os.path.join(tmpdir, f"{name}_midthickness.surf.gii")
+    w = nib.load(white)
+    p = nib.load(pial)
+    w.darrays[0].data = ((w.darrays[0].data + p.darrays[0].data) / 2).astype(np.float32)
+    nib.save(w, mid)
+    out = os.path.join(tmpdir, f"{name}.func.gii")
+    wb("-volume-to-surface-mapping", dens, mid, out, "-ribbon-constrained", white, pial)
+    return np.asarray(nib.load(out).darrays[0].data, np.float32)
 
 
 def projection_fields(entries, seed_count=20000, cache=True, verbose=True):
@@ -187,15 +220,15 @@ def projection_fields(entries, seed_count=20000, cache=True, verbose=True):
         if verbose:
             print(f"  loaded {cache_f}")
         return list(z["names"]), np.asarray(z["fields"])
-    names, masks = nucleus_masks(entries, verbose=verbose)
+    names, masks, affs = nucleus_masks(entries, verbose=verbose)
     fields = []
-    for nm, mk in zip(names, masks):
+    for nm, mk, af in zip(names, masks, affs):
         with tempfile.TemporaryDirectory() as td:
-            seed = os.path.join(td, f"{nm}_seed.nii.gz")
-            trk = os.path.join(td, f"{nm}.trk.gz")
-            nib.save(nib.Nifti1Image(mk, _grid()[1]), seed)
-            _run_dsi(seed, trk, seed_count)
-            V = _endpoint_density(trk)
+            seed = os.path.join(td, f"{nm}_seed_mni.nii.gz")
+            outdir = os.path.join(td, "out")
+            nib.save(nib.Nifti1Image(mk, af), seed)
+            tt = _run_dsi(seed, outdir, seed_count)
+            V = _endpoint_density(tt)
             f_full = _to_surface(nm, V, td)
             fields.append(f_full[c.old].astype(np.float32))
             if verbose:

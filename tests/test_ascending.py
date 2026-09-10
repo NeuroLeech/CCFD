@@ -39,17 +39,16 @@ def test_manifest_entries_exist():
     assert len(names) == len(set(names)), "duplicate nucleus names"
 
 
-@pytest.mark.skipif(not os.path.exists(ascending.FIB_PATH), reason="FIB missing")
-def test_masks_load_on_fib_grid():
+@pytest.mark.skipif(not os.path.exists(ascending.MANIFEST), reason="atlas manifest missing")
+def test_masks_load_native():
     entries = ascending.load_manifest()
-    names, masks = ascending.nucleus_masks(entries, verbose=False)
-    assert len(names) == len(entries)
-    assert masks.shape[0] == len(entries)
-    assert masks.ndim == 4
-    for nm, m in zip(names, masks):
-        assert m.max() > 0, f"{nm} mask is empty after resampling"
+    names, masks, affs = ascending.nucleus_masks(entries, verbose=False)
+    assert len(names) == len(entries) == len(masks) == len(affs)
+    for nm, m, af in zip(names, masks, affs):
+        assert m.max() > 0, f"{nm} mask is empty"
         assert m.min() >= -1e-6, f"{nm} mask has negative values"
         assert m.max() <= 1.0 + 1e-6, f"{nm} mask exceeds 1"
+        assert af.shape == (4, 4)
 
 
 @pytest.mark.skipif(not os.path.exists(ascending.FIB_PATH), reason="FIB missing")
@@ -60,24 +59,58 @@ def test_grid_matches_dsi_studio():
         f"unexpected voxel size {np.diag(affine)}"
 
 
-# ---- Task 3: endpoint density (no tracking needed) ---------------------------
+# ---- Task 3: .tt.gz parsing and endpoint density -----------------------------
+
+def _enc_entry(typ, name, data, rows, cols):
+    import struct
+    nb = len(name.encode()) + 1
+    hdr = struct.pack("<IIIII", typ, rows, cols, 0, nb) + name.encode() + b"\x00"
+    return hdr + data
+
+
+def _build_tt(streamlines, shape=(78, 94, 68)):
+    import struct, gzip, tempfile, os
+    body = b""
+    body += _enc_entry(20, "dimension", struct.pack("<III", *shape), 1, 3)
+    body += _enc_entry(10, "voxel_size", struct.pack("<fff", 2.0, 2.0, 2.0), 1, 3)
+    body += _enc_entry(10, "trans_to_mni", struct.pack("<16f", *np.eye(4).ravel()), 4, 4)
+    buf = b""
+    for s in streamlines:
+        s32 = np.round(np.asarray(s, np.float32) * 32.0).astype(np.int64).ravel()
+        count = s32.size
+        buf += struct.pack("<I", count)
+        buf += struct.pack("<iii", int(s32[0]), int(s32[1]), int(s32[2]))
+        for j in range(3, count):
+            buf += struct.pack("<b", int(s32[j] - s32[j - 3]))
+    body += _enc_entry(50, "track", buf, len(buf), 1)
+    fd, path = tempfile.mkstemp(suffix=".tt.gz")
+    os.close(fd)
+    with gzip.open(path, "wb") as f:
+        f.write(body)
+    return path
+
+
+def test_parse_tt_decodes_streamlines():
+    s1 = np.array([[10.0, 20.0, 30.0], [10.5, 20.0, 30.0], [11.0, 20.5, 30.0]])
+    s2 = np.array([[40.0, 50.0, 60.0]])
+    path = _build_tt([s1, s2])
+    streams = ascending._parse_tt(path)
+    assert len(streams) == 2
+    assert np.allclose(streams[0], s1, atol=1 / 32.0)
+    assert np.allclose(streams[1], s2, atol=1 / 32.0)
+    os.remove(path)
+
 
 def test_endpoint_density_rasterizes_endpoints():
-    shape, affine = ascending._grid()
-    trk_path = os.path.join(DATA, "cache", "_test_endpoints.trk")
-    import nibabel as nib
-    vox = np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]])
-    ras = nib.affines.apply_affine(affine, vox)
-    # streamline 0 endpoints = vox0, vox1; streamline 1 is a single point, so BOTH its
-    # endpoints land on vox1
-    streamlines = [np.stack([ras[0], ras[1]]), np.stack([ras[1]])]
-    tfile = nib.streamlines.Tractogram(streamlines, affine_to_rasmm=np.eye(4))
-    nib.streamlines.save(tfile, trk_path)
-    V = ascending._endpoint_density(trk_path)
-    assert V[tuple(vox[0].astype(int))] == 1
-    assert V[tuple(vox[1].astype(int))] == 3
+    shape, _ = ascending._grid()
+    s1 = np.array([[10.0, 20.0, 30.0], [11.0, 20.0, 30.0]])  # endpoints differ by 1 voxel
+    s2 = np.array([[11.0, 20.0, 30.0]])                       # single point: both ends here
+    path = _build_tt([s1, s2])
+    V = ascending._endpoint_density(path)
+    assert V[10, 20, 30] == 1
+    assert V[11, 20, 30] == 3
     assert float(V.sum()) == 4
-    os.remove(trk_path)
+    os.remove(path)
 
 
 # ---- Task 4: modes and coverage ----------------------------------------------
