@@ -93,6 +93,15 @@ def rebuild(tag, c, t, verbose=True):
     R = np.pad(resp, ((0, 0), (0, max(0, pad - resp.shape[1])), (0, 0)))
     H, w, idx2 = xspec.transfer(R, t.cols, len(idx), kernel=kern, idx=idx)
     assert np.array_equal(idx2, idx), "frequency grid does not match the saved solve"
+    ref = R.shape[1]
+    if "band" in z and np.isfinite(np.asarray(z["band"], float)).all():
+        import bandpass
+        bp = np.asarray(z["band"], float)
+        H = H * bandpass.transfer_response(idx, ref, frame_s, *bp)[:, None, None]
+    if int(z["segment"]):
+        import bandpass
+        H = H * bandpass.segment_response(idx, ref, frame_s,
+                                          int(z["segment"]))[:, None, None]
     return dict(H=H, w=w, S=S, tags=tags, labels=labels, P=P, p=p, save=save)
 
 
