@@ -216,7 +216,8 @@ def main():
                     help="pieces to divide the driven parcels into (sets the piece area)")
     ap.add_argument("--regions", default="sensory",
                     choices=("sensory", "dmn", "sensory+dmn", "spread",
-                             "subcortical", "subcortical+sensory", "ascending"),
+                             "subcortical", "subcortical+sensory", "ascending",
+                             "hybrid"),
                     help="which parcels are driven; 'spread' is an even whole-cortex "
                          "sample matched to the sensory driven area; 'ascending' drives "
                          "tractography-defined thalamic nucleus projection fields")
@@ -264,10 +265,18 @@ def main():
                     dest="ascending_coverage",
                     help="driven-area fraction for --regions ascending when "
                          "--ascending-tau is 0 (0.085 ~= the incumbent driven area)")
+    ap.add_argument("--hybrid-file", default="", dest="hybrid_file",
+                    help="npz with `labels` (per-vertex piece index, -1 undriven) and "
+                         "`tags`, for --regions hybrid. The pieces are built outside the "
+                         "solve - Glasser parcels pick the driven territory, CsurfMaps1 "
+                         "areas cut it up - so best_fit only has to read them and make "
+                         "the usual taper profiles")
     ap.add_argument("--ascending-tau", type=float, default=0.0, dest="ascending_tau",
                     help="explicit density threshold; 0 = pick it from --ascending-coverage")
     ap.add_argument("--ascending-modes", type=int, default=80, dest="ascending_modes",
                     help="channel budget for the modal decomposition")
+    ap.add_argument("--ascending-kmax", type=int, default=4, dest="ascending_kmax",
+                    help="max Laplace modes per nucleus (the per-nucleus cap)")
     ap.add_argument("--centre", default="double", choices=("double", "none"),
                     help="'double' centres the target AND the model the same way; "
                          "'none' is the old behaviour, a pre-centred target scored "
@@ -411,14 +420,41 @@ def main():
         t.attach_affinity(a.affinity_thresh)
         print(f"  scoring in affinity space as well (row threshold "
               f"{a.affinity_thresh:g}); the two numbers are different metrics")
-    if a.regions == "ascending":
+    if a.regions == "hybrid":
+        if not a.hybrid_file:
+            raise SystemExit("  --regions hybrid needs --hybrid-file")
+        z = np.load(a.hybrid_file, allow_pickle=True)
+        labels = np.asarray(z["labels"], np.int64)
+        tags = [str(v) for v in np.asarray(z["tags"])]
+        if labels.shape[0] != c.nV:
+            raise SystemExit(f"  {a.hybrid_file} has {labels.shape[0]} labels for "
+                             f"{c.nV} vertices")
+        if "profiles" in z.files:
+            # the basis carries its own profiles - signed eigenmodes, say, which no
+            # labelling can express. --profile is then not applicable and is ignored.
+            P = np.asarray(z["profiles"], np.float32)
+            if P.shape != (len(tags), c.nV):
+                raise SystemExit(f"  profiles {P.shape} for {len(tags)} tags x {c.nV}")
+            print(f"  profiles read from the file ({P.shape[0]} channels); "
+                  f"--profile {a.profile} not applied")
+        elif a.profile == "taper":
+            P = subparcels.taper_profiles(c, labels, len(tags))
+        else:
+            P = subparcels.gauss_profiles(c, labels, len(tags), a.profile_fwhm,
+                                          mask=(labels >= 0) if a.profile_mask else None)
+        drv = float(np.asarray(c.A, float)[labels >= 0].sum())
+        print(f"  hybrid input: {len(tags)} channels, "
+              f"{int((labels >= 0).sum())} driven vertices, {drv:.0f} mm2 "
+              f"({100 * drv / float(np.asarray(c.A, float)[np.asarray(c.lab) > 0].sum()):.1f}% "
+              f"of cortex), from {os.path.basename(a.hybrid_file)}")
+    elif a.regions == "ascending":
         import ascending
         names, fields = ascending.load_fields(c)
         tau = (a.ascending_tau if a.ascending_tau > 0
                else ascending.tau_for_coverage(c, names, fields,
                                                a.ascending_coverage))
         P, tags, frac, meta = ascending.modal_channels(
-            c, names, fields, tau, a.ascending_modes)
+            c, names, fields, tau, a.ascending_modes, k_max=a.ascending_kmax)
         labels = np.full(c.nV, -1, np.int64)
         print(f"  ascending input: {len(tags)} channels from {len(names)} nuclei, "
               f"tau {tau:g}, coverage {frac[0]:.2%} ({frac[1]:.0f} mm2)")

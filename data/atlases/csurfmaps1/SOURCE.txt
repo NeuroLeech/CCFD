@@ -1,0 +1,10 @@
+lh-CsurfMaps1.annot
+  https://mri.sdsu.edu/sereno/csurf/fsaverage-labels/CsurfMaps1-parcellation/
+  Sereno et al. 2022, Front Syst Neurosci 16:787737.
+  117 cortical areas (57 visual, 34 auditory, 20 somatosensory, 6 motor) covering ~47% of
+  neocortex, boundaries from phase-encoded fMRI mapping (retinotopy, tonotopy,
+  somatomotopy) plus literature synthesis. On fsaverage (163842 vertices); FreeSurfer
+  icosahedra are nested, so fsaverage5 vertex i is fsaverage vertex i and the first 10242
+  labels are the fsaverage5 annotation. Verified: V1_lower + V1_upper = 259 vertices on
+  fsaverage5, exactly matching Glasser V1, 90-91% inside it.
+  retrieved 2026-09-12
