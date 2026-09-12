@@ -125,15 +125,46 @@ def test_parse_tt_decodes_streamlines():
     os.remove(path)
 
 
-def test_endpoint_density_rasterizes_endpoints():
+def test_endpoint_density_extends_past_the_last_point():
+    """The terminal segment walks FORWARD along its own direction.
+
+    Tracking stops at the WM/GM interface; the cortical target is a few mm further along
+    the same heading. So density must appear beyond the streamline's last point, in the
+    direction it was travelling, and not behind it."""
+    vs = float(np.abs(np.diag(ascending._grid()[1])).min())
+    # densely sampled: the .tt container delta-encodes as int8 of 32x coordinates, so
+    # consecutive points must sit within ~3.9 voxels of each other
+    s1 = np.c_[np.arange(10.0, 12.01, 0.5), np.full(5, 20.0), np.full(5, 30.0)]
+    path = _build_tt([s1])
     shape, _ = ascending._grid()
-    s1 = np.array([[10.0, 20.0, 30.0], [11.0, 20.0, 30.0]])  # endpoints differ by 1 voxel
-    s2 = np.array([[11.0, 20.0, 30.0]])                       # single point: both ends here
+    seed = np.zeros(shape, bool)
+    seed[10, 20, 30] = True                                   # isolate the far end
+    V = ascending._endpoint_density(path, seed_v=seed, tail_mm=0.0, extend_mm=4.0,
+                                    step_mm=0.5)
+    beyond = V[13:, 20, 30].sum()
+    behind = V[:10, 20, 30].sum()
+    assert beyond > 0, "no density past the terminal point"
+    assert behind == 0, "density deposited behind the streamline"
+    # the extension reaches about extend_mm past the end, in voxels
+    reach = np.nonzero(V[:, 20, 30])[0].max() - 12
+    assert reach <= round(4.0 / vs) + 1
+    os.remove(path)
+
+
+def test_endpoint_density_counts_only_the_far_end():
+    """With a seed mask, the end sitting in the seed does not deposit.
+
+    A thalamus-seeded streamline otherwise puts as much weight back in the thalamus as at
+    its cortical target, and one that never escaped deposits twice in the seed."""
+    shape, _ = ascending._grid()
+    seed = np.zeros(shape, bool)
+    seed[10, 20, 30] = True                                   # the seed end of s1
+    s1 = np.c_[np.arange(10.0, 16.01, 0.5), np.full(13, 20.0), np.full(13, 30.0)]
+    s2 = np.array([[10.0, 20.0, 30.0], [10.0, 20.0, 30.0]])   # never left the seed
     path = _build_tt([s1, s2])
-    V = ascending._endpoint_density(path)
-    assert V[10, 20, 30] == 1
-    assert V[11, 20, 30] == 3
-    assert float(V.sum()) == 4
+    V = ascending._endpoint_density(path, seed_v=seed, tail_mm=0.0, extend_mm=3.0)
+    assert V[:13, 20, 30].sum() == 0, "deposited at the seed end"
+    assert V[16:, 20, 30].sum() > 0, "nothing at the far end"
     os.remove(path)
 
 

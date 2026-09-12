@@ -172,18 +172,92 @@ def _parse_tt(tt_path):
     return streams
 
 
-def _endpoint_density(tt_path, fib=FIB_PATH):
-    """Rasterise streamline ENDPOINTS (voxel coords) onto the FIB grid. Both ends count."""
+def _splat(V, xyz):
+    """Trilinear deposit of fractional voxel coordinates into V, in place.
+
+    Nearest-voxel rounding quantises a 1 mm terminal segment into a staircase and puts
+    all of a streamline's terminal weight in one voxel; the ribbon mapping then sees a
+    spike beside the ribbon rather than a gradient across it."""
+    shape = V.shape
+    b = np.floor(xyz).astype(np.int64)
+    f = xyz - b
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0, 1):
+                w = ((f[:, 0] if dx else 1 - f[:, 0]) *
+                     (f[:, 1] if dy else 1 - f[:, 1]) *
+                     (f[:, 2] if dz else 1 - f[:, 2]))
+                ix, iy, iz = b[:, 0] + dx, b[:, 1] + dy, b[:, 2] + dz
+                ok = ((ix >= 0) & (ix < shape[0]) & (iy >= 0) & (iy < shape[1]) &
+                      (iz >= 0) & (iz < shape[2]) & (w > 0))
+                if ok.any():
+                    np.add.at(V, (ix[ok], iy[ok], iz[ok]), w[ok])
+
+
+def _terminal_samples(s, vs, tail_mm, extend_mm, step_mm):
+    """-> (m, 3) voxel coords sampling one streamline's terminal segment, plus a
+    directed extension beyond its last point.
+
+    Tracking stops at the WM/GM interface where the fibre orientation distribution gives
+    out. The cortical target is a few mm FURTHER ALONG the same direction, through the
+    ribbon - and for a sulcal target that direction is lateral, not radially outward, so
+    an isotropic dilation reaches the wrong bank. Walking the terminal tangent forward
+    puts the weight where the streamline was heading.
+
+    The tail is sampled as well as the extension so that a streamline running along a
+    gyral blade deposits over its length rather than a single point."""
+    d = np.linalg.norm(np.diff(s, axis=0), axis=1) * vs
+    if len(d) == 0:
+        return s[-1:].copy()
+    arc = np.concatenate([[0.0], np.cumsum(d)])
+    tail = s[arc >= arc[-1] - tail_mm]
+    if len(tail) < 2:
+        tail = s[-2:]
+    u = tail[-1] - tail[max(0, len(tail) - 3)]
+    n = np.linalg.norm(u) * vs
+    pts = [tail]
+    if n > 1e-6 and extend_mm > 0:
+        u = u / (n / vs)                                   # unit vector, voxel units
+        k = np.arange(step_mm, extend_mm + 1e-9, step_mm) / vs
+        pts.append(tail[-1][None, :] + k[:, None] * u[None, :])
+    return np.concatenate(pts, axis=0)
+
+
+def _endpoint_density(tt_path, fib=FIB_PATH, seed_v=None, tail_mm=4.0,
+                      extend_mm=4.0, step_mm=0.5):
+    """Rasterise streamline TERMINAL SEGMENTS (voxel coords) onto the FIB grid.
+
+    `seed_v` is the seed mask on the FIB grid. When given, only the end NOT in the seed
+    is counted: a thalamus-seeded streamline otherwise deposits as much weight back in
+    the thalamus as it does at its cortical target, and a streamline that never left the
+    seed deposits twice there and nowhere else."""
     shape, _ = _grid(fib)
-    pts = [p for s in _parse_tt(tt_path) for p in (s[0], s[-1])]
-    xyz = np.round(np.asarray(pts)).astype(np.int64)
-    ok = ((xyz[:, 0] >= 0) & (xyz[:, 0] < shape[0]) &
-          (xyz[:, 1] >= 0) & (xyz[:, 1] < shape[1]) &
-          (xyz[:, 2] >= 0) & (xyz[:, 2] < shape[2]))
-    xyz = xyz[ok]
+    vs = float(np.abs(np.diag(_grid(fib)[1])).min())
     V = np.zeros(shape, np.float32)
-    if len(xyz):
-        np.add.at(V, (xyz[:, 0], xyz[:, 1], xyz[:, 2]), 1.0)
+
+    def in_seed(pt):
+        if seed_v is None:
+            return False
+        e = np.round(pt).astype(int)
+        return (all(0 <= e[i] < shape[i] for i in range(3)) and bool(seed_v[tuple(e)]))
+
+    for s in _parse_tt(tt_path):
+        if len(s) < 2:
+            continue
+        a_in, b_in = in_seed(s[0]), in_seed(s[-1])
+        if seed_v is not None and a_in and b_in:
+            continue                                   # never escaped the seed
+        ends = []
+        if seed_v is None:
+            ends = [s, s[::-1]]
+        elif a_in and not b_in:
+            ends = [s]
+        elif b_in and not a_in:
+            ends = [s[::-1]]
+        else:
+            ends = [s, s[::-1]]                        # neither end in seed: count both
+        for e in ends:
+            _splat(V, _terminal_samples(e, vs, tail_mm, extend_mm, step_mm))
     return V
 
 
@@ -212,17 +286,20 @@ def _vol_to_surface(V, affine, name, tmpdir):
     return np.asarray(nib.load(out).darrays[0].data, np.float32)
 
 
-def _to_surface(name, V, tmpdir, fib=FIB_PATH):
-    """Endpoint-density volume (FIB grid) -> metric on full fsaverage5. Tractography path.
+def _to_surface(name, V, tmpdir, fib=FIB_PATH, dilate_mm=0.0):
+    """Endpoint-density volume (FIB grid) -> metric on full fsaverage5.
 
-    Streamlines terminate at the WM/GM boundary, so at 1 mm their endpoint voxels sit up
-    to ~3 mm outside the white-pial ribbon and ribbon-constrained mapping would drop
-    them. The density is dilated by 3 mm first (matching what a 2 mm voxel implicitly
-    does), which assigns each endpoint to the nearest ribbon without touching the
-    subcortical endpoint clusters, which are further away."""
-    from scipy.ndimage import maximum_filter
-    vs = float(np.abs(np.diag(_grid(fib)[1])).min())
-    V = maximum_filter(np.asarray(V, np.float32), size=int(round(3.0 / vs) * 2 + 1))
+    `dilate_mm` is an ISOTROPIC maximum filter, and it was how terminal density used to
+    be pushed into the white-pial ribbon. It reaches the nearest ribbon in every
+    direction at once, so a streamline ending in a gyral blade lights both banks and the
+    dorsal convexity accumulates from everything beneath it. `_terminal_samples` now
+    walks the terminal tangent instead, which is directed, so the default is off. Kept as
+    a knob for comparison against the old fields."""
+    if dilate_mm > 0:
+        from scipy.ndimage import maximum_filter
+        vs = float(np.abs(np.diag(_grid(fib)[1])).min())
+        V = maximum_filter(np.asarray(V, np.float32),
+                           size=int(round(dilate_mm / vs) * 2 + 1))
     return _vol_to_surface(V, _grid(fib)[1], name, tmpdir)
 
 
@@ -477,8 +554,45 @@ def thalamus_gate(seed_count=150000, method=0, turn=45.0, otsu=None, threads=Non
         return r
 
 
+def gate_ladder(seed_count=50000, grid=None, fib=FIB_PATH, threads=None, verbose=True):
+    """Run `thalamus_gate` over a small tracking grid and report where tracks end.
+
+    The plan's step-1 ladder, run as a table rather than one setting at a time: grey
+    matter needs a lower QA threshold than the default and a wider turning angle than a
+    deterministic tracker's, and which of the two is binding is not predictable from the
+    FIB. Seed count is deliberately low - this ranks settings, it does not build the
+    field."""
+    grid = grid or [(m, t, o) for m in (0, 1) for t in (45.0, 60.0, 75.0)
+                    for o in (0.6, 0.45, 0.35, 0.25)]
+    rows = []
+    if verbose:
+        print(f"  {seed_count} seeds per setting, {len(grid)} settings\n")
+        print(f"  {'method':>6s} {'turn':>5s} {'otsu':>5s} {'tracks':>8s} "
+              f"{'end in cortex':>14s} {'stuck in seed':>14s} {'med mm':>7s}")
+    for m, t, o in grid:
+        try:
+            r = thalamus_gate(seed_count, method=m, turn=t, otsu=o, fib=fib,
+                              threads=threads, verbose=False)
+        except SystemExit as e:
+            if verbose:
+                print(f"  {m:>6d} {t:>5g} {o:>5g}   failed: {e}")
+            continue
+        r.update(method=m, turn=t, otsu=o)
+        rows.append(r)
+        if verbose:
+            print(f"  {m:>6d} {t:>5g} {o:>5g} {r['total']:>8d} "
+                  f"{r['cort_hit_frac']:>13.1%} {r['both_in_seed_frac']:>13.1%} "
+                  f"{r['len_median_mm']:>7.0f}", flush=True)
+    if rows and verbose:
+        b = max(rows, key=lambda r: r["cort_hit_frac"])
+        print(f"\n  best: method {b['method']}, turn {b['turn']:g}, otsu {b['otsu']:g}"
+              f" -> {b['cort_hit_frac']:.1%} of streamlines end in the cortical ribbon")
+    return rows
+
+
 def thalamus_field(seed_count=200000, method=1, turn=60.0, otsu=0.35, threads=None,
-                   cache=True, verbose=True, fib=FIB_PATH):
+                   cache=True, verbose=True, fib=FIB_PATH, tail_mm=4.0, extend_mm=4.0,
+                   dilate_mm=0.0):
     """The ONE vertex-level thalamic cortical projection field.
 
     Seeded from the whole left thalamus (THOMAS odd labels) through the group FIB with
@@ -486,8 +600,12 @@ def thalamus_field(seed_count=200000, method=1, turn=60.0, otsu=0.35, threads=No
     end in the cortical ribbon); streamline endpoints rasterise into a density volume and
     map to fsaverage5 through the ribbon. Returns the (10242,) full-hemisphere field."""
     threads = threads or os.cpu_count()
+    # the endpoint-extraction parameters belong in the key: the same tracking settings
+    # with a different terminal walk are a DIFFERENT field, and without them a rebuild
+    # silently returns the previous one
     key = hashlib.sha1(
-        f"{seed_count},{method},{turn},{otsu},{os.path.basename(fib)}".encode()
+        f"{seed_count},{method},{turn},{otsu},{os.path.basename(fib)},"
+        f"{tail_mm},{extend_mm},{dilate_mm}".encode()
     ).hexdigest()[:12]
     cache_f = os.path.join(CACHE, f"thalamus_field_{key}.npz")
     if cache and os.path.exists(cache_f):
@@ -499,8 +617,9 @@ def thalamus_field(seed_count=200000, method=1, turn=60.0, otsu=0.35, threads=No
         seed = _left_thalamus_seed(td)
         tt = _run_dsi(seed, os.path.join(td, "out"), seed_count, fib=fib,
                       threads=threads, method=method, turn=turn, otsu=otsu)
-        V = _endpoint_density(tt, fib=fib)
-        f = _to_surface("thalamus", V, td, fib=fib)
+        V = _endpoint_density(tt, fib=fib, seed_v=_seed_on_grid(seed, fib),
+                              tail_mm=tail_mm, extend_mm=extend_mm)
+        f = _to_surface("thalamus", V, td, fib=fib, dilate_mm=dilate_mm)
     np.savez(cache_f, field=f)
     if verbose:
         print(f"  wrote {cache_f}")
@@ -524,16 +643,19 @@ def _first_in_seed_label(s, th_d, th_T, names):
 
 
 def thalamus_subfields(seed_count=200000, method=1, turn=60.0, otsu=0.35, threads=None,
-                       verbose=True, fib=FIB_PATH):
+                       verbose=True, fib=FIB_PATH, tail_mm=4.0, extend_mm=4.0,
+                       dilate_mm=0.0):
     """-> (names, fields (M, c.nV)): per-nucleus cortical endpoint fields.
 
     Each streamline is attributed to the THOMAS nucleus at its SEED (the first stored
-    point inside the left-thalamus mask); both walk ends rasterise, so a nucleus's field
-    is where its streamlines reach the cortical ribbon."""
+    point inside the left-thalamus mask); only the FAR terminal segment rasterises, so a
+    nucleus's field is where its streamlines reach the cortical ribbon and not also where
+    they started."""
     import nibabel as nib
     threads = threads or os.cpu_count()
     key = hashlib.sha1(
-        f"sub{seed_count},{method},{turn},{otsu},{os.path.basename(fib)}".encode()
+        f"sub{seed_count},{method},{turn},{otsu},{os.path.basename(fib)},"
+        f"{tail_mm},{extend_mm},{dilate_mm}".encode()
     ).hexdigest()[:12]
     cache_f = os.path.join(CACHE, f"thalamus_subfields_{key}.npz")
     th = nib.load(THOMAS)
@@ -545,21 +667,35 @@ def thalamus_subfields(seed_count=200000, method=1, turn=60.0, otsu=0.35, thread
                       threads=threads, method=method, turn=turn, otsu=otsu)
         streams = _parse_tt(tt)
         shape = _grid(fib)[0]
+        vs = float(np.abs(np.diag(_grid(fib)[1])).min())
+        seed_v = _seed_on_grid(seed, fib)
         V = np.zeros((len(THOMAS_LEFT),) + shape, np.float32)
         n_att = np.zeros(len(THOMAS_LEFT), int)
-        for s in streams:
-            l = _first_in_seed_label(s, th_d, th_T, THOMAS_LEFT)
+
+        def _in_seed(pt):
+            e = np.round(pt).astype(int)
+            return (all(0 <= e[j] < shape[j] for j in range(3))
+                    and bool(seed_v[tuple(e)]))
+
+        for st in streams:
+            if len(st) < 2:
+                continue
+            l = _first_in_seed_label(st, th_d, th_T, THOMAS_LEFT)
             if l < 0:
                 continue
+            a_in, b_in = _in_seed(st[0]), _in_seed(st[-1])
+            if a_in and b_in:
+                continue                               # never escaped the thalamus
             i = THOMAS_LEFT.index(l)
             n_att[i] += 1
-            for e in (s[0], s[-1]):
-                v = np.round(e).astype(int)
-                if all(0 <= v[j] < shape[j] for j in range(3)):
-                    V[i, v[0], v[1], v[2]] += 1.0
+            walks = [st] if (a_in and not b_in) else \
+                    [st[::-1]] if (b_in and not a_in) else [st, st[::-1]]
+            for e in walks:
+                _splat(V[i], _terminal_samples(e, vs, tail_mm, extend_mm, 0.5))
         from mesh_cache import load_cortex
         c = load_cortex("fsaverage5", verbose=False)
-        F = np.stack([_to_surface(f"nuc{l}", V[i], td, fib=fib)[c.old]
+        F = np.stack([_to_surface(f"nuc{l}", V[i], td, fib=fib,
+                                  dilate_mm=dilate_mm)[c.old]
                       for i, l in enumerate(THOMAS_LEFT)])
         lut = {1: "AV", 3: "VA", 5: "VLa", 7: "VLp", 9: "VPL", 11: "Pul",
                13: "LGN", 15: "MGN", 17: "CM", 19: "MD", 21: "Hb", 23: "MTT"}
@@ -600,11 +736,17 @@ def main():
                     help="otsu threshold override (gate only)")
     ap.add_argument("--thalamus", action="store_true",
                     help="build the whole-thalamus cortical projection field (cached)")
+    ap.add_argument("--ladder", action="store_true",
+                    help="quality gate over a grid of tracking settings, ranked by the "
+                         "fraction of streamlines ending in the cortical ribbon")
     a = ap.parse_args()
 
     entries = load_manifest()
     from mesh_cache import load_cortex
     c = load_cortex("fsaverage5", verbose=False)
+    if a.ladder:
+        gate_ladder(a.seed_count, fib=a.fib)
+        return
     if a.quality:
         thalamus_gate(a.seed_count, method=a.method, turn=a.turn, otsu=a.otsu,
                       fib=a.fib)
