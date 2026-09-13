@@ -105,7 +105,15 @@ class TorchSWE:
                 torch.zeros(self.nV, dtype=self.dtype, device=self.device))
 
 
-def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None):
+def _as(v, sw):
+    """Tensor on the solver's device, passing an existing tensor through so the graph
+    survives - np.asarray on an MPS tensor raises rather than moving it."""
+    if torch.is_tensor(v):
+        return v.to(dtype=sw.dtype, device=sw.device)
+    return torch.as_tensor(np.asarray(v), dtype=sw.dtype, device=sw.device)
+
+
+def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
     """Integrate, returning saved frames. The drive is `A[n] @ P` added to h per step,
     exactly as in `fluid.run` - held as (nsteps, K) amplitudes and (K, nV) profiles rather
     than a dense (nsteps, nV) field, which at 57,000 steps would be 4 GB on its own.
@@ -114,14 +122,18 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None):
     discarded after the forward pass and recomputed during the backward one. A 57,000-step
     realisation holds ~9 GB in (ue, h) alone before any intermediates, so the whole tape
     does not fit; sqrt(nsteps) segments turn that into tens of MB for about 2x the forward
-    cost. -> (frames, ue, h), with the final state returned so windows can be chained."""
+    cost. `keep` is a vertex index: only those columns are kept, which is what the loss
+    needs and keeps the saved frames off the graph at full width.
+    -> (frames, ue, h), with the final state returned so windows can be chained."""
     nsteps = A.shape[0]
     ue, h = sw.zeros() if state is None else state
-    A = torch.as_tensor(A, dtype=sw.dtype, device=sw.device)
-    P = torch.as_tensor(np.asarray(P), dtype=sw.dtype, device=sw.device)
+    A = _as(A, sw)
+    P = _as(P, sw)
+    if keep is not None and not torch.is_tensor(keep):
+        keep = torch.as_tensor(np.asarray(keep), dtype=torch.long, device=sw.device)
     dt = torch.as_tensor(dt, dtype=sw.dtype, device=sw.device)
     g = torch.as_tensor(g, dtype=sw.dtype, device=sw.device)
-    H = torch.as_tensor(np.asarray(H), dtype=sw.dtype, device=sw.device)
+    H = _as(H, sw)
 
     def seg(ue, h, a, off):
         out = []
@@ -129,9 +141,10 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None):
         for n in range(dr.shape[0]):
             ue, h = sw.step(ue, h + dr[n], dt, g, H)
             if (off + n) % save == 0:
-                out.append(h)
+                out.append(h if keep is None else h[keep])
+        nc = sw.nV if keep is None else len(keep)
         return ue, h, (torch.stack(out) if out else
-                       torch.zeros(0, sw.nV, dtype=sw.dtype, device=sw.device))
+                       torch.zeros(0, nc, dtype=sw.dtype, device=sw.device))
 
     frames, k = [], chunk if chunk > 0 else nsteps
     for a0 in range(0, nsteps, k):

@@ -1283,7 +1283,7 @@ class ProfileDrive:
 
 def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=False,
                       seed=0, profiles=None, run_fn=None, kernel=None, band=None,
-                      frame_s=None, segment=None):
+                      frame_s=None, segment=None, diagnostics=True):
     """Hold each drawn sample over its block of steps, run, and score for real.
 
     `run_fn(drive, nsteps, save) -> (frames, dt)` replaces the plain integration, which is
@@ -1327,9 +1327,15 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
         frames = bandpass.apply_segments(frames, int(segment))
     Z, _ = target.model_z(frames)
     sim = float(target._prep(target.model_edges(Z=Z)[0]) @ target.y)
+    out = dict(sim=sim, frames=frames, drive=d)
+    # `gap` and `rank` cost far more than the score does - a Moran decomposition and an
+    # SVD of (vertices x frames), which at a 2,308 s realisation is minutes per draw
+    # against seconds for `sim`. A caller scoring many draws in a loop wants neither.
+    if not diagnostics:
+        return out
     mm = MoranMatch(cortex, target)
-    out = dict(sim=sim, gap=mm.gap(Z), rank=target.effective_rank(frames[target.burn:]),
-               frames=frames, drive=d)
+    out["gap"] = mm.gap(Z)
+    out["rank"] = target.effective_rank(frames[target.burn:])
     if getattr(target, "aff_y", None) is not None:
         out["sim_aff"] = target.affinity_sim(Z)
     return out
