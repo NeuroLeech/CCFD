@@ -241,6 +241,7 @@ def main():
 
     m0, s0 = fit.realised(G)
     print(f"  iteration 0 realised: sim {m0:+.4f} +- {s0:.4f}", flush=True)
+    seed0 = (m0, G.detach().cpu().numpy().copy(), 0)
     if a.init == "warm":
         # The one thing the G-vs-S interpolation difference could cost. Same S, same
         # length, same seeds, realised the repo's way instead of this module's.
@@ -257,7 +258,7 @@ def main():
               f"(interpolation gap {m0-np.mean(cv):+.4f})", flush=True)
 
     opt = torch.optim.Adam([G], lr=lr)
-    hist, best = [], (-1e9, None, 0)
+    hist, best = [], seed0        # iteration 0 competes, or the first eval always wins
     for it in range(1, a.iters + 1):
         t0 = time.time()
         opt.zero_grad()
