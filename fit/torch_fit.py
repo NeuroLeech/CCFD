@@ -204,7 +204,12 @@ def main():
     ap.add_argument("--ref", default="torchref", help="results/xspec_<ref>.npz")
     ap.add_argument("--seconds", type=float, default=300.0)
     ap.add_argument("--iters", type=int, default=200)
-    ap.add_argument("--init", default="warm", choices=("warm", "cold"))
+    ap.add_argument("--init", default="warm",
+                    help="warm (the convex solve's own factor), cold (random at the same "
+                         "scale), or from:<tag> to continue results/torchfit_<tag>.npz - "
+                         "the objective does not converge on any budget chosen in "
+                         "advance, so a run that is still climbing should be extended "
+                         "rather than repeated")
     ap.add_argument("--lr", type=float, default=0.02,
                     help="Adam step as a FRACTION of the initial RMS entry of G. Adam's "
                          "step is scale-free while G's entries are ~1/sqrt(nfreq K^2), so "
@@ -228,12 +233,21 @@ def main():
     print(f"  realise {fit.nframes} frames ({a.seconds:.0f}s) = {fit.nsteps} steps, "
           f"chunk {fit.chunk}, amp {a.amp:g}, nl_flux {a.nl_flux:g}, device {a.device}")
 
+    cdt = torch.complex64 if fit.dtype == torch.float32 else torch.complex128
     if a.init == "warm":
         G = warm_start(ref["S"], fit.dtype, fit.cdev)
-    else:
+    elif a.init.startswith("from:"):
+        prev = np.load(os.path.join(RESULTS, f"torchfit_{a.init[5:]}.npz"),
+                       allow_pickle=True)
+        G = torch.tensor(prev["G"], dtype=cdt, device=fit.cdev, requires_grad=True)
+        print(f"  continuing {a.init[5:]}: best sim {float(prev['best_sim']):+.4f} "
+              f"at its iteration {int(prev['best_iter'])}")
+    elif a.init == "cold":
         g0 = warm_start(ref["S"], fit.dtype, fit.cdev)
         sc = float(g0.detach().abs().pow(2).sum().sqrt()) / np.sqrt(g0.numel())
         G = (sc * torch.randn_like(g0.detach())).clone().requires_grad_(True)
+    else:
+        raise SystemExit(f"  --init {a.init}: expected warm, cold or from:<tag>")
     rms = float(G.detach().abs().pow(2).mean().sqrt())
     lr = a.lr * rms
     print(f"  init {a.init}: |G|_F {float(G.detach().abs().pow(2).sum().sqrt()):.4g}, "
