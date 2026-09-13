@@ -172,7 +172,7 @@ class Fit:
         return torch.view_as_complex(r.contiguous())
 
     # ---------------- the authoritative score, via the repo's own path ----------------
-    def realised(self, G, seeds=(0, 1)):
+    def realised(self, G, seeds=(0, 1, 2, 3, 4, 5)):
         """Simulate in numpy and score with `score_realisation`. No torch in the loop."""
         out = []
         for sd in seeds:
@@ -219,6 +219,11 @@ def main():
     ap.add_argument("--nl-flux", type=float, default=0.0, dest="nl_flux")
     ap.add_argument("--device", default="mps")
     ap.add_argument("--eval-every", type=int, default=25, dest="eval_every")
+    ap.add_argument("--eval-draws", type=int, default=6, dest="eval_draws",
+                    help="draws per evaluation. `best` takes a MAX over evaluations, so a "
+                         "noisy estimate is selected upward: at 2 draws the warm arm's "
+                         "best read +0.6497 against +0.6377 +- 0.0083 when the same G was "
+                         "re-scored with 6")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tag", default=None, help="results/torchfit_<tag>.npz")
     a = ap.parse_args()
@@ -253,7 +258,7 @@ def main():
     print(f"  init {a.init}: |G|_F {float(G.detach().abs().pow(2).sum().sqrt()):.4g}, "
           f"RMS entry {rms:.3g} -> Adam lr {lr:.3g}")
 
-    m0, s0 = fit.realised(G)
+    m0, s0 = fit.realised(G, seeds=tuple(range(a.eval_draws)))
     print(f"  iteration 0 realised: sim {m0:+.4f} +- {s0:.4f}", flush=True)
     seed0 = (m0, G.detach().cpu().numpy().copy(), 0)
     if a.init == "warm":
@@ -282,7 +287,7 @@ def main():
         hist.append(obj.detach().item())
         line = f"  {it:4d}  surrogate {hist[-1]:+.4f}  [{time.time()-t0:.1f}s]"
         if it % a.eval_every == 0 or it == a.iters:
-            m, s = fit.realised(G)
+            m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised sim {m:+.4f} +- {s:.4f}"
             if m > best[0]:
                 best = (m, G.detach().cpu().numpy().copy(), it)
