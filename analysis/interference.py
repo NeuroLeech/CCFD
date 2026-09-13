@@ -37,11 +37,18 @@ from paths import RESULTS
 import timescale
 
 
-def contributions(c, tag, imp_frames=None, window=None, band=(0.01, 0.08), verbose=True):
+def contributions(c, tag, imp_frames=None, window=None, band=(0.01, 0.08), verbose=True,
+                  filt=True):
     """Accumulate per-piece contributions without ever holding them all at once.
 
     -> dict with the total field, each piece's variance per vertex, the incoherent sum,
-    and - over `window` frames - the instantaneous coherent and incoherent energy."""
+    and - over `window` frames - the instantaneous coherent and incoherent energy.
+
+    `filt=False` leaves the BOLD kernel and the passband OFF. Both are MEASUREMENT - what
+    BOLD and XCP-D do to the field on the way to being observed - not part of how the
+    medium combines its inputs. Asking where the pieces reinforce and where they cancel is
+    a question about the field, and the answer to it should not be conditioned on the
+    instrument. `filt=True` asks the other question, which is what bears on the fit."""
     import xspec, bo_step, subparcels, units, bandpass
     z = np.load(os.path.join(RESULTS, f"xspec_{tag}.npz"), allow_pickle=True)
     x, save, labels, tags = z["x"], int(z["save"]), z["labels"], list(z["tags"])
@@ -75,8 +82,9 @@ def contributions(c, tag, imp_frames=None, window=None, band=(0.01, 0.08), verbo
     win_sq = np.zeros((w1 - w0, nV), np.float32)          # sum_k f_k^2, instantaneous
     for k in range(K):
         f = fftconvolve(a[:, k:k + 1], R[k], axes=0)[:nfr]
-        f = units.smooth_frames(f, kern)
-        f = bandpass.apply(f, frame_s, band[0], band[1])
+        if filt:
+            f = units.smooth_frames(f, kern)
+            f = bandpass.apply(f, frame_s, band[0], band[1])
         tot += f
         var_k[k] = f.var(0)
         win_sq += f[w0:w1] ** 2
@@ -84,7 +92,7 @@ def contributions(c, tag, imp_frames=None, window=None, band=(0.01, 0.08), verbo
             print(f"    {k+1}/{K} pieces", flush=True)
         del f
     return dict(tot=tot, var_k=var_k, win_sq=win_sq, win=(w0, w1), tags=tags,
-                labels=labels, frame_s=frame_s, nfr=nfr)
+                labels=labels, frame_s=frame_s, nfr=nfr, kern=kern, band=band, filt=filt)
 
 
 def _impulse_frames(x, save, frame_s, decays=7.0, lo=0.01):
@@ -101,6 +109,13 @@ def main():
     ap.add_argument("--n", type=int, default=600)
     ap.add_argument("--edge", type=int, default=600,
                     help="frames ignored at each end when checking against the run")
+    ap.add_argument("--raw", action="store_true",
+                    help="split the UNFILTERED field. The BOLD kernel and the passband are "
+                         "measurement, not mechanism, so where the pieces reinforce and "
+                         "where they cancel should not be asked through the instrument. "
+                         "The check against the run still holds: filtering is linear and "
+                         "commutes with the superposition, so the raw total is filtered "
+                         "after summing and compared to the same saved frames")
     a = ap.parse_args()
 
     from mesh_cache import load_cortex
@@ -114,16 +129,23 @@ def main():
         a.n = max(nfr_avail - a.start, 1)
         print(f"  window clamped to frames {a.start}-{a.start + a.n} "
               f"({nfr_avail} available)")
-    r = contributions(c, a.tag, window=(a.start, a.start + a.n))
+    r = contributions(c, a.tag, window=(a.start, a.start + a.n), filt=not a.raw)
     tot, var_k, nfr = r["tot"], r["var_k"], r["nfr"]
 
     # ---- the decomposition has to reproduce the run before anything is read off it ----
     F = np.asarray(np.load(os.path.join(RESULTS, f"frames_{a.tag}.npy"), mmap_mode="r"),
                    np.float32)
-    n, e = min(len(tot), len(F)), a.edge
-    rr = float(np.corrcoef(tot[e:n-e].ravel(), F[e:n-e].ravel())[0, 1])
+    chk = tot
+    if a.raw:
+        import units, bandpass
+        chk = bandpass.apply(units.smooth_frames(tot, r["kern"]), r["frame_s"],
+                             r["band"][0], r["band"][1])
+    n, e = min(len(chk), len(F)), a.edge
+    rr = float(np.corrcoef(chk[e:n-e].ravel(), F[e:n-e].ravel())[0, 1])
+    # `chk`, not `tot`: under --raw the total is unfiltered and the saved frames are not,
+    # so their sd ratio is the filter's amplitude effect rather than a check on anything
     print(f"\n  superposition against the run's saved field: r = {rr:.6f}, "
-          f"sd ratio {tot[e:n-e].std()/F[e:n-e].std():.4f}")
+          f"sd ratio {chk[e:n-e].std()/F[e:n-e].std():.4f}")
     if rr < 0.99:
         raise SystemExit("  the decomposition does not reproduce the run")
 
@@ -155,12 +177,13 @@ def main():
           f"anything: median {np.nanmedian(eff):.1f}, "
           f"range {np.nanmin(eff):.1f}-{np.nanmax(eff):.1f}")
 
-    out = os.path.join(RESULTS, f"interference_{a.tag}.npz")
+    sfx = "_raw" if a.raw else ""
+    out = os.path.join(RESULTS, f"interference_{a.tag}{sfx}.npz")
     np.savez(out, ratio=ratio, coherent=coh, incoherent=inc, var_k=var_k,
              eff_pieces=eff, cols=cols, tags=np.array(r["tags"], dtype=object))
     print(f"\n  wrote {out}")
 
-    _plot(a.tag, c, t, ratio, eff, r)
+    _plot(a.tag + sfx, c, t, ratio, eff, r)
 
 
 def _plot(tag, c, t, ratio, eff, r):
