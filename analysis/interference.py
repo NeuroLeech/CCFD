@@ -170,10 +170,13 @@ def _plot(tag, c, t, ratio, eff, r):
     from render_regimes import _proj
     from plot_fc_map import surface_row
     proj = _proj(c.V, c.F)
-    full_eff = np.full(c.nV, np.nan); full_eff[t.cols] = eff
+    # eff is NaN at the handful of vertices no piece reaches, and np.percentile returns
+    # NaN if any input is NaN - which made vmin and vmax NaN and drew an empty panel.
+    # nanpercentile for the limits, and the dead vertices are zeroed rather than left as
+    # NaN, because Gouraud shading spreads a NaN vertex over every triangle touching it.
     rows = [("coherent / incoherent", np.clip(ratio[t.cols], 0, 2), "RdBu_r", (0, 2)),
-            ("pieces reaching the vertex", eff, "viridis",
-             (float(np.percentile(eff, 2)), float(np.percentile(eff, 98))))]
+            ("pieces reaching the vertex", np.nan_to_num(eff, nan=0.0), "viridis",
+             (float(np.nanpercentile(eff, 2)), float(np.nanpercentile(eff, 98))))]
     fig = plt.figure(figsize=(3.9 * len(proj), 2.9 * len(rows)))
     gs = fig.add_gridspec(len(rows), len(proj), hspace=0.06, wspace=0.02)
     for i, (lab, v, cm, lims) in enumerate(rows):
