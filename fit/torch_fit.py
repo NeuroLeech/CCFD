@@ -347,9 +347,13 @@ def main():
         if it not in dump_at or not a.tag:
             return
         Gd = G.detach().cpu().numpy()
+        # the whole medium, not just G: a checkpoint that does not say which medium it
+        # belongs to cannot be replayed, and these differ in rotation, flattening and
+        # which nonlinearities were on
         np.savez(os.path.join(RESULTS, f"torchfit_{a.tag}_it{it}.npz"), G=Gd,
                  S=np.einsum("fab,fcb->fac", Gd, Gd.conj()), best_iter=it, ref=a.ref,
                  best_sim=np.nan, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
+                 nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale,
                  amp=a.amp, hist=np.asarray(hist))
         print(f"        dumped G at iteration {it}", flush=True)
 
@@ -395,7 +399,8 @@ def main():
         np.savez(os.path.join(RESULTS, f"torchfit_{a.tag}.npz"), G=Gb, S=Sg,
                  hist=np.asarray(hist), best_sim=best[0], best_iter=best[2],
                  ref=a.ref, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
-                 nl_adv=a.nl_adv, Ld=fit.p["Ld"], amp=a.amp)
+                 nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale,
+                 amp=a.amp)
         print(f"  wrote results/torchfit_{a.tag}.npz")
 
 
