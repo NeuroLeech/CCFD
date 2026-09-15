@@ -88,7 +88,7 @@ def interp_weights(idx, ref_frames, nframes):
 
 class Fit:
     def __init__(self, ref, cortex, target, seconds, device="mps", dtype=torch.float32,
-                 amp=2e-4, nl_flux=0.0, chunk=0):
+                 amp=2e-4, nl_flux=0.0, nl_adv=0.0, Ld=None, chunk=0):
         import fluid as fl
         self.ref, self.c, self.t = ref, cortex, target
         # The SIMULATION runs on `dev`; the complex arithmetic - building the drive from
@@ -98,8 +98,20 @@ class Fit:
         self.dev, self.cdev, self.dtype = device, "cpu", dtype
         self.amp, self.save = amp, ref["save"]
         self.p, _, _ = bo_step.unpack(ref["x"], cortex)
+        if "maps" in ref and len(ref["maps"]):
+            self.p = dict(self.p)
+            self.p["maps"] = tuple(str(v) for v in ref["maps"])
+            self.p["a"] = np.asarray(ref["map_a"], float)
+            self.p["b"] = np.asarray(ref["map_b"], float)
+        if Ld is not None:
+            # Ld sets the Coriolis parameter f = 1/Ld and nothing else in fl.build, so
+            # overriding it here changes the rotation rate and leaves the rest of the
+            # medium alone. self.p is what score_realisation integrates too, so the
+            # evaluation sees the same rotation the descent does.
+            self.p = dict(self.p); self.p["Ld"] = float(Ld)
         s, dt, g, Hf = fl.build(cortex, self.p)
-        self.sw = torch_swe.TorchSWE(s, dtype=dtype, device=device, nl_flux=nl_flux)
+        self.sw = torch_swe.TorchSWE(s, dtype=dtype, device=device, nl_flux=nl_flux,
+                                     nl_adv=nl_adv, cortex=cortex)
         self.np_solver, self.dt, self.g, self.Hf = s, dt, g, Hf
         self.nframes = timescale.frames_for(seconds, ref["frame_s"])
         self.nsteps = self.nframes * self.save
@@ -175,13 +187,13 @@ class Fit:
     def run_fn(self):
         """An integrator for `score_realisation`, or None to let it use numpy's.
 
-        The numpy solver has no nl_flux. Under a nonlinearity its field is NOT the field
+        The numpy solver has neither nl_flux nor nl_adv. Under a nonlinearity its field is NOT the field
         being descended, so scoring through it would report the linear score for a
         nonlinear fit - the one discrepancy that would invalidate the whole run rather
         than just add noise. `run_fn` is the hook the module already provides for this.
         At nl_flux 0 it is left alone, so the linear runs keep an independent numpy check
         on the torch path (the two agree to 2e-7)."""
-        if self.sw.nl_flux == 0.0:
+        if self.sw.nl_flux == 0.0 and self.sw.nl_adv == 0.0:
             return None
 
         def _run(d, nsteps, save):
@@ -237,6 +249,13 @@ def main():
                          "out a warm start in three steps")
     ap.add_argument("--amp", type=float, default=2e-4)
     ap.add_argument("--nl-flux", type=float, default=0.0, dest="nl_flux")
+    ap.add_argument("--nl-adv", type=float, default=0.0, dest="nl_adv",
+                    help="momentum advection, vector-invariant (see core/torch_swe.py)")
+    ap.add_argument("--ld", type=float, default=None, dest="Ld",
+                    help="override the rotation length scale; f = 1/Ld. The incumbent "
+                         "15827.6 gives an inertial period of 23,026 s, ten times the "
+                         "longest realisation, so rotation is inert. 52.4 gives 76 s, "
+                         "inside the 0.01-0.08 Hz the measurement can see")
     ap.add_argument("--device", default="mps")
     ap.add_argument("--eval-every", type=int, default=25, dest="eval_every")
     ap.add_argument("--eval-draws", type=int, default=6, dest="eval_draws",
@@ -259,11 +278,13 @@ def main():
     ref = load_reference(a.ref)
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
-    fit = Fit(ref, c, t, a.seconds, device=a.device, amp=a.amp, nl_flux=a.nl_flux)
+    fit = Fit(ref, c, t, a.seconds, device=a.device, amp=a.amp, nl_flux=a.nl_flux,
+              nl_adv=a.nl_adv, Ld=a.Ld)
     print(f"  ref {a.ref}: {fit.K} pieces, {len(ref['idx'])} solved frequencies, "
           f"{len(ref['sub'])} vertices")
     print(f"  realise {fit.nframes} frames ({a.seconds:.0f}s) = {fit.nsteps} steps, "
-          f"chunk {fit.chunk}, amp {a.amp:g}, nl_flux {a.nl_flux:g}, device {a.device}")
+          f"chunk {fit.chunk}, amp {a.amp:g}, nl_flux {a.nl_flux:g}, "
+          f"nl_adv {a.nl_adv:g}, Ld {fit.p['Ld']:.1f}, device {a.device}")
 
     cdt = torch.complex64 if fit.dtype == torch.float32 else torch.complex128
     if a.init == "warm":
@@ -357,7 +378,8 @@ def main():
     if a.tag:
         np.savez(os.path.join(RESULTS, f"torchfit_{a.tag}.npz"), G=Gb, S=Sg,
                  hist=np.asarray(hist), best_sim=best[0], best_iter=best[2],
-                 ref=a.ref, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux, amp=a.amp)
+                 ref=a.ref, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
+                 nl_adv=a.nl_adv, Ld=fit.p["Ld"], amp=a.amp)
         print(f"  wrote results/torchfit_{a.tag}.npz")
 
 
