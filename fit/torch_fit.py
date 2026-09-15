@@ -88,7 +88,8 @@ def interp_weights(idx, ref_frames, nframes):
 
 class Fit:
     def __init__(self, ref, cortex, target, seconds, device="mps", dtype=torch.float32,
-                 amp=2e-4, nl_flux=0.0, nl_adv=0.0, Ld=None, chunk=0):
+                 amp=2e-4, nl_flux=0.0, nl_adv=0.0, Ld=None, maps_scale=1.0,
+                 chunk=0):
         import fluid as fl
         self.ref, self.c, self.t = ref, cortex, target
         # The SIMULATION runs on `dev`; the complex arithmetic - building the drive from
@@ -98,11 +99,17 @@ class Fit:
         self.dev, self.cdev, self.dtype = device, "cpu", dtype
         self.amp, self.save = amp, ref["save"]
         self.p, _, _ = bo_step.unpack(ref["x"], cortex)
-        if "maps" in ref and len(ref["maps"]):
+        # bo_step.unpack already takes the speed/damping map coefficients from x[4:10];
+        # they are the same a and b best_fit saves as map_a/map_b.
+        if maps_scale != 1.0:
+            # The depth field grades wave speed AND sets the bed. At full scale H spans
+            # 0.119-3.914 and the thinnest point is 9.6x below the mean, so (H + h) turns
+            # negative there long before it does anywhere typical - the sheet's amplitude
+            # ceiling is set by its weakest patch. Flattening removes that, and also
+            # doubles dt, because dt = CFL*d_min/c_max and c_max falls to 1.
             self.p = dict(self.p)
-            self.p["maps"] = tuple(str(v) for v in ref["maps"])
-            self.p["a"] = np.asarray(ref["map_a"], float)
-            self.p["b"] = np.asarray(ref["map_b"], float)
+            self.p["a"] = np.asarray(self.p["a"], float) * maps_scale
+            self.p["b"] = np.asarray(self.p["b"], float) * maps_scale
         if Ld is not None:
             # Ld sets the Coriolis parameter f = 1/Ld and nothing else in fl.build, so
             # overriding it here changes the rotation rate and leaves the rest of the
@@ -251,6 +258,11 @@ def main():
     ap.add_argument("--nl-flux", type=float, default=0.0, dest="nl_flux")
     ap.add_argument("--nl-adv", type=float, default=0.0, dest="nl_adv",
                     help="momentum advection, vector-invariant (see core/torch_swe.py)")
+    ap.add_argument("--maps-scale", type=float, default=1.0, dest="maps_scale",
+                    help="scale the speed/damping map coefficients; 0 flattens the medium. "
+                         "Flattening also changes dt, because dt = CFL*d_min/c_max and "
+                         "c_max falls from 1.978 to 1.0, so the same Ld gives half the "
+                         "inertial period in seconds")
     ap.add_argument("--ld", type=float, default=None, dest="Ld",
                     help="override the rotation length scale; f = 1/Ld. The incumbent "
                          "15827.6 gives an inertial period of 23,026 s, ten times the "
@@ -279,12 +291,16 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
     fit = Fit(ref, c, t, a.seconds, device=a.device, amp=a.amp, nl_flux=a.nl_flux,
-              nl_adv=a.nl_adv, Ld=a.Ld)
+              nl_adv=a.nl_adv, Ld=a.Ld, maps_scale=a.maps_scale)
     print(f"  ref {a.ref}: {fit.K} pieces, {len(ref['idx'])} solved frequencies, "
           f"{len(ref['sub'])} vertices")
     print(f"  realise {fit.nframes} frames ({a.seconds:.0f}s) = {fit.nsteps} steps, "
           f"chunk {fit.chunk}, amp {a.amp:g}, nl_flux {a.nl_flux:g}, "
-          f"nl_adv {a.nl_adv:g}, Ld {fit.p['Ld']:.1f}, device {a.device}")
+          f"nl_adv {a.nl_adv:g}, Ld {fit.p['Ld']:.1f}, maps x{a.maps_scale:g}, "
+          f"device {a.device}")
+    _Ti = 2 * np.pi * fit.p["Ld"] / fit.dt * (ref["frame_s"] / fit.save)
+    print(f"  H {fit.Hf.min():.4f}-{fit.Hf.max():.4f}, dt {fit.dt:.4f}, "
+          f"inertial period {_Ti:.0f}s ({_Ti/a.seconds:.2f} of the realisation)")
 
     cdt = torch.complex64 if fit.dtype == torch.float32 else torch.complex128
     if a.init == "warm":
