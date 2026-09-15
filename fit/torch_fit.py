@@ -172,8 +172,28 @@ class Fit:
         return torch.view_as_complex(r.contiguous())
 
     # ---------------- the authoritative score, via the repo's own path ----------------
+    def run_fn(self):
+        """An integrator for `score_realisation`, or None to let it use numpy's.
+
+        The numpy solver has no nl_flux. Under a nonlinearity its field is NOT the field
+        being descended, so scoring through it would report the linear score for a
+        nonlinear fit - the one discrepancy that would invalidate the whole run rather
+        than just add noise. `run_fn` is the hook the module already provides for this.
+        At nl_flux 0 it is left alone, so the linear runs keep an independent numpy check
+        on the torch path (the two agree to 2e-7)."""
+        if self.sw.nl_flux == 0.0:
+            return None
+
+        def _run(d, nsteps, save):
+            with torch.no_grad():
+                F, _, _ = torch_swe.run(self.sw, np.asarray(d.Aser[:nsteps]),
+                                        np.asarray(d.P), self.dt, self.g, self.Hf,
+                                        save=save, chunk=0)
+            return np.asarray(F.cpu().numpy(), np.float32), self.dt
+        return _run
+
     def realised(self, G, seeds=(0, 1, 2, 3, 4, 5)):
-        """Simulate in numpy and score with `score_realisation`. No torch in the loop."""
+        """Simulate and score with `score_realisation`, the repo's own scorer."""
         out = []
         for sd in seeds:
             gen = torch.Generator(device=self.cdev).manual_seed(10_000 + sd)
@@ -184,7 +204,7 @@ class Fit:
                 self.c, self.t, self.p, Af, save=self.save, amp=self.amp,
                 profiles=self.ref["P"], kernel=self.kern, band=self.ref["band"],
                 frame_s=self.ref["frame_s"], segment=self.ref["segment"] or None,
-                diagnostics=False)
+                diagnostics=False, run_fn=self.run_fn())
             out.append(r["sim"])
         return float(np.mean(out)), float(np.std(out))
 
@@ -226,6 +246,13 @@ def main():
                          "re-scored with 6")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tag", default=None, help="results/torchfit_<tag>.npz")
+    ap.add_argument("--dump", default="", dest="dump",
+                    help="comma-separated iterations at which to write the CURRENT G to "
+                         "results/torchfit_<tag>_it<n>.npz, in the same layout as the "
+                         "final file. The trajectory is not otherwise recoverable, and "
+                         "what the drive does along the way - whether its pieces start "
+                         "out reinforcing and stay, or cross into cancelling - is not "
+                         "readable from the endpoint")
     a = ap.parse_args()
 
     torch.manual_seed(a.seed)
@@ -271,20 +298,46 @@ def main():
             cv.append(xspec.score_realisation(
                 c, t, fit.p, A, save=fit.save, amp=a.amp, profiles=ref["P"],
                 kernel=fit.kern, band=ref["band"], frame_s=ref["frame_s"],
-                segment=ref["segment"] or None, diagnostics=False)["sim"])
+                segment=ref["segment"] or None, diagnostics=False,
+                run_fn=fit.run_fn())["sim"])
         print(f"  convex S realised the repo's way, same length: "
               f"sim {np.mean(cv):+.4f} +- {np.std(cv):.4f}   "
               f"(interpolation gap {m0-np.mean(cv):+.4f})", flush=True)
 
+    dump_at = {int(v) for v in a.dump.split(",") if v.strip()}
+
+    def dump(it):
+        if it not in dump_at or not a.tag:
+            return
+        Gd = G.detach().cpu().numpy()
+        np.savez(os.path.join(RESULTS, f"torchfit_{a.tag}_it{it}.npz"), G=Gd,
+                 S=np.einsum("fab,fcb->fac", Gd, Gd.conj()), best_iter=it, ref=a.ref,
+                 best_sim=np.nan, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
+                 amp=a.amp, hist=np.asarray(hist))
+        print(f"        dumped G at iteration {it}", flush=True)
+
     opt = torch.optim.Adam([G], lr=lr)
     hist, best = [], seed0        # iteration 0 competes, or the first eval always wins
+    dump(0)
+    nskip = 0
     for it in range(1, a.iters + 1):
         t0 = time.time()
         opt.zero_grad()
         obj = fit.score(G, fit.eta())
         (-obj).backward()
+        # (H + h) goes negative where a trough reaches the bed and the scheme blows up.
+        # A single non-finite step would put NaN into G and every later iteration with it,
+        # so the update is skipped instead - the run survives and says how often.
+        bad = (not torch.isfinite(obj)) or (G.grad is None) or \
+              (not torch.isfinite(G.grad).all())
+        if bad:
+            nskip += 1
+            opt.zero_grad()
+            print(f"  {it:4d}  NON-FINITE, update skipped ({nskip} so far)", flush=True)
+            continue
         opt.step()
         hist.append(obj.detach().item())
+        dump(it)
         line = f"  {it:4d}  surrogate {hist[-1]:+.4f}  [{time.time()-t0:.1f}s]"
         if it % a.eval_every == 0 or it == a.iters:
             m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
