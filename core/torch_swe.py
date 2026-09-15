@@ -17,11 +17,7 @@ sparse matrix that has to be kept in sync - and which, unlike torch.sparse, work
 the local wave speed becomes sqrt(g(H+h)) and superposition goes. It is 0 by default, and
 at 0 this integrates exactly the same system as the numpy code.
 
-`nl_adv` is momentum advection, the other half. IT DOES NOT WORK YET and raises - see
-_build_vorticity for why: the solver runs on the intrinsic-Delaunay triangulation and the
-circulation has to be built on that, not on cortex.m. The formulation below is sound and
-its verification is written; only the triangulation is missing. It is written in
-VECTOR-INVARIANT form,
+`nl_adv` is momentum advection, the other half, in VECTOR-INVARIANT form,
 
     du/dt = -grad(g h + |u|^2/2) - (zeta + f) n x u
 
@@ -62,7 +58,7 @@ class TorchSWE:
     RotSWE hold bit-identical operators and differ only in summation order."""
 
     def __init__(self, s, dtype=torch.float64, device="cpu", nl_flux=0.0, nl_adv=0.0,
-                 mesh=None):
+                 cortex=None):
         if s.coupling is not None:
             raise ValueError("the long-range coupling term is not ported")
         self.dtype, self.device = dtype, device
@@ -85,51 +81,43 @@ class TorchSWE:
         self.sig_v = None if s.sig_v is None else T(s.sig_v)
         self.sig_e = None if s.sig_v is None else T(s.sig_e)
         if self.nl_adv != 0.0:
-            self._build_vorticity(mesh, T)
+            self._build_vorticity(cortex, T)
 
-    def _build_vorticity(self, m, T):
-        """Circulation around each triangle -> relative vorticity, averaged to vertices.
+    def _build_vorticity(self, c, T):
+        """Circulation round each triangle of the INTEGRATED mesh -> relative vorticity.
 
-        `SurfaceMesh` builds its edge list as [F[:,[1,2]], F[:,[2,0]], F[:,[0,1]]], which
-        are exactly the three directed legs of the positive circulation about tri_normal,
-        and `edge_of_corner` maps each of those corner-edges onto the sorted unique edge.
-        So the orientation sign is just whether the leg runs along the stored edge or
-        against it - no new connectivity has to be derived.
+        The faces are `cortex.F2`, the intrinsic-Delaunay triangulation the solver's edges,
+        lengths and dual areas all come from - NOT cortex.m, which is the extrinsic mesh the
+        surface arrived with. Building this from m.F instead gave vorticity 1.656 for a
+        discrete gradient field, which must telescope to 0 exactly.
 
-        zeta is taken about the SAME normal the Coriolis cross product uses, so adding it
-        to f is consistent whatever the global sign convention of that term happens to be.
-        """
-        raise NotImplementedError(
-            "nl_adv is not usable yet: it needs the INTRINSIC triangulation.\n"
-            "  mesh_cache.load_cortex runs an intrinsic-Delaunay repair - the thing that\n"
-            "  makes this C-grid stable - so the solver's edges, lengths and dual areas\n"
-            "  come from F2 with intrinsic lengths Lg, NOT from cortex.m. Building the\n"
-            "  circulation from m.F/m.edge_of_corner/m.tri_area silently uses a different\n"
-            "  triangulation: measured, it gave vorticity 1.656 for a discrete gradient\n"
-            "  field, which must be 0 exactly, and an advection term scaling as u rather\n"
-            "  than u^2.\n"
-            "  What is needed: F2 (not stored - cotan_from_lengths discards it and the\n"
-            "  npz cache holds only edges/d/l/A/bnd, so a cache hit never computes it),\n"
-            "  its Heron areas from Lg, and its orientation checked against the normal the\n"
-            "  Coriolis cross product uses. That is a change to the mesh cache format.")
-        if m is None:
-            raise ValueError("nl_adv needs the SurfaceMesh (pass mesh=cortex.m)")
-        nF = len(m.F)
-        legs = [(1, 2), (2, 0), (0, 1)]
-        eidx, sgn = [], []
-        for k, (a, b) in enumerate(legs):
-            e = m.edge_of_corner[k * nF:(k + 1) * nF]
-            eidx.append(e)
-            sgn.append(np.where(m.E[e, 0] == m.F[:, a], 1.0, -1.0))
-        self.vort_e = torch.as_tensor(np.stack(eidx), dtype=torch.long, device=self.device)
-        self.vort_s = T(np.stack(sgn))                         # (3, nF)
-        self.vort_d = T(m.d[np.stack(eidx)])                   # (3, nF)
-        self.tri_area = T(m.tri_area)
-        self.tri_v = torch.as_tensor(np.asarray(m.F.T, np.int64), dtype=torch.long,
-                                     device=self.device)       # (3, nF)
+        F2 is stored already consistently wound about the surface normal (mesh_cache._orient
+        checks it combinatorially), and zeta is taken about that same normal, so adding it
+        to f is consistent with whatever sign convention the Coriolis cross product uses.
+        Triangle areas are the intrinsic ones: a flipped edge joins vertices that are not
+        adjacent on the surface, so its triangle is not the flat one spanned by the three
+        points."""
+        if c is None or getattr(c, "F2", None) is None:
+            raise ValueError("nl_adv needs the intrinsic faces (pass cortex=...)")
+        F2 = np.asarray(c.F2)
+        eidx = {(int(a), int(b)): n for n, (a, b) in enumerate(np.asarray(c.edges))}
+        kk = lambda i, j: (i, j) if i < j else (j, i)
+        eL, sL = [], []
+        for pq in ((1, 2), (2, 0), (0, 1)):          # the three legs of a positive circuit
+            e = np.array([eidx[kk(int(t[pq[0]]), int(t[pq[1]]))] for t in F2])
+            eL.append(e)
+            sL.append(np.where(np.asarray(c.edges)[e, 0] == F2[:, pq[0]], 1.0, -1.0))
+        self.vort_e = torch.as_tensor(np.stack(eL), dtype=torch.long, device=self.device)
+        self.vort_s = T(np.stack(sL))                          # (3, nF)
+        # self.d, not c.d: `grad` divides by self.d, so the circulation of a discrete
+        # gradient telescopes to machine zero only if the same lengths multiply it back
+        self.vort_d = self.d[self.vort_e]                      # (3, nF)
+        self.tri_area = T(np.asarray(c.tri_area))
+        self.tri_v = torch.as_tensor(np.asarray(F2.T, np.int64), dtype=torch.long,
+                                     device=self.device)
         wsum = np.zeros(self.nV)
         for k in range(3):
-            np.add.at(wsum, m.F[:, k], m.tri_area)
+            np.add.at(wsum, F2[:, k], np.asarray(c.tri_area))
         self.vort_wsum = T(np.maximum(wsum, 1e-30))
 
     def vorticity(self, ue):
@@ -249,9 +237,9 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
 # does the port integrate the same system, is its gradient the gradient of what it
 # integrates, and does checkpointing change either.
 # --------------------------------------------------------------------------------------
-def _check_advection(s, mesh, dtype=torch.float64):
+def _check_advection(s, cortex, dtype=torch.float64):
     """Three properties the advection terms must have before any run is worth reading."""
-    sw = TorchSWE(s, dtype=dtype, nl_adv=1.0, mesh=mesh)
+    sw = TorchSWE(s, dtype=dtype, nl_adv=1.0, cortex=cortex)
     rng = np.random.default_rng(0)
 
     # 1. curl of a gradient is zero - exactly, because the directed differences telescope
@@ -272,8 +260,6 @@ def _check_advection(s, mesh, dtype=torch.float64):
         print(f"  energy drift of the rotation term, {lab:9s}: "
               f"{abs(num) / max(den, 1e-300):.3e} of its energy")
 
-    # 3. advection is O(u^2), so halving the amplitude must quarter its relative effect
-    from mesh_cache import load_cortex  # noqa
     return sw
 
 
@@ -358,26 +344,26 @@ def main():
     print(f"checkpoint (chunk 13) vs full tape: loss {abs(L0.item()-L1.item()):.2e}, "
           f"grad {_rel(A1.grad.numpy(), A0.grad.numpy()):.2e}")
 
-    # ---- momentum advection: blocked on the intrinsic triangulation, see _build_vorticity
+    # ---- momentum advection
     from mesh_cache import load_cortex
     cc = load_cortex("fsaverage5", verbose=False)
-    try:
-        _check_advection(s, cc.m)
-    except NotImplementedError as e:
-        print("  momentum advection: NOT ENABLED\n" +
-              "\n".join("    " + ln for ln in str(e).splitlines()))
-        return
+    _check_advection(s, cc)
 
-    swa = TorchSWE(s, dtype=torch.float64, nl_adv=1.0, mesh=cc.m)
+    swa = TorchSWE(s, dtype=torch.float64, nl_adv=1.0, cortex=cc)
     sw0 = TorchSWE(s, dtype=torch.float64)
+    # The ABSOLUTE departure is what must scale as u^2: ||Fa - Fl|| ~ u^2 while ||Fl|| ~ u,
+    # so the RELATIVE departure goes as u and halving the amplitude halves it - which any
+    # term linear in u would also do. Only the absolute norm tells a quadratic term from a
+    # linear one, and it must quarter.
     prev = None
     for mult in (1.0, 0.5, 0.25):
         Fa, _, _ = run(swa, A * mult, P, dt, g, Hf, save=1)
         Fl, _, _ = run(sw0, A * mult, P, dt, g, Hf, save=1)
+        ab = float((Fa - Fl).norm())
         rel = float((Fa - Fl).norm() / Fl.norm())
-        print(f"  advection at amp x{mult:<5g}: departure from linear {rel:.3e}"
-              + (f"   ratio to previous {rel/prev:.3f} (u^2 predicts 0.25)" if prev else ""))
-        prev = rel
+        print(f"  advection at amp x{mult:<5g}: |Fa-Fl| {ab:.4e}  relative {rel:.3e}"
+              + (f"   absolute ratio {ab/prev:.4f} (u^2 requires 0.25)" if prev else ""))
+        prev = ab
 
     At = torch.tensor(np.asarray(A), dtype=torch.float64, requires_grad=True)
     F, _, _ = run(swa, At, P, dt, g, Hf, save=1)
