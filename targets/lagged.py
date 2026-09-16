@@ -112,6 +112,53 @@ def phases(idx, ref_frames, taus):
     return np.exp(-2j * np.pi * np.outer(np.asarray(taus, float), f))
 
 
+def empirical_rbc(taus_tr, fs5_vertices, nsub=None, gsr=True, verbose=True):
+    """Group-mean lagged covariance from the RBC scans the FC target is built from.
+
+    `empirical` above reads fc_group_nki, which applies NO bandpass. The FC target these
+    fits are scored against comes from RBC, which XCP-D denoised and bandpassed to
+    0.01-0.08 Hz, and the passband is most of what sets how much lead-lag structure
+    survives - so the NKI cache is the wrong reference for anything fitted to RBC.
+
+    `fs5_vertices` are fsaverage5 indices, the space the cached scans are in. Lags are in
+    TR. -> (n_tau, n, n), double-centred exactly as the zero-lag target is."""
+    import glob
+    key = (f"laggedrbc_{'-'.join(map(str, taus_tr))}_{len(fs5_vertices)}_"
+           f"{'gsr' if gsr else 'raw'}_{nsub or 'all'}_"
+           f"{abs(hash(tuple(map(int, fs5_vertices)))) % 10**10}.npy")
+    path = os.path.join(CACHE, key)
+    if os.path.exists(path):
+        if verbose:
+            print(f"  loaded {os.path.basename(path)}")
+        return np.load(path)
+    files = sorted(glob.glob(os.path.join(CACHE, "rbc_sub-*_rest_645_*.npz")))[:nsub]
+    if not files:
+        raise FileNotFoundError("no cached RBC rest scans in data/cache")
+    n = len(fs5_vertices)
+    acc = np.zeros((len(taus_tr), n, n))
+    for si, f in enumerate(files, 1):
+        X = np.asarray(np.load(f)["X"][fs5_vertices], np.float64)
+        X -= X.mean(1, keepdims=True)
+        sd = X.std(1, keepdims=True); sd[sd == 0] = 1.0
+        X /= sd
+        if gsr:
+            g = X.mean(0); g -= g.mean()
+            X = X - np.outer((X @ g) / max(float(g @ g), 1e-30), g)
+        T = X.shape[1]
+        for k, L in enumerate(taus_tr):
+            A = X[:, :T - L] if L else X
+            B = X[:, L:] if L else X
+            acc[k] += (A @ B.T) / B.shape[1]
+        if verbose and si % 25 == 0:
+            print(f"    {si}/{len(files)} subjects", flush=True)
+    acc /= len(files)
+    out = np.stack([double_centre_ns(acc[k]) for k in range(len(taus_tr))])
+    np.save(path, out)
+    if verbose:
+        print(f"  wrote {os.path.basename(path)} from {len(files)} subjects")
+    return out
+
+
 def model_lagged(H, w, S, ph):
     """-> (n_tau, nV, nV) predicted lagged covariances, double-centred.
 

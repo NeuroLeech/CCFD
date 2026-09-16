@@ -89,7 +89,7 @@ def interp_weights(idx, ref_frames, nframes):
 class Fit:
     def __init__(self, ref, cortex, target, seconds, device="mps", dtype=torch.float32,
                  amp=2e-4, nl_flux=0.0, nl_adv=0.0, Ld=None, maps_scale=1.0,
-                 chunk=0):
+                 lag_taus=(), wa=1.0, chunk=0):
         import fluid as fl
         self.ref, self.c, self.t = ref, cortex, target
         # The SIMULATION runs on `dev`; the complex arithmetic - building the drive from
@@ -153,6 +153,26 @@ class Fit:
                    torch.as_tensor(iu[1], dtype=torch.long, device="cpu"))
         self.burn = target.burn
 
+        # ---- the lagged term. Zero-lag FC is a second moment and cannot see lead-lag at
+        # all: Phi(tau) splits into a symmetric part, which tau=0 already constrains, and
+        # an ANTISYMMETRIC part, which it is blind to. Measured on this medium the fits
+        # carry 1.5-1.9x the data's antisymmetry at 1-5 TR, reproducible across
+        # realisations (seed-seed corr 0.62-0.65), so it is a real and unconstrained
+        # mismatch - and the convex solve shows it as strongly as the gradient ones.
+        self.wa, self.lag_L = float(wa), []
+        self.lagA = None
+        if len(lag_taus):
+            import lagged as _lg
+            over = int(round(timescale.TR / ref["frame_s"]))
+            self.lag_L = [int(k) * over for k in lag_taus]
+            fs5 = np.asarray(cortex.old)[np.asarray(target.cols)[ref["sub"]]]
+            E = _lg.empirical_rbc(list(lag_taus), fs5, gsr=False)
+            An = np.stack([0.5 * (E[k] - E[k].T) for k in range(len(lag_taus))])
+            An = An / max(np.linalg.norm(An), 1e-30)
+            self.lagA = torch.as_tensor(An.ravel().copy(), dtype=dtype, device="cpu")
+            print(f"  lagged term: taus {list(lag_taus)} TR = {self.lag_L} model frames, "
+                  f"weight {self.wa:g}")
+
     # ---------------- the differentiable path ----------------
     def drive(self, G, eta):
         """G (nfreq, K, K) complex -> A (nsteps, K), the per-step amplitudes."""
@@ -174,7 +194,22 @@ class Fit:
         X = X - X.mean(0, keepdim=True)
         return (X / X.std(0, keepdim=True).clamp_min(1e-20)).T      # (nsub, T)
 
-    def score(self, G, eta):
+    def lag_score(self, Z):
+        """Correlation between the model's antisymmetric Phi(tau) and the data's.
+
+        Double-centred the same way the zero-lag target is, which is what removes the
+        global component; the antisymmetric part is then orthogonal to everything tau=0
+        constrains, so this adds information rather than re-weighting it."""
+        T = Z.shape[1]
+        parts = []
+        for L in self.lag_L:
+            P = (Z[:, :T - L] @ Z[:, L:].T) / (T - L)
+            P = P - P.mean(0, keepdim=True) - P.mean(1, keepdim=True) + P.mean()
+            parts.append((0.5 * (P - P.T)).reshape(-1))
+        v = torch.cat(parts)
+        return (v / v.norm().clamp_min(1e-20)) @ self.lagA
+
+    def score(self, G, eta, parts=False):
         A = self.drive(G, eta)
         F, _, _ = torch_swe.run(self.sw, A, self.Pt, self.dt, self.g, self.Hf,
                                 save=self.save, chunk=self.chunk, keep=self.cols)
@@ -183,7 +218,12 @@ class Fit:
         M = M - M.mean(0, keepdim=True) - M.mean(1, keepdim=True) + M.mean()
         e = M[self.iu]
         e = e - e.mean()
-        return (e / e.norm().clamp_min(1e-20)) @ self.y
+        z0 = (e / e.norm().clamp_min(1e-20)) @ self.y
+        if self.lagA is None:
+            return (z0, z0, None) if parts else z0
+        zl = self.lag_score(Z)
+        tot = (z0 + self.wa * zl) / (1.0 + self.wa)
+        return (tot, z0, zl) if parts else tot
 
     def eta(self, gen=None):
         r = torch.randn(self.nb, self.K, 2, dtype=self.dtype, device=self.cdev,
@@ -258,6 +298,11 @@ def main():
     ap.add_argument("--nl-flux", type=float, default=0.0, dest="nl_flux")
     ap.add_argument("--nl-adv", type=float, default=0.0, dest="nl_adv",
                     help="momentum advection, vector-invariant (see core/torch_swe.py)")
+    ap.add_argument("--lag-taus", default="", dest="lag_taus",
+                    help="comma-separated lags in TR for the lead-lag term, e.g. 1,3,5. "
+                         "Empty turns it off and the objective is zero-lag FC alone")
+    ap.add_argument("--wa", type=float, default=1.0,
+                    help="weight on the lagged term against the zero-lag one")
     ap.add_argument("--maps-scale", type=float, default=1.0, dest="maps_scale",
                     help="scale the speed/damping map coefficients; 0 flattens the medium. "
                          "Flattening also changes dt, because dt = CFL*d_min/c_max and "
@@ -291,7 +336,8 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
     fit = Fit(ref, c, t, a.seconds, device=a.device, amp=a.amp, nl_flux=a.nl_flux,
-              nl_adv=a.nl_adv, Ld=a.Ld, maps_scale=a.maps_scale)
+              nl_adv=a.nl_adv, Ld=a.Ld, maps_scale=a.maps_scale, wa=a.wa,
+              lag_taus=[int(v) for v in a.lag_taus.split(",") if v.strip()])
     print(f"  ref {a.ref}: {fit.K} pieces, {len(ref['idx'])} solved frequencies, "
           f"{len(ref['sub'])} vertices")
     print(f"  realise {fit.nframes} frames ({a.seconds:.0f}s) = {fit.nsteps} steps, "
@@ -364,7 +410,7 @@ def main():
     for it in range(1, a.iters + 1):
         t0 = time.time()
         opt.zero_grad()
-        obj = fit.score(G, fit.eta())
+        obj, z0, zl = fit.score(G, fit.eta(), parts=True)
         (-obj).backward()
         # (H + h) goes negative where a trough reaches the bed and the scheme blows up.
         # A single non-finite step would put NaN into G and every later iteration with it,
@@ -379,7 +425,9 @@ def main():
         opt.step()
         hist.append(obj.detach().item())
         dump(it)
-        line = f"  {it:4d}  surrogate {hist[-1]:+.4f}  [{time.time()-t0:.1f}s]"
+        line = (f"  {it:4d}  surrogate {hist[-1]:+.4f}  [{time.time()-t0:.1f}s]"
+                + ("" if zl is None else
+                   f"  (fc {z0.detach().item():+.4f}, lag {zl.detach().item():+.4f})"))
         if it % a.eval_every == 0 or it == a.iters:
             m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised sim {m:+.4f} +- {s:.4f}"
