@@ -343,6 +343,19 @@ class Fit:
         return float(np.mean(out)), float(np.std(out))
 
 
+def _medium_state(fit, a):
+    """The learned grading, so a saved solution can be rebuilt.
+
+    Without this a run that fits the medium saves only G, and G alone does not define a
+    solution: replayed in the baseline medium it is a different system. --learn-maps ran
+    once before this existed and that run is not reproducible."""
+    if not getattr(a, "learn_maps", 0):
+        return {}
+    return dict(learn_maps=a.learn_maps,
+                map_a=fit.a_raw.detach().cpu().numpy(),
+                map_b=fit.b_raw.detach().cpu().numpy())
+
+
 def warm_start(S, dtype, device):
     """G = U sqrt(ev) per bin: the convex solution's own factor, so S = G G^H exactly."""
     G = np.zeros_like(S)
@@ -485,7 +498,7 @@ def main():
                  S=np.einsum("fab,fcb->fac", Gd, Gd.conj()), best_iter=it, ref=a.ref,
                  best_sim=np.nan, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
                  nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale,
-                 amp=a.amp, hist=np.asarray(hist))
+                 amp=a.amp, hist=np.asarray(hist), **_medium_state(fit, a))
         print(f"        dumped G at iteration {it}", flush=True)
 
     groups = [{"params": [G], "lr": lr}]
@@ -551,7 +564,7 @@ def main():
                  hist=np.asarray(hist), best_sim=best[0], best_iter=best[2],
                  ref=a.ref, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
                  nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale,
-                 amp=a.amp)
+                 amp=a.amp, **_medium_state(fit, a))
         print(f"  wrote results/torchfit_{a.tag}.npz")
 
 
