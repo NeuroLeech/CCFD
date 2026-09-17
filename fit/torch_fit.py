@@ -173,6 +173,63 @@ class Fit:
             print(f"  lagged term: taus {list(lag_taus)} TR = {self.lag_L} model frames, "
                   f"weight {self.wa:g}")
 
+    # ---------------- the medium, when its grading is a free variable ----------------
+    def init_medium(self, bound):
+        """Make the speed/damping map coefficients differentiable, bounded either side.
+
+        The same family fluid.map_fields builds - c(x) = c0 exp(a.M), sig(x) = sig0 exp(b.M)
+        over the z-scored cortical maps - with a and b free instead of fixed, and squashed
+        so the multiplier stays inside [1/bound, bound]:
+
+            mult = exp(L tanh((a.M)/L)),  L = ln(bound)
+
+        tanh rather than a clamp so the gradient never dies at the edge of the range.
+
+        THE BOUND IS ON DEPTH, not on speed. What limits how hard the sheet can be driven
+        is its thinnest point - (H + h) grounds there first - so bounding c would leave H
+        free over bound^2 either way, which at bound 3 is 81x, looser than the incumbent's
+        33x and the opposite of the point. Bounded on H, bound 3 gives 9x, and the
+        incumbent medium is already outside that: initialising from it and squashing takes
+        H_min up from 0.119 to about 0.43, which is the headroom being bought.
+
+        SPEED IS RENORMALISED so its maximum equals the baseline's. dt follows the CFL
+        condition at the fastest point on the sheet, so an optimiser free to raise c.max()
+        would silently violate the bound dt was chosen for; pinning the maximum keeps dt,
+        the clock and the comparability of every earlier run intact. Nothing is lost by it:
+        c*dt = CFL*d_min whatever c is, which is why bo_step found c0 inert. What the
+        coefficients control is the SHAPE of the grading, which is the part that matters.
+
+        The sponge is not learnable - it is the absorbing boundary, not the medium."""
+        import fluid as fl
+        from cortical_maps import load_maps
+        from swe_rot import sponge_profile
+        from genome import SPONGE_STRENGTH_FIXED, SPONGE_WIDTH_FIXED
+        mp = load_maps(self.c, self.p["maps"], verbose=False)
+        M = np.stack([mp[k] for k in self.p["maps"]])
+        self.Mz = torch.as_tensor(M, dtype=self.dtype, device=self.dev)
+        self.a_raw = torch.tensor(np.asarray(self.p["a"], float), dtype=self.dtype,
+                                  device=self.dev, requires_grad=True)
+        self.b_raw = torch.tensor(np.asarray(self.p["b"], float), dtype=self.dtype,
+                                  device=self.dev, requires_grad=True)
+        self.c0, self.sig0 = float(self.p["c0"]), float(self.p["sig0"])
+        cbase, _ = fl.fields(self.c, self.p)
+        self.cmax_ref = float(np.max(cbase))
+        spg = self.p.get("sponge_scale", 1.0) * sponge_profile(
+            self.c.V, self.c.edges, self.c.bnd, SPONGE_WIDTH_FIXED, SPONGE_STRENGTH_FIXED)
+        self.sponge = torch.as_tensor(spg, dtype=self.dtype, device=self.dev)
+        self.Lb = float(np.log(bound))
+        self.Ei = self.sw.Ei
+        self.Ej = self.sw.Ej
+
+    def medium(self):
+        """-> (H per vertex, damping per vertex), both carrying gradient."""
+        L = self.Lb
+        hm = torch.exp(L * torch.tanh((2.0 * (self.a_raw @ self.Mz)) / L))
+        H = (self.c0 ** 2) * hm
+        H = H * ((self.cmax_ref ** 2) / H.max())      # pin the CFL-setting maximum
+        sm = torch.exp(L * torch.tanh((self.b_raw @ self.Mz) / L))
+        return H, self.sig0 * sm + self.sponge
+
     # ---------------- the differentiable path ----------------
     def drive(self, G, eta):
         """G (nfreq, K, K) complex -> A (nsteps, K), the per-step amplitudes."""
@@ -209,9 +266,23 @@ class Fit:
         v = torch.cat(parts)
         return (v / v.norm().clamp_min(1e-20)) @ self.lagA
 
+    def apply_medium(self):
+        """Install the learned damping on the solver and return the learned H.
+
+        Both the descent and the evaluation go through here, so they cannot integrate
+        different media - the failure mode that made the first nonlinear run report linear
+        scores. Returns the fixed Hf untouched when the medium is not being learned."""
+        if getattr(self, "a_raw", None) is None:
+            return self.Hf
+        H, sig = self.medium()
+        self.sw.sig_v = sig
+        self.sw.sig_e = 0.5 * (sig[self.Ei] + sig[self.Ej])
+        return H
+
     def score(self, G, eta, parts=False):
         A = self.drive(G, eta)
-        F, _, _ = torch_swe.run(self.sw, A, self.Pt, self.dt, self.g, self.Hf,
+        H = self.apply_medium()
+        F, _, _ = torch_swe.run(self.sw, A, self.Pt, self.dt, self.g, H,
                                 save=self.save, chunk=self.chunk, keep=self.cols)
         Z = self.observable(F)
         M = (Z @ Z.T) / Z.shape[1]
@@ -234,19 +305,23 @@ class Fit:
     def run_fn(self):
         """An integrator for `score_realisation`, or None to let it use numpy's.
 
-        The numpy solver has neither nl_flux nor nl_adv. Under a nonlinearity its field is NOT the field
+        The numpy solver has neither nl_flux nor nl_adv, and it cannot express a learned
+        medium at all: the squashed grading L*tanh((a.M)/L) is not of the form a'.M, so
+        there is no coefficient vector to hand fluid.map_fields that would reproduce it. Under a nonlinearity its field is NOT the field
         being descended, so scoring through it would report the linear score for a
         nonlinear fit - the one discrepancy that would invalidate the whole run rather
         than just add noise. `run_fn` is the hook the module already provides for this.
         At nl_flux 0 it is left alone, so the linear runs keep an independent numpy check
         on the torch path (the two agree to 2e-7)."""
-        if self.sw.nl_flux == 0.0 and self.sw.nl_adv == 0.0:
+        if (self.sw.nl_flux == 0.0 and self.sw.nl_adv == 0.0
+                and getattr(self, "a_raw", None) is None):
             return None
 
         def _run(d, nsteps, save):
             with torch.no_grad():
+                H = self.apply_medium()
                 F, _, _ = torch_swe.run(self.sw, np.asarray(d.Aser[:nsteps]),
-                                        np.asarray(d.P), self.dt, self.g, self.Hf,
+                                        np.asarray(d.P), self.dt, self.g, H,
                                         save=save, chunk=0)
             return np.asarray(F.cpu().numpy(), np.float32), self.dt
         return _run
@@ -303,6 +378,16 @@ def main():
                          "Empty turns it off and the objective is zero-lag FC alone")
     ap.add_argument("--wa", type=float, default=1.0,
                     help="weight on the lagged term against the zero-lag one")
+    ap.add_argument("--learn-maps", type=float, default=0.0, dest="learn_maps",
+                    metavar="BOUND",
+                    help="also fit the speed/damping map coefficients, with the per-vertex "
+                         "multiplier held inside [1/BOUND, BOUND]. 0 (default) leaves the "
+                         "medium fixed. Speed is renormalised so its maximum, which sets "
+                         "dt through the CFL condition, does not move")
+    ap.add_argument("--map-lr", type=float, default=0.02, dest="map_lr",
+                    help="Adam step for the map coefficients, as a fraction of their "
+                         "initial RMS (they are 6 numbers of order 0.3, not 300k of "
+                         "order 0.002, so they need their own scale)")
     ap.add_argument("--maps-scale", type=float, default=1.0, dest="maps_scale",
                     help="scale the speed/damping map coefficients; 0 flattens the medium. "
                          "Flattening also changes dt, because dt = CFL*d_min/c_max and "
@@ -403,7 +488,20 @@ def main():
                  amp=a.amp, hist=np.asarray(hist))
         print(f"        dumped G at iteration {it}", flush=True)
 
-    opt = torch.optim.Adam([G], lr=lr)
+    groups = [{"params": [G], "lr": lr}]
+    if a.learn_maps:
+        fit.init_medium(a.learn_maps)
+        mrms = float(np.sqrt(np.mean(np.concatenate(
+            [fit.a_raw.detach().cpu().numpy(), fit.b_raw.detach().cpu().numpy()]) ** 2)))
+        groups.append({"params": [fit.a_raw, fit.b_raw], "lr": a.map_lr * mrms})
+        with torch.no_grad():
+            H0, s0f = fit.medium()
+        print(f"  medium free, depth multiplier within [1/{a.learn_maps:g}, "
+              f"{a.learn_maps:g}]: H {float(H0.min()):.3f}-{float(H0.max()):.3f} "
+              f"({float(H0.max()/H0.min()):.1f}x, from {fit.Hf.min():.3f}-"
+              f"{fit.Hf.max():.3f} = {fit.Hf.max()/fit.Hf.min():.1f}x fixed), "
+              f"damping x{float(s0f.max()/s0f.min()):.1f}, map lr {a.map_lr*mrms:.3g}")
+    opt = torch.optim.Adam(groups)
     hist, best = [], seed0        # iteration 0 competes, or the first eval always wins
     dump(0)
     nskip = 0
@@ -429,6 +527,11 @@ def main():
                 + ("" if zl is None else
                    f"  (fc {z0.detach().item():+.4f}, lag {zl.detach().item():+.4f})"))
         if it % a.eval_every == 0 or it == a.iters:
+            if a.learn_maps:
+                with torch.no_grad():
+                    Hn, sn = fit.medium()
+                line += (f"  [H {float(Hn.min()):.2f}-{float(Hn.max()):.2f}, "
+                         f"sig x{float(sn.max()/sn.min()):.1f}]")
             m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised sim {m:+.4f} +- {s:.4f}"
             if m > best[0]:
