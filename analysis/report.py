@@ -30,6 +30,19 @@ NUCLEUS = {
 PARCEL_NUC = {p: n for n, ps in NUCLEUS.items() for p in ps}
 
 
+def nucleus_of(tag):
+    """The driving nucleus for a piece, or "?" when this basis does not carry one.
+
+    NUCLEUS is keyed by the Glasser indices of the 47-piece `subcortical` set. The
+    ascending bases name their pieces differently - 'V1_0', 'G_OFC_1', '3b_2' - so the
+    leading token is usually not a number and there is nothing to look up. Returning "?"
+    says the grouping is absent on this basis, which is true; it is not a claim that the
+    piece has no thalamic input.
+    """
+    head = str(tag).split("_")[0]
+    return PARCEL_NUC.get(int(head), "?") if head.isdigit() else "?"
+
+
 def load_all(tag, ref_tag="torchref"):
     import torch, fc_score
     from torch_fit import Fit, load_reference
@@ -283,7 +296,7 @@ def sec_inputs(out, c, rz, drive):
 
     order = np.argsort(sd)[::-1]
     fig, ax = plt.subplots(2, 1, figsize=(13, 6.4), sharex=True)
-    nuc = [PARCEL_NUC.get(int(t.split("_")[0]), "?") for t in tags]
+    nuc = [nucleus_of(t) for t in tags]
     uniq = sorted(set(nuc)); col = {n: plt.cm.tab10(i % 10) for i, n in enumerate(uniq)}
     for a_, v, nm in ((ax[0], sd, "drive sd"), (ax[1], ma, "drive mean |a|")):
         a_.bar(range(len(tags)), v[order], color=[col[nuc[i]] for i in order])
@@ -377,7 +390,7 @@ def sec_interference_pathways(out, c, t, rz, var_k, tot):
                 facecolor="white")
     plt.close(fig)
 
-    nuc = [PARCEL_NUC.get(int(tg.split("_")[0]), "?") for tg in tags]
+    nuc = [nucleus_of(tg) for tg in tags]
     uniq = sorted(set(nuc))
     G = np.stack([var_k[[k for k, n in enumerate(nuc) if n == u]].sum(0) for u in uniq])
     tot_v = G.sum(0)
