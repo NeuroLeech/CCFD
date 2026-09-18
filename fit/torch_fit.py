@@ -447,6 +447,7 @@ def main():
           f"inertial period {_Ti:.0f}s ({_Ti/a.seconds:.2f} of the realisation)")
 
     cdt = torch.complex64 if fit.dtype == torch.float32 else torch.complex128
+    prev = None
     if a.init == "warm":
         G = warm_start(ref["S"], fit.dtype, fit.cdev)
     elif a.init.startswith("from:"):
@@ -466,9 +467,52 @@ def main():
     print(f"  init {a.init}: |G|_F {float(G.detach().abs().pow(2).sum().sqrt()):.4g}, "
           f"RMS entry {rms:.3g} -> Adam lr {lr:.3g}")
 
+    # The medium is built BEFORE the iteration-0 baseline, not after. `realised` routes
+    # through the torch integrator and integrates whatever `apply_medium` installs, so
+    # building it later measured the baseline on the FIXED medium - whose 0.119 floor is
+    # 9.6x below its mean and grounds at any amplitude the bounded medium tolerates. That
+    # returned a NaN baseline, and a NaN seeds `best` with a value no later score can
+    # beat, because every comparison against NaN is False. The baseline belongs on the
+    # medium the descent actually starts from.
+    groups = [{"params": [G], "lr": lr}]
+    if a.learn_maps:
+        fit.init_medium(a.learn_maps)
+        # A continuation must resume the MEDIUM as well as G. init_medium always seeds
+        # a_raw/b_raw from the incumbent coefficients, so without this the checkpoint's
+        # fitted G lands in the baseline grading - a different system, which is the exact
+        # failure _medium_state was written to prevent. Restored AFTER init_medium, never
+        # by overwriting p["a"]/p["b"] before it: init_medium takes cmax_ref from
+        # fl.fields(c, p) to pin the CFL-setting speed maximum, so editing p would move
+        # that pin and rebuild a medium that is not the one the checkpoint left.
+        if prev is not None and "map_a" in prev:
+            if float(prev["learn_maps"]) != float(a.learn_maps):
+                raise SystemExit(
+                    f"  --learn-maps {a.learn_maps:g} but {a.init[5:]} was fitted at "
+                    f"{float(prev['learn_maps']):g}: the tanh bound differs, so its "
+                    f"coefficients do not describe the same medium here")
+            with torch.no_grad():
+                fit.a_raw.copy_(torch.as_tensor(prev["map_a"], dtype=fit.dtype,
+                                                device=fit.dev))
+                fit.b_raw.copy_(torch.as_tensor(prev["map_b"], dtype=fit.dtype,
+                                                device=fit.dev))
+            print(f"  resumed the learned grading from {a.init[5:]}")
+        mrms = float(np.sqrt(np.mean(np.concatenate(
+            [fit.a_raw.detach().cpu().numpy(), fit.b_raw.detach().cpu().numpy()]) ** 2)))
+        groups.append({"params": [fit.a_raw, fit.b_raw], "lr": a.map_lr * mrms})
+        with torch.no_grad():
+            H0, s0f = fit.medium()
+        print(f"  medium free, depth multiplier within [1/{a.learn_maps:g}, "
+              f"{a.learn_maps:g}]: H {float(H0.min()):.3f}-{float(H0.max()):.3f} "
+              f"({float(H0.max()/H0.min()):.1f}x, from {fit.Hf.min():.3f}-"
+              f"{fit.Hf.max():.3f} = {fit.Hf.max()/fit.Hf.min():.1f}x fixed), "
+              f"damping x{float(s0f.max()/s0f.min()):.1f}, map lr {a.map_lr*mrms:.3g}")
+
     m0, s0 = fit.realised(G, seeds=tuple(range(a.eval_draws)))
     print(f"  iteration 0 realised: sim {m0:+.4f} +- {s0:.4f}", flush=True)
-    seed0 = (m0, G.detach().cpu().numpy().copy(), 0)
+    # A non-finite baseline must not become `best`: `m > nan` is False for every m, so
+    # a NaN seed silently disables best-tracking for the whole run.
+    seed0 = ((m0, G.detach().cpu().numpy().copy(), 0) if np.isfinite(m0)
+             else (-np.inf, None, 0))
     if a.init == "warm":
         # The one thing the G-vs-S interpolation difference could cost. Same S, same
         # length, same seeds, realised the repo's way instead of this module's.
@@ -501,19 +545,6 @@ def main():
                  amp=a.amp, hist=np.asarray(hist), **_medium_state(fit, a))
         print(f"        dumped G at iteration {it}", flush=True)
 
-    groups = [{"params": [G], "lr": lr}]
-    if a.learn_maps:
-        fit.init_medium(a.learn_maps)
-        mrms = float(np.sqrt(np.mean(np.concatenate(
-            [fit.a_raw.detach().cpu().numpy(), fit.b_raw.detach().cpu().numpy()]) ** 2)))
-        groups.append({"params": [fit.a_raw, fit.b_raw], "lr": a.map_lr * mrms})
-        with torch.no_grad():
-            H0, s0f = fit.medium()
-        print(f"  medium free, depth multiplier within [1/{a.learn_maps:g}, "
-              f"{a.learn_maps:g}]: H {float(H0.min()):.3f}-{float(H0.max()):.3f} "
-              f"({float(H0.max()/H0.min()):.1f}x, from {fit.Hf.min():.3f}-"
-              f"{fit.Hf.max():.3f} = {fit.Hf.max()/fit.Hf.min():.1f}x fixed), "
-              f"damping x{float(s0f.max()/s0f.min()):.1f}, map lr {a.map_lr*mrms:.3g}")
     opt = torch.optim.Adam(groups)
     hist, best = [], seed0        # iteration 0 competes, or the first eval always wins
     dump(0)
@@ -547,7 +578,7 @@ def main():
                          f"sig x{float(sn.max()/sn.min()):.1f}]")
             m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised sim {m:+.4f} +- {s:.4f}"
-            if m > best[0]:
+            if np.isfinite(m) and m > best[0]:
                 best = (m, G.detach().cpu().numpy().copy(), it)
                 line += "  *"
         print(line, flush=True)
