@@ -41,6 +41,7 @@ import torch
 from mesh_cache import load_cortex
 from paths import RESULTS
 import fc_score, xspec, bo_step, units, timescale, bandpass
+import provenance
 import torch_swe
 
 
@@ -542,7 +543,8 @@ def main():
                  S=np.einsum("fab,fcb->fac", Gd, Gd.conj()), best_iter=it, ref=a.ref,
                  best_sim=np.nan, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
                  nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale,
-                 amp=a.amp, hist=np.asarray(hist), **_medium_state(fit, a))
+                 amp=a.amp, hist=np.asarray(hist),
+                 **_medium_state(fit, a), **provenance.stamp(a))
         print(f"        dumped G at iteration {it}", flush=True)
 
     opt = torch.optim.Adam(groups)
@@ -595,7 +597,7 @@ def main():
                  hist=np.asarray(hist), best_sim=best[0], best_iter=best[2],
                  ref=a.ref, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
                  nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale,
-                 amp=a.amp, **_medium_state(fit, a))
+                 amp=a.amp, **_medium_state(fit, a), **provenance.stamp(a))
         print(f"  wrote results/torchfit_{a.tag}.npz")
 
 

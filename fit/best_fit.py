@@ -12,6 +12,7 @@ import _path  # noqa: F401  - puts the sibling code folders on sys.path
 import os, sys, time, argparse
 import numpy as np
 
+import provenance
 from mesh_cache import load_cortex
 import fc_score
 from fc_moran import MoranMatch
@@ -811,7 +812,8 @@ def main():
              medoid_from=(a.medoid_from or ""), profiles=P,
              maps=np.array(p.get("maps", ()), dtype=object),
              map_a=np.asarray(p.get("a", ()), float),
-             map_b=np.asarray(p.get("b", ()), float))
+             map_b=np.asarray(p.get("b", ()), float),
+             **provenance.stamp(a))
     print(f"\n  realised over {a.frames} frames, {a.draws} draws: "
           + (f"AFFINITY sim {np.mean(affs):+.4f} +- {np.std(affs):.4f}   " if affs else "")
           + f"sim {np.mean(sims):+.4f} +- {np.std(sims):.4f}   "
