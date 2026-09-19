@@ -561,8 +561,21 @@ def main():
         sec_velocity(out, c, flux)
     if want("videos"):
         sec_videos(out, a.tag, vtag)
-    json.dump(stats, open(os.path.join(out, "summary.json"), "w"), indent=2)
-    print(f"  wrote {out}/summary.json")
+    # MERGE, never overwrite. `stats` only holds what THIS run computed, so a --parts
+    # subset - re-rendering just the videos, say - would otherwise truncate the summary
+    # to the three keys it starts with and silently destroy every number the full run
+    # had already written.
+    sp = os.path.join(out, "summary.json")
+    merged = {}
+    if os.path.exists(sp):
+        try:
+            merged = json.load(open(sp))
+        except (ValueError, OSError):
+            merged = {}
+    merged.update(stats)
+    json.dump(merged, open(sp, "w"), indent=2)
+    print(f"  wrote {sp}"
+          + ("" if len(merged) == len(stats) else f"  (merged into {len(merged)} keys)"))
 
 
 if __name__ == "__main__":
