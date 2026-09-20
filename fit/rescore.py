@@ -20,7 +20,7 @@ clock - so that is read from the provenance stamp, and a file written before
   python fit/rescore.py --tag graded100_nolag --seconds 2308 --draws 2
 """
 import _path  # noqa: F401  - puts the sibling code folders on sys.path
-import os, time, argparse
+import os, time, json, argparse
 import numpy as np
 
 import provenance
@@ -124,6 +124,22 @@ def main():
           f"sim {np.mean(sims):+.4f} +- {np.std(sims):.4f}   "
           f"gap {np.mean(gaps):.3f}   rank {np.mean(rks):.1f}   "
           f"[{time.time()-t0:.0f}s]")
+
+    # A sidecar keyed by length, merged rather than overwritten: one tag can be scored at
+    # several lengths and they are different measurements, not revisions of one.
+    sp = os.path.join(RESULTS, f"scores_{a.tag}.json")
+    rec = {}
+    if os.path.exists(sp):
+        try:
+            rec = json.load(open(sp))
+        except (ValueError, OSError):
+            rec = {}
+    rec[f"{int(round(a.seconds))}s"] = dict(
+        sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
+        gap=float(np.mean(gaps)), field_rank=float(np.mean(rks)),
+        frames=int(frames), draws=int(a.draws), seconds=float(a.seconds))
+    json.dump(rec, open(sp, "w"), indent=2, sort_keys=True)
+    print(f"  wrote {os.path.relpath(sp, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))}")
 
 
 if __name__ == "__main__":

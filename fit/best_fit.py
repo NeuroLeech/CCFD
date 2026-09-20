@@ -899,6 +899,14 @@ def main():
              map_a=np.asarray(p.get("a", ()), float),
              map_b=np.asarray(p.get("b", ()), float),
              map_clip=a.map_clip,
+             # The realised score, in the file that holds the solve. Without it the only
+             # trace of what a run scored is stdout, and a tag whose log is gone cannot be
+             # compared against anything without re-realising it - which is how +0.6930
+             # came to exist solely as prose in a handoff note.
+             sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
+             gap=float(np.mean(gaps)), field_rank=float(np.mean(rks)),
+             realise_seconds=float(a.seconds if a.oversample else np.nan),
+             realise_frames=int(a.frames), draws=int(a.draws),
              **provenance.stamp(a))
     print(f"\n  realised over {a.frames} frames, {a.draws} draws: "
           + (f"AFFINITY sim {np.mean(affs):+.4f} +- {np.std(affs):.4f}   " if affs else "")

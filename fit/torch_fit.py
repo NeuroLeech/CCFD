@@ -180,7 +180,7 @@ class Fit:
                   f"weight {self.wa:g}")
 
     # ---------------- the medium, when its grading is a free variable ----------------
-    def init_medium(self, bound):
+    def init_medium(self, bound, coef_lim=None):
         """Make the speed/damping map coefficients differentiable, bounded either side.
 
         The same family fluid.map_fields builds - c(x) = c0 exp(a.M), sig(x) = sig0 exp(b.M)
@@ -209,16 +209,26 @@ class Fit:
         import fluid as fl
         from cortical_maps import load_maps
         from swe_rot import sponge_profile
+        self.coef_lim = None if coef_lim in (None, 0) else float(coef_lim)
         from genome import SPONGE_STRENGTH_FIXED, SPONGE_WIDTH_FIXED
         from cortical_maps import clip_maps
         mp = load_maps(self.c, self.p["maps"], verbose=False)
         M = clip_maps(np.stack([mp[k] for k in self.p["maps"]]),
                       self.p.get("map_clip"))   # same maps the fixed medium is built on
         self.Mz = torch.as_tensor(M, dtype=self.dtype, device=self.dev)
-        self.a_raw = torch.tensor(np.asarray(self.p["a"], float), dtype=self.dtype,
-                                  device=self.dev, requires_grad=True)
-        self.b_raw = torch.tensor(np.asarray(self.p["b"], float), dtype=self.dtype,
-                                  device=self.dev, requires_grad=True)
+        a0 = np.asarray(self.p["a"], float)
+        b0 = np.asarray(self.p["b"], float)
+        if self.coef_lim is not None:
+            # atanh, so tanh(u) reproduces the incumbent coefficient exactly: the medium at
+            # iteration 0 IS the one the reference solve was fitted in, nothing lifted and
+            # nothing pinned. Clipped first because a coefficient already outside the box
+            # has no pre-image under tanh.
+            a0 = np.arctanh(np.clip(a0 / self.coef_lim, -0.999, 0.999))
+            b0 = np.arctanh(np.clip(b0 / self.coef_lim, -0.999, 0.999))
+        self.a_raw = torch.tensor(a0, dtype=self.dtype, device=self.dev,
+                                  requires_grad=True)
+        self.b_raw = torch.tensor(b0, dtype=self.dtype, device=self.dev,
+                                  requires_grad=True)
         self.c0, self.sig0 = float(self.p["c0"]), float(self.p["sig0"])
         cbase, _ = fl.fields(self.c, self.p)
         self.cmax_ref = float(np.max(cbase))
@@ -229,8 +239,34 @@ class Fit:
         self.Ei = self.sw.Ei
         self.Ej = self.sw.Ej
 
+    def coefs(self):
+        """-> (a, b), the map coefficients, bounded to the box the numpy search used."""
+        if self.coef_lim is None:                  # legacy: bound the FIELD, see medium()
+            return self.a_raw, self.b_raw
+        return (self.coef_lim * torch.tanh(self.a_raw),
+                self.coef_lim * torch.tanh(self.b_raw))
+
     def medium(self):
-        """-> (H per vertex, damping per vertex), both carrying gradient."""
+        """-> (H per vertex, damping per vertex), both carrying gradient.
+
+        BOUND THE COEFFICIENTS, not the field. a and b are ln-multiplier per map sd, so
+        the natural limit is on them - fluid.COEF_LIM = 0.45, which is the box bo_step
+        searched inside and produced the incumbent values from, about x0.6 to x1.6 per
+        standard deviation of a map. Unbounded, an optimiser puts them wherever the
+        objective pulls and exp() turns that into a medium outside any regime the maps
+        describe.
+
+        The legacy path below bounds the DEPTH FIELD and pins its MAXIMUM instead. That is
+        not the same thing and it is not neutral: the incumbent medium spans more than the
+        bound allows, so satisfying it can only raise the floor, and a TIGHTER bound raises
+        it further. Measured on the clipped maps, --learn-maps 3 lifts mean depth +12% and
+        --learn-maps 1.5 lifts it +46% with the floor going 0.399 -> 1.065, both before a
+        single gradient step. Asking that mechanism to be gentle makes the medium smoother,
+        which is backwards."""
+        if self.coef_lim is not None:
+            a, b = self.coefs()
+            cf = self.c0 * torch.exp(a @ self.Mz)
+            return cf ** 2, self.sig0 * torch.exp(b @ self.Mz) + self.sponge
         L = self.Lb
         hm = torch.exp(L * torch.tanh((2.0 * (self.a_raw @ self.Mz)) / L))
         H = (self.c0 ** 2) * hm
@@ -357,11 +393,15 @@ def _medium_state(fit, a):
     Without this a run that fits the medium saves only G, and G alone does not define a
     solution: replayed in the baseline medium it is a different system. --learn-maps ran
     once before this existed and that run is not reproducible."""
-    if not getattr(a, "learn_maps", 0):
+    if not (getattr(a, "learn_maps", 0) or getattr(a, "coef_lim", 0)):
         return {}
-    return dict(learn_maps=a.learn_maps,
-                map_a=fit.a_raw.detach().cpu().numpy(),
-                map_b=fit.b_raw.detach().cpu().numpy())
+    with torch.no_grad():
+        av, bv = fit.coefs()
+    # the EFFECTIVE coefficients, not the pre-squash parameters: map_a has to mean the
+    # same thing it means everywhere else in the repo, which is what fluid.map_fields
+    # takes. coef_lim goes with them so a resume can invert the squash.
+    return dict(learn_maps=a.learn_maps, coef_lim=getattr(a, "coef_lim", 0.0),
+                map_a=av.detach().cpu().numpy(), map_b=bv.detach().cpu().numpy())
 
 
 def warm_start(S, dtype, device):
@@ -405,6 +445,20 @@ def main():
                          "multiplier held inside [1/BOUND, BOUND]. 0 (default) leaves the "
                          "medium fixed. Speed is renormalised so its maximum, which sets "
                          "dt through the CFL condition, does not move")
+    ap.add_argument("--coef-lim", type=float, default=0.0, dest="coef_lim",
+                    help="free the medium by bounding the map COEFFICIENTS to this box: "
+                         "a_i = lim*tanh(u_i), same for b. fluid.COEF_LIM is 0.45, the box "
+                         "bo_step searched inside and produced the incumbent values from - "
+                         "about x0.6 to x1.6 per standard deviation of a map. a and b are "
+                         "ln-multiplier per map sd, so this is the natural place for a "
+                         "limit; unbounded, an optimiser puts them where the objective "
+                         "pulls and exp() makes a medium outside any regime the maps "
+                         "describe. Initialised AT the reference's own coefficients, so "
+                         "iteration 0 integrates exactly the medium the solve was fitted "
+                         "in. Use this instead of --learn-maps, which bounds the depth "
+                         "FIELD and pins its maximum - a different thing that smooths the "
+                         "medium at initialisation and smooths it MORE the tighter it is "
+                         "set")
     ap.add_argument("--map-lr", type=float, default=0.02, dest="map_lr",
                     help="Adam step for the map coefficients, as a fraction of their "
                          "initial RMS (they are 6 numbers of order 0.3, not 300k of "
@@ -483,8 +537,11 @@ def main():
     # beat, because every comparison against NaN is False. The baseline belongs on the
     # medium the descent actually starts from.
     groups = [{"params": [G], "lr": lr}]
-    if a.learn_maps:
-        fit.init_medium(a.learn_maps)
+    if a.learn_maps and a.coef_lim:
+        raise SystemExit("  --learn-maps and --coef-lim are two different parameterisations "
+                         "of the same medium; pass one")
+    if a.learn_maps or a.coef_lim:
+        fit.init_medium(a.learn_maps or 0.0, coef_lim=a.coef_lim)
         # A continuation must resume the MEDIUM as well as G. init_medium always seeds
         # a_raw/b_raw from the incumbent coefficients, so without this the checkpoint's
         # fitted G lands in the baseline grading - a different system, which is the exact
@@ -498,22 +555,37 @@ def main():
                     f"  --learn-maps {a.learn_maps:g} but {a.init[5:]} was fitted at "
                     f"{float(prev['learn_maps']):g}: the tanh bound differs, so its "
                     f"coefficients do not describe the same medium here")
+            pa, pb = np.asarray(prev["map_a"], float), np.asarray(prev["map_b"], float)
+            if fit.coef_lim is not None:
+                # map_a/map_b are stored as EFFECTIVE coefficients, so invert the squash
+                pa = np.arctanh(np.clip(pa / fit.coef_lim, -0.999, 0.999))
+                pb = np.arctanh(np.clip(pb / fit.coef_lim, -0.999, 0.999))
             with torch.no_grad():
-                fit.a_raw.copy_(torch.as_tensor(prev["map_a"], dtype=fit.dtype,
-                                                device=fit.dev))
-                fit.b_raw.copy_(torch.as_tensor(prev["map_b"], dtype=fit.dtype,
-                                                device=fit.dev))
+                fit.a_raw.copy_(torch.as_tensor(pa, dtype=fit.dtype, device=fit.dev))
+                fit.b_raw.copy_(torch.as_tensor(pb, dtype=fit.dtype, device=fit.dev))
             print(f"  resumed the learned grading from {a.init[5:]}")
         mrms = float(np.sqrt(np.mean(np.concatenate(
             [fit.a_raw.detach().cpu().numpy(), fit.b_raw.detach().cpu().numpy()]) ** 2)))
         groups.append({"params": [fit.a_raw, fit.b_raw], "lr": a.map_lr * mrms})
         with torch.no_grad():
             H0, s0f = fit.medium()
-        print(f"  medium free, depth multiplier within [1/{a.learn_maps:g}, "
-              f"{a.learn_maps:g}]: H {float(H0.min()):.3f}-{float(H0.max()):.3f} "
-              f"({float(H0.max()/H0.min()):.1f}x, from {fit.Hf.min():.3f}-"
-              f"{fit.Hf.max():.3f} = {fit.Hf.max()/fit.Hf.min():.1f}x fixed), "
-              f"damping x{float(s0f.max()/s0f.min()):.1f}, map lr {a.map_lr*mrms:.3g}")
+        if a.coef_lim:
+            with torch.no_grad():
+                av, bv = fit.coefs()
+            print(f"  medium free, COEFFICIENTS bounded to +-{a.coef_lim:g} "
+                  f"(x{np.exp(-a.coef_lim):.2f}-x{np.exp(a.coef_lim):.2f} per map sd): "
+                  f"a {np.round(av.cpu().numpy(), 3)} b {np.round(bv.cpu().numpy(), 3)}")
+            print(f"  iteration 0 medium: H {float(H0.min()):.3f}-{float(H0.max()):.3f} "
+                  f"({float(H0.max()/H0.min()):.1f}x) against the fixed "
+                  f"{fit.Hf.min():.3f}-{fit.Hf.max():.3f} "
+                  f"({fit.Hf.max()/fit.Hf.min():.1f}x) it was solved in, "
+                  f"damping x{float(s0f.max()/s0f.min()):.1f}, map lr {a.map_lr*mrms:.3g}")
+        else:
+            print(f"  medium free, depth multiplier within [1/{a.learn_maps:g}, "
+                  f"{a.learn_maps:g}]: H {float(H0.min()):.3f}-{float(H0.max()):.3f} "
+                  f"({float(H0.max()/H0.min()):.1f}x, from {fit.Hf.min():.3f}-"
+                  f"{fit.Hf.max():.3f} = {fit.Hf.max()/fit.Hf.min():.1f}x fixed), "
+                  f"damping x{float(s0f.max()/s0f.min()):.1f}, map lr {a.map_lr*mrms:.3g}")
 
     m0, s0 = fit.realised(G, seeds=tuple(range(a.eval_draws)))
     print(f"  iteration 0 realised: sim {m0:+.4f} +- {s0:.4f}", flush=True)
@@ -580,11 +652,18 @@ def main():
                 + ("" if zl is None else
                    f"  (fc {z0.detach().item():+.4f}, lag {zl.detach().item():+.4f})"))
         if it % a.eval_every == 0 or it == a.iters:
-            if a.learn_maps:
+            if a.learn_maps or a.coef_lim:
+                # the coefficients go in the log, not just the field they make: a medium
+                # drifting toward flat is only visible as `a` shrinking, and that is the
+                # drift worth catching while a run is still going
                 with torch.no_grad():
                     Hn, sn = fit.medium()
-                line += (f"  [H {float(Hn.min()):.2f}-{float(Hn.max()):.2f}, "
-                         f"sig x{float(sn.max()/sn.min()):.1f}]")
+                    av, bv = fit.coefs()
+                line += (f"  [H {float(Hn.min()):.2f}-{float(Hn.max()):.2f} "
+                         f"({float(Hn.max()/Hn.min()):.1f}x), sig x"
+                         f"{float(sn.max()/sn.min()):.1f}, a "
+                         f"{np.round(av.cpu().numpy(), 3)} b "
+                         f"{np.round(bv.cpu().numpy(), 3)}]")
             m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised sim {m:+.4f} +- {s:.4f}"
             if np.isfinite(m) and m > best[0]:

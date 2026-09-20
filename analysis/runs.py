@@ -23,6 +23,28 @@ from paths import RESULTS
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def scores_for(tag, z):
+    """Every realised score known for a tag: the one in the npz, plus any length the
+    rescore sidecar holds. -> {label: dict}, oldest measurement first is not meaningful
+    here so they are sorted by length."""
+    out = {}
+    if "sim" in z:
+        sec = _scalar(z, "realise_seconds")
+        lab = "?" if sec is None or sec != sec else f"{int(round(sec))}s"
+        out[lab] = dict(sim=float(z["sim"]), sim_sd=float(_scalar(z, "sim_sd", 0.0)),
+                        gap=float(_scalar(z, "gap", float("nan"))),
+                        field_rank=float(_scalar(z, "field_rank", float("nan"))),
+                        draws=int(_scalar(z, "draws", 0)))
+    sp = os.path.join(RESULTS, f"scores_{tag}.json")
+    if os.path.exists(sp):
+        try:
+            out.update(json.load(open(sp)))
+        except (ValueError, OSError):
+            pass
+    return dict(sorted(out.items(),
+                       key=lambda kv: float(kv[0][:-1]) if kv[0][:-1].isdigit() else 0))
+
+
 def _scalar(z, key, default=None):
     if key not in z:
         return default
@@ -135,8 +157,9 @@ def render():
           "`fit/best_fit.py`, writing `results/xspec_<tag>.npz`. These are also the bases",
           "`torch_fit.py --ref` selects. One row each, oldest first; `cmd` says whether the",
           "file carries its own command line.", "",
-          "| tag | pieces | regions | split | band Hz | frame_s | impulse | nfreq | written | cmd |",
-          "|---|---|---|---|---|---|---|---|---|---|"]
+          "| tag | pieces | regions | split | band Hz | frame_s | impulse | nfreq | "
+          "realised | written | cmd |",
+          "|---|---|---|---|---|---|---|---|---|---|---|"]
     stamped = []
     for mt, tag, z, f in sv:
         b = z["band"] if "band" in z else None
@@ -144,13 +167,15 @@ def render():
         pr = provenance.read(z)
         if pr:
             stamped.append((tag, pr))
-        L.append("| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+        L.append("| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
             tag,
             z["profiles"].shape[0] if "profiles" in z else "?",
             _scalar(z, "regions", "-"), _scalar(z, "split", "-"),
             "-" if b is None else f"{b[0]:g}-{b[1]:g}",
             "-" if fs != fs else f"{fs:.5g}",
             _scalar(z, "impulse_frames", "-"), _scalar(z, "nfreq", "-"),
+            " / ".join(f"{v['sim']:+.4f}±{v['sim_sd']:.4f} @{k}"
+                       for k, v in scores_for(tag, z).items()) or "-",
             _when(f), "yes" if pr else "–"))
     L.append("")
     if stamped:
