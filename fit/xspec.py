@@ -123,11 +123,18 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
         if p.get(nm):
             pk, fac = p[nm]
             ptag += f"_{nm[:4]}{len(pk)}x{float(fac):.4g}h{abs(hash(tuple(sorted(map(int, pk)))))%100000}"
+    # Clipping the maps changes the medium without touching any scalar in the key, so
+    # without this a clipped run silently loads unclipped responses and H would describe
+    # a system nobody simulated. Absent/none reproduces the pre-clip keys exactly, so
+    # every cache already on disk still hits.
+    mc = p.get("map_clip")
+    mtag = "" if mc in (None, "", "none") else f"_mc{mc}"
     dtag = "" if dt is None else f"_dt{float(dt):.8g}"
     ctag = "" if coupling is None else "_" + coupling.key()
     key = (f"{cortex.mesh}_sig{p['sig0']:.6g}_c{p['c0']:.6g}_Ld{p['Ld']:.6g}"
            f"_spg{p.get('sponge_scale', 1.0):.4g}_a{np.round(p.get('a', 0), 3)}"
-           f"_b{np.round(p.get('b', 0), 3)}_{len(regions)}_{nsteps}_{save}{ptag}{dtag}{ctag}")
+           f"_b{np.round(p.get('b', 0), 3)}{mtag}_{len(regions)}_{nsteps}_{save}"
+           f"{ptag}{dtag}{ctag}")
     cache_f = os.path.join(CACHE, "impulse_" + key.replace(" ", "") + ".npy")
     # `cache=False` for medium SEARCHES. The key carries a and b, so every candidate is a
     # miss, and one 47-piece set is 1.79 GB - a few dozen candidates fill the disk.

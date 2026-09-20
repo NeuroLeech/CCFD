@@ -63,6 +63,7 @@ def main():
          if fc_path else fc_score.default_target(c, centre=centre, verbose=True))
 
     p, save, _ = bo_step.unpack(z["x"], c)
+    p["map_clip"] = str(z["map_clip"]) if "map_clip" in z else "none"
     P = np.asarray(z["profiles"], np.float32)
     S, idx = z["S"], z["idx"].astype(int)
     ref_frames = int(z["ref_frames"])
@@ -86,7 +87,8 @@ def main():
     frames = timescale.frames_for(a.seconds, frame_s)
     print(f"  {a.tag}: {P.shape[0]} channels, {len(idx)} solved frequencies, save {save}")
     print(f"  medium from the file: a {np.round(p.get('a', ()), 3)}, "
-          f"b {np.round(p.get('b', ()), 3)}, Ld {p['Ld']:.4g}")
+          f"b {np.round(p.get('b', ()), 3)}, Ld {p['Ld']:.4g}, "
+          f"map_clip {p['map_clip']}")
     print(f"  realise {frames} frames ({a.seconds:.0f}s) at {frame_s:.5g}s, "
           f"{a.draws} draws, smoothing FWHM {float(smooth):g} frames"
           + ("" if band is None else f", band {band[0]:g}-{band[1]:g} Hz")

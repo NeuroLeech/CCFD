@@ -55,9 +55,11 @@ def decode_maps(x, maps=MAPS_DEFAULT):
 
 def map_fields(cortex, p):
     """-> (wave speed, damping) per vertex, from the map-graded parameters."""
-    from cortical_maps import load_maps
+    from cortical_maps import load_maps, clip_maps
     mp = load_maps(cortex, p["maps"], verbose=False)
     M = np.stack([mp[k] for k in p["maps"]])
+    # the tails of a statistical map are not worth an exponential - see clip_maps
+    M = clip_maps(M, p.get("map_clip"))
     c = p["c0"] * np.exp(np.asarray(p["a"]) @ M)
     sig = p["sig0"] * np.exp(np.asarray(p["b"]) @ M)
     return c, sig

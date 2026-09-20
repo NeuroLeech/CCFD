@@ -397,6 +397,17 @@ def main():
                          "radial room: pieces are 2-4 rings deep at --split 40 and 2-6 "
                          "at --split 1, and a shell count past the ring count collapses "
                          "back to one-hot")
+    ap.add_argument("--map-clip", default="none", dest="map_clip",
+                    choices=("none", "iqr", "tukey", "sd2"),
+                    help="clip the z-scored cortical maps' tails before grading the "
+                         "medium, then restandardise (see cortical_maps.clip_maps). The "
+                         "maps are statistical, exp(a.M) is exponential in them and H = "
+                         "c^2 squares it, so a handful of tail vertices set the whole "
+                         "dynamic range: unclipped the incumbent spans 33x in depth, "
+                         "'iqr' 5.9x. Clipping acts on the MAP, so the gradient across "
+                         "the bulk of cortex is untouched; shrinking `a` instead would "
+                         "flatten everywhere to control the tail. Default none, which "
+                         "reproduces every earlier run")
     ap.add_argument("--lag-taus", default="", dest="lag_taus",
                     help="comma-separated lags in TR (e.g. 1,3,5). Adds the ANTISYMMETRIC "
                          "part of the lagged covariances to the solve objective, via "
@@ -561,6 +572,14 @@ def main():
     if a.damp is not None:
         x[0] = np.log10(a.damp)
     p, save, _ = bo_step.unpack(x, c)
+    p["map_clip"] = a.map_clip
+    if a.map_clip != "none":
+        _cf, _sg = bo_step.fl.fields(c, p)
+        _H = _cf ** 2
+        print(f"  maps clipped ({a.map_clip}): speed {_cf.min():.3f}-{_cf.max():.3f} "
+              f"({_cf.max()/_cf.min():.1f}x), depth {_H.min():.3f}-{_H.max():.3f} "
+              f"({_H.max()/_H.min():.1f}x), damping {_sg.min():.5f}-{_sg.max():.5f} "
+              f"({_sg.max()/_sg.min():.1f}x)")
     ms = None
     if a.map_search:
         ms = np.load(a.map_search, allow_pickle=True)
@@ -768,7 +787,12 @@ def main():
         print(f"  lagged objective: taus {taus} TR = "
               f"{[k * a.oversample for k in taus]} model frames, wa {a.wa:g}, "
               f"{'gsr' if a.lag_gsr else 'raw'} target")
-        S, (C, _Ca) = xspec.solve_lagged(H, w, Tgt, E, ph0, iters=a.iters, verbose=False,
+        # verbose, unlike the zero-lag path. solve_lagged is the expensive one - a model
+        # evaluation is H_f S_f H_f^H over every solved frequency, once per lag row, and
+        # the line search can take dozens per iteration - so it runs for tens of minutes
+        # to hours with nothing else to print in the meantime. Silent, that is
+        # indistinguishable from a hang.
+        S, (C, _Ca) = xspec.solve_lagged(H, w, Tgt, E, ph0, iters=a.iters, verbose=True,
                                          wa=a.wa, trace=tr, freq_keep=keep_f)
     elif a.solver == "factor":
         S, C = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
@@ -874,6 +898,7 @@ def main():
              maps=np.array(p.get("maps", ()), dtype=object),
              map_a=np.asarray(p.get("a", ()), float),
              map_b=np.asarray(p.get("b", ()), float),
+             map_clip=a.map_clip,
              **provenance.stamp(a))
     print(f"\n  realised over {a.frames} frames, {a.draws} draws: "
           + (f"AFFINITY sim {np.mean(affs):+.4f} +- {np.std(affs):.4f}   " if affs else "")

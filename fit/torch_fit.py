@@ -50,7 +50,8 @@ def load_reference(tag):
     return dict(S=z["S"], idx=z["idx"].astype(int), x=z["x"], save=int(z["save"]),
                 P=z["profiles"], sub=z["sub"], band=tuple(z["band"]),
                 frame_s=float(z["frame_s"]), ref_frames=int(z["ref_frames"]),
-                segment=int(z["segment"]) if z["segment"].size else 0)
+                segment=int(z["segment"]) if z["segment"].size else 0,
+                map_clip=(str(z["map_clip"]) if "map_clip" in z else "none"))
 
 
 def target_edges(target, sub):
@@ -100,6 +101,10 @@ class Fit:
         self.dev, self.cdev, self.dtype = device, "cpu", dtype
         self.amp, self.save = amp, ref["save"]
         self.p, _, _ = bo_step.unpack(ref["x"], cortex)
+        # The reference's medium includes how its maps were clipped. Replaying a solve
+        # in an unclipped medium is a different system, the same way replaying G in the
+        # baseline grading is - see _medium_state.
+        self.p["map_clip"] = ref.get("map_clip", "none")
         # bo_step.unpack already takes the speed/damping map coefficients from x[4:10];
         # they are the same a and b best_fit saves as map_a/map_b.
         if maps_scale != 1.0:
@@ -205,8 +210,10 @@ class Fit:
         from cortical_maps import load_maps
         from swe_rot import sponge_profile
         from genome import SPONGE_STRENGTH_FIXED, SPONGE_WIDTH_FIXED
+        from cortical_maps import clip_maps
         mp = load_maps(self.c, self.p["maps"], verbose=False)
-        M = np.stack([mp[k] for k in self.p["maps"]])
+        M = clip_maps(np.stack([mp[k] for k in self.p["maps"]]),
+                      self.p.get("map_clip"))   # same maps the fixed medium is built on
         self.Mz = torch.as_tensor(M, dtype=self.dtype, device=self.dev)
         self.a_raw = torch.tensor(np.asarray(self.p["a"], float), dtype=self.dtype,
                                   device=self.dev, requires_grad=True)

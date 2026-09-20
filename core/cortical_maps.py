@@ -89,6 +89,49 @@ def lb_modes(cortex, n=32, verbose=True):
     return P
 
 
+def clip_maps(M, mode="iqr"):
+    """Clip each z-scored map's tails, then restore mean 0 / sd 1. -> (n_map, nV).
+
+    These are statistical maps. The numeric value at a vertex is not a physical quantity,
+    and the extreme values least of all - they are where the registration, the smoothing
+    and the individual anatomy disagree most. But `exp(a.M)` is exponential in M, so the
+    few vertices in a tail set the whole dynamic range of the medium, and `H = c^2` then
+    squares it. Measured on the incumbent coefficients: myelin reaches +3.97 sd and
+    thickness +4.42, and between them they take the depth field to 33x - almost none of
+    which is the gradient that the coefficients describe, and all of which sets the
+    thinnest point, which is what limits how hard the sheet can be driven.
+
+    Clipping is therefore on the MAP, not the coefficient. Shrinking `a` would flatten the
+    gradient everywhere to control a handful of vertices; clipping the map leaves the
+    gradient across the bulk of the cortex alone and only stops the tail setting the range.
+
+      iqr     clip at Q1 and Q3. Half the vertices land on a rail, which is the point: the
+              ordering within the outer quartiles is not information worth an exponential.
+              Incumbent coefficients -> speed 2.4x, depth 5.9x, damping 6.1x.
+      tukey   clip at Q1 - 1.5 IQR and Q3 + 1.5 IQR, the boxplot whisker. Keeps far more
+              tail: depth 20.3x.
+      sd2     clip at +-2 sd. depth 16.7x.
+
+    Restandardising afterwards is what makes the coefficients mean the same thing as
+    before - a is ln-multiplier per map sd either way - so only the tail changes, not the
+    scale the coefficient is denominated in."""
+    M = np.asarray(M, float)
+    if mode in (None, "", "none"):
+        return M
+    if mode == "sd2":
+        lo, hi = -2.0, 2.0
+    else:
+        q1 = np.percentile(M, 25, axis=1, keepdims=True)
+        q3 = np.percentile(M, 75, axis=1, keepdims=True)
+        k = {"iqr": 0.0, "tukey": 1.5}.get(mode)
+        if k is None:
+            raise ValueError(f"map_clip {mode!r}: expected none, iqr, tukey or sd2")
+        lo, hi = q1 - k * (q3 - q1), q3 + k * (q3 - q1)
+    X = np.clip(M, lo, hi)
+    X = X - X.mean(1, keepdims=True)
+    return X / np.maximum(X.std(1, keepdims=True), 1e-12)
+
+
 def load_maps(cortex, names=NAMES, verbose=True):
     """-> dict name -> (nV,) z-scored map on the Cortex submesh."""
     # "lb<k>" resolves to the k-th Laplace-Beltrami mode, so a map-graded medium can be
