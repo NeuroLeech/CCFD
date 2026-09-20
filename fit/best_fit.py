@@ -397,12 +397,46 @@ def main():
                          "radial room: pieces are 2-4 rings deep at --split 40 and 2-6 "
                          "at --split 1, and a shell count past the ring count collapses "
                          "back to one-hot")
+    ap.add_argument("--lag-taus", default="", dest="lag_taus",
+                    help="comma-separated lags in TR (e.g. 1,3,5). Adds the ANTISYMMETRIC "
+                         "part of the lagged covariances to the solve objective, via "
+                         "xspec.solve_lagged. Zero-lag FC is a second moment and cannot "
+                         "see lead-lag at all: at tau=0 the sine in Phi(tau) vanishes, so "
+                         "Im(M_f) - the model cross-spectrum's phase - is unconstrained "
+                         "by it. The antisymmetric blocks are orthogonal to the symmetric "
+                         "part by construction, so this adds information instead of "
+                         "reweighting what the zero-lag objective already matches. Needs "
+                         "--oversample for a clock, like --bandpass")
+    ap.add_argument("--wa", type=float, default=1.0,
+                    help="weight on the antisymmetric block against the zero-lag block "
+                         "in --lag-taus. Both blocks are normalised jointly, so this is "
+                         "a ratio and not a scale")
+    ap.add_argument("--lag-gsr", action="store_true", dest="lag_gsr",
+                    help="take the lagged target from the GSR'd RBC scans. Default is "
+                         "raw, matching fit/torch_fit.py. Note this is a DIFFERENT target, "
+                         "not a different weighting of the same one")
     ap.add_argument("--tag", default="best")
     ap.add_argument("--best", action="store_true",
                     help="the pinned best sensory-only configuration (see BEST). Any "
                          "flag given explicitly still wins, so this is a starting point "
                          "rather than a lock")
     a = ap.parse_args()
+    if a.lag_taus:
+        # Every one of these routes the solve through xspec.solve, which has no lagged
+        # block. Failing here is the alternative to silently solving the zero-lag
+        # objective and labelling the result as lagged.
+        if not a.oversample:
+            raise SystemExit("  --lag-taus needs --oversample: the lags are given in TR "
+                             "and become model frames only once there is a clock")
+        bad = [nm for nm, hit in (("--solver factor", a.solver == "factor"),
+                                  ("--select-iters", bool(a.select_iters)),
+                                  ("--rank-iters", a.rank_iters > 0),
+                                  ("--whiten", a.whiten > 0),
+                                  ("--regimes > 1", a.regimes > 1),
+                                  ("--share-input", a.share_input)) if hit]
+        if bad:
+            raise SystemExit(f"  --lag-taus does not go through {', '.join(bad)}: that "
+                             f"path calls xspec.solve, which has no lagged block")
 
     if a.best:
         # only fill in what the caller did not ask for, so --best --damp 1e-4 means what
@@ -720,7 +754,23 @@ def main():
                                Lw, keep_f, spec, band=bp, frame_s=fs_bp,
                                segment=seg_fr)
     tr = []
-    if a.solver == "factor":
+    if a.lag_taus:
+        import lagged as _lg
+        taus = [int(v) for v in a.lag_taus.split(",") if v.strip()]
+        # the target's own fsaverage5 indices for the solve vertices, which is the space
+        # the cached RBC scans are in - the same construction fit/torch_fit.py uses, so
+        # the two paths are fitted against the same lagged target rather than two
+        # separately-derived ones
+        fs5 = np.asarray(c.old)[np.asarray(t.cols)[sub]]
+        E = _lg.empirical_rbc(taus, fs5, gsr=a.lag_gsr)
+        # passed raw: solve_lagged double-centres and antisymmetrises A_tgt itself
+        ph0 = _lg.phases(idx, ref_frames, [0] + [k * a.oversample for k in taus])
+        print(f"  lagged objective: taus {taus} TR = "
+              f"{[k * a.oversample for k in taus]} model frames, wa {a.wa:g}, "
+              f"{'gsr' if a.lag_gsr else 'raw'} target")
+        S, (C, _Ca) = xspec.solve_lagged(H, w, Tgt, E, ph0, iters=a.iters, verbose=False,
+                                         wa=a.wa, trace=tr, freq_keep=keep_f)
+    elif a.solver == "factor":
         S, C = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
                                   trace=tr, log_every=max(1, a.maxfun // 10))
     else:
@@ -733,12 +783,23 @@ def main():
     from scipy.stats import spearmanr
     print(f"  solve: pearson vs raw {np.corrcoef(C[iu], raw[iu])[0,1]:+.4f}, "
           f"spearman vs raw {spearmanr(C[iu], raw[iu]).statistic:+.4f}")
-    rep = tr[-1]
-    if "stopped_at" in rep:
+    if a.lag_taus:
+        # solve_lagged's trace is the objective per accepted step, a float, where solve's
+        # is a dict of convergence fields. Same list, different contents.
+        print(f"  lagged solve: joint objective {tr[-1]:.4f} after {len(tr)-1} accepted "
+              f"steps of {a.iters}"
+              + ("" if len(tr) < 3 else
+                 "; last 5 gains " + ", ".join(f"{tr[i+1]-tr[i]:+.1e}"
+                                               for i in range(max(0, len(tr)-6),
+                                                              len(tr)-1))))
+        rep = None
+    else:
+        rep = tr[-1]
+    if rep is not None and "stopped_at" in rep:
         print(f"  early stopping on {len(val)} held-out vertices: best spearman "
               f"{rep['held_out']:+.4f} at step {rep['stopped_at']} of {rep['iters']} "
               f"(objective there was still climbing to {rep['final']:.4f})")
-    else:
+    elif rep is not None:
         tail = tr[-6:-1] if len(tr) > 6 else tr[:-1]
         print(f"  convergence: objective {rep['final']:.4f} after {rep['steps']} accepted "
               f"steps of {rep['iters']}"
