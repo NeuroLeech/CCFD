@@ -235,7 +235,8 @@ class Fit:
         spg = self.p.get("sponge_scale", 1.0) * sponge_profile(
             self.c.V, self.c.edges, self.c.bnd, SPONGE_WIDTH_FIXED, SPONGE_STRENGTH_FIXED)
         self.sponge = torch.as_tensor(spg, dtype=self.dtype, device=self.dev)
-        self.Lb = float(np.log(bound))
+        # only the legacy field-bound path reads Lb; --coef-lim passes bound 0
+        self.Lb = float(np.log(bound)) if bound and bound > 0 else 0.0
         self.Ei = self.sw.Ei
         self.Ej = self.sw.Ej
 
