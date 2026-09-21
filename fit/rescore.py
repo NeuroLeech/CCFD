@@ -28,6 +28,8 @@ from mesh_cache import load_cortex
 from paths import RESULTS
 import fc_score, xspec, bo_step, units, timescale
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def load_solution(tag):
     """-> (npz, provenance args). The solve and everything needed to replay it."""
@@ -38,9 +40,64 @@ def load_solution(tag):
     return z, provenance.read(z).get("args", {})
 
 
+def rescore_torch(tag, ref_tag, seconds, draws, device="mps"):
+    """Realise a torch fit at `seconds` through the integrator it was fitted with.
+
+    The convex path below cannot do this. A torch fit may carry nl_flux, nl_adv and a
+    grading that is not expressible as map coefficients at all, and xspec.score_realisation
+    left to itself integrates with fluid.run - the numpy solver, which has none of them.
+    Scoring that way would report the LINEAR score for a nonlinear fit, which torch_fit's
+    own run_fn docstring calls the one discrepancy that invalidates a run rather than
+    adding noise. So the Fit is rebuilt at the new length, the medium restored from the
+    checkpoint, and everything routed through fit.run_fn() exactly as the fit itself
+    scored.
+
+    Only `seconds` differs from the fit's own evaluation. G is interpolated onto the
+    longer grid the same way torch_fit.drive does at any length."""
+    import torch
+    from torch_fit import Fit, load_reference, restore_medium
+
+    z = np.load(os.path.join(RESULTS, f"torchfit_{tag}.npz"), allow_pickle=True)
+    ref = load_reference(ref_tag)
+    c = load_cortex("fsaverage5", verbose=False)
+    t = fc_score.default_target(c, verbose=True)
+    fit = Fit(ref, c, t, seconds, device=device, amp=float(z["amp"]),
+              nl_flux=float(z["nl_flux"]), nl_adv=float(z["nl_adv"]),
+              Ld=float(z["Ld"]), maps_scale=float(z["maps_scale"]))
+    learned = restore_medium(fit, z)
+    with torch.no_grad():
+        H = fit.medium()[0] if learned else fit.Hf
+    H = np.asarray(H.cpu() if torch.is_tensor(H) else H)
+    print(f"  {tag}: ref {ref_tag}, nl_flux {float(z['nl_flux']):g}, "
+          f"nl_adv {float(z['nl_adv']):g}, Ld {float(z['Ld']):g}, "
+          f"medium {'restored from the checkpoint' if learned else 'fixed'}")
+    print(f"  H {H.min():.3f}-{H.max():.3f} ({H.max()/H.min():.1f}x), "
+          f"realise {fit.nframes} frames ({seconds:.0f}s) = {fit.nsteps} steps, "
+          f"{draws} draws", flush=True)
+
+    cdt = torch.complex64 if fit.dtype == torch.float32 else torch.complex128
+    G = torch.tensor(z["G"], dtype=cdt, device=fit.cdev)
+    sims, gaps, rks = [], [], []
+    for sd in range(draws):
+        gen = torch.Generator(device=fit.cdev).manual_seed(10_000 + sd)
+        with torch.no_grad():
+            A = fit.drive(G, fit.eta(gen))
+        Af = A.detach().cpu().numpy()[::fit.save] * fit.save
+        r = xspec.score_realisation(
+            c, t, fit.p, Af, save=fit.save, amp=fit.amp, profiles=ref["P"],
+            kernel=fit.kern, band=ref["band"], frame_s=ref["frame_s"],
+            segment=ref["segment"] or None, run_fn=fit.run_fn())
+        sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
+        print(f"    draw {sd}: sim {r['sim']:+.4f}", flush=True)
+    return sims, gaps, rks, fit.nframes
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tag", required=True, help="results/xspec_<tag>.npz")
+    ap.add_argument("--torch-ref", default=None, dest="torch_ref",
+                    help="rescore results/torchfit_<tag>.npz instead, against this "
+                         "reference basis, through the integrator it was fitted with")
     ap.add_argument("--seconds", type=float, required=True,
                     help="realisation length. 2308 is the 14,313-frame protocol the "
                          "100-channel runs were originally scored at; 577 is one NKI run")
@@ -54,6 +111,29 @@ def main():
     ap.add_argument("--save-frames", action="store_true", dest="save_frames",
                     help="write frames_/drive_<tag>_<seconds>s.npy for draw 0")
     a = ap.parse_args()
+
+    if a.torch_ref:
+        t0 = time.time()
+        sims, gaps, rks, frames = rescore_torch(a.tag, a.torch_ref, a.seconds, a.draws)
+        print(f"\n  realised over {frames} frames ({a.seconds:.0f}s), {a.draws} draws: "
+              f"sim {np.mean(sims):+.4f} +- {np.std(sims):.4f}   "
+              f"gap {np.mean(gaps):.3f}   rank {np.mean(rks):.1f}   "
+              f"[{time.time()-t0:.0f}s]")
+        sp = os.path.join(RESULTS, f"scores_torchfit_{a.tag}.json")
+        rec = {}
+        if os.path.exists(sp):
+            try:
+                rec = json.load(open(sp))
+            except (ValueError, OSError):
+                rec = {}
+        rec[f"{int(round(a.seconds))}s"] = dict(
+            sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
+            gap=float(np.mean(gaps)), field_rank=float(np.mean(rks)),
+            frames=int(frames), draws=int(a.draws), seconds=float(a.seconds),
+            ref=a.torch_ref)
+        json.dump(rec, open(sp, "w"), indent=2, sort_keys=True)
+        print(f"  wrote {os.path.relpath(sp, ROOT)}")
+        return
 
     z, pa = load_solution(a.tag)
     c = load_cortex("fsaverage5", verbose=False)
