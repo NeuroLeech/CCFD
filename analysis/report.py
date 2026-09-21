@@ -45,7 +45,7 @@ def nucleus_of(tag):
 
 def load_all(tag, ref_tag="torchref"):
     import torch, fc_score
-    from torch_fit import Fit, load_reference
+    from torch_fit import Fit, load_reference, restore_medium
     z = np.load(os.path.join(RESULTS, f"torchfit_{tag}.npz"))
     ref = load_reference(ref_tag)
     c = load_cortex("fsaverage5", verbose=False)
@@ -53,11 +53,7 @@ def load_all(tag, ref_tag="torchref"):
     fit = Fit(ref, c, t, float(z["seconds"]), device="mps", amp=float(z["amp"]),
               nl_adv=float(z["nl_adv"]), nl_flux=float(z["nl_flux"]), Ld=float(z["Ld"]),
               maps_scale=float(z["maps_scale"]))
-    if "map_a" in z.files:
-        fit.init_medium(float(z["learn_maps"]))
-        with torch.no_grad():
-            fit.a_raw.copy_(torch.as_tensor(z["map_a"], dtype=fit.dtype, device=fit.dev))
-            fit.b_raw.copy_(torch.as_tensor(z["map_b"], dtype=fit.dtype, device=fit.dev))
+    restore_medium(fit, z)      # the checkpoint's own parameterisation, whichever it used
     rz = np.load(os.path.join(RESULTS, f"xspec_{ref_tag}.npz"), allow_pickle=True)
     return z, ref, c, t, fit, rz
 

@@ -388,6 +388,40 @@ class Fit:
         return float(np.mean(out)), float(np.std(out))
 
 
+def restore_medium(fit, z, learn_maps=None, coef_lim=None):
+    """Rebuild the medium a checkpoint was fitted in, on `fit`. -> True if it had one.
+
+    Both `--init from:` and analysis/report.load_all go through here. A checkpoint replayed
+    in a different grading is a different system - the failure _medium_state was written to
+    prevent - and two copies of this logic had already drifted: load_all restored map_a
+    into a_raw directly, which is right for --learn-maps, where a_raw IS the coefficient,
+    and wrong for --coef-lim, where a_raw is the pre-squash parameter and the saved value
+    is the effective coefficient.
+
+    `learn_maps`/`coef_lim` default to the checkpoint's own, which is what a replay wants.
+    A continuation passes the NEW run's, since the flags define the parameterisation and
+    the checkpoint only supplies starting values."""
+    files = z.files if hasattr(z, "files") else list(z)
+    if "map_a" not in files:
+        return False
+    lm = float(z["learn_maps"]) if learn_maps is None else float(learn_maps or 0.0)
+    cl = coef_lim
+    if cl is None:
+        cl = float(z["coef_lim"]) if "coef_lim" in files else 0.0
+    cl = float(cl or 0.0)
+    fit.init_medium(lm, coef_lim=cl or None)
+    pa = np.asarray(z["map_a"], float)
+    pb = np.asarray(z["map_b"], float)
+    if fit.coef_lim is not None:
+        # map_a/map_b are stored as EFFECTIVE coefficients; invert the squash
+        pa = np.arctanh(np.clip(pa / fit.coef_lim, -0.999, 0.999))
+        pb = np.arctanh(np.clip(pb / fit.coef_lim, -0.999, 0.999))
+    with torch.no_grad():
+        fit.a_raw.copy_(torch.as_tensor(pa, dtype=fit.dtype, device=fit.dev))
+        fit.b_raw.copy_(torch.as_tensor(pb, dtype=fit.dtype, device=fit.dev))
+    return True
+
+
 def _medium_state(fit, a):
     """The learned grading, so a saved solution can be rebuilt.
 
@@ -542,29 +576,29 @@ def main():
         raise SystemExit("  --learn-maps and --coef-lim are two different parameterisations "
                          "of the same medium; pass one")
     if a.learn_maps or a.coef_lim:
-        fit.init_medium(a.learn_maps or 0.0, coef_lim=a.coef_lim)
-        # A continuation must resume the MEDIUM as well as G. init_medium always seeds
-        # a_raw/b_raw from the incumbent coefficients, so without this the checkpoint's
-        # fitted G lands in the baseline grading - a different system, which is the exact
-        # failure _medium_state was written to prevent. Restored AFTER init_medium, never
-        # by overwriting p["a"]/p["b"] before it: init_medium takes cmax_ref from
-        # fl.fields(c, p) to pin the CFL-setting speed maximum, so editing p would move
-        # that pin and rebuild a medium that is not the one the checkpoint left.
-        if prev is not None and "map_a" in prev:
+        # A continuation must resume the MEDIUM as well as G: a checkpoint's G replayed in
+        # the baseline grading is a different system, the failure _medium_state exists to
+        # prevent. The new run's flags decide the parameterisation, the checkpoint supplies
+        # the starting coefficients - which is why restore_medium is told both.
+        resumed = False
+        if prev is not None and "map_a" in prev.files:
             if float(prev["learn_maps"]) != float(a.learn_maps):
                 raise SystemExit(
                     f"  --learn-maps {a.learn_maps:g} but {a.init[5:]} was fitted at "
                     f"{float(prev['learn_maps']):g}: the tanh bound differs, so its "
                     f"coefficients do not describe the same medium here")
-            pa, pb = np.asarray(prev["map_a"], float), np.asarray(prev["map_b"], float)
-            if fit.coef_lim is not None:
-                # map_a/map_b are stored as EFFECTIVE coefficients, so invert the squash
-                pa = np.arctanh(np.clip(pa / fit.coef_lim, -0.999, 0.999))
-                pb = np.arctanh(np.clip(pb / fit.coef_lim, -0.999, 0.999))
-            with torch.no_grad():
-                fit.a_raw.copy_(torch.as_tensor(pa, dtype=fit.dtype, device=fit.dev))
-                fit.b_raw.copy_(torch.as_tensor(pb, dtype=fit.dtype, device=fit.dev))
+            if float(prev.get("coef_lim", 0.0) if hasattr(prev, "get")
+                     else (prev["coef_lim"] if "coef_lim" in prev.files else 0.0)) \
+                    != float(a.coef_lim or 0.0):
+                raise SystemExit(
+                    f"  --coef-lim {a.coef_lim:g} but {a.init[5:]} was fitted at a "
+                    f"different limit: tanh maps its parameters to a different box, so "
+                    f"its coefficients do not describe the same medium here")
+            resumed = restore_medium(fit, prev, learn_maps=a.learn_maps,
+                                     coef_lim=a.coef_lim)
             print(f"  resumed the learned grading from {a.init[5:]}")
+        if not resumed:
+            fit.init_medium(a.learn_maps or 0.0, coef_lim=a.coef_lim)
         mrms = float(np.sqrt(np.mean(np.concatenate(
             [fit.a_raw.detach().cpu().numpy(), fit.b_raw.detach().cpu().numpy()]) ** 2)))
         groups.append({"params": [fit.a_raw, fit.b_raw], "lr": a.map_lr * mrms})

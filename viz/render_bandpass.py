@@ -80,6 +80,13 @@ def main():
                          "the integration from the run's own saved drive with the filter "
                          "off to recover the raw field: same medium, same drive, same "
                          "realisation")
+    ap.add_argument("--raw-npy", default=None, dest="raw_npy",
+                    help="frames_<vtag>_raw.npy from fit/render_fit.py: the SAME "
+                         "realisation with the passband off, produced by the integrator "
+                         "that actually ran. Use this for any torch fit - --resimulate "
+                         "re-integrates through fluid.run, which has no nl_flux, no nl_adv "
+                         "and no learned grading, so it would put the wrong physics on the "
+                         "raw row. The refilter check below applies either way")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -87,16 +94,23 @@ def main():
     frame_s = timescale.TR / 4.0
     c = load_cortex("fsaverage5", verbose=False)
     saved = np.asarray(np.load(os.path.join(RESULTS, f"frames_{a.tag}.npy")), np.float32)
-    if a.resimulate:
-        F = resimulate_raw(c, a.tag, frame_s)
+    if a.raw_npy or a.resimulate:
+        if a.raw_npy:
+            F = np.asarray(np.load(a.raw_npy), np.float32)
+            print(f"  unfiltered field from {os.path.basename(a.raw_npy)} {F.shape}")
+        else:
+            F = resimulate_raw(c, a.tag, frame_s)
         G = bandpass.apply(F, frame_s, lo, hi)
         # the reconstruction is only right if refiltering it returns what the run saved
         m = min(len(G), len(saved))
         r = float(np.corrcoef(G[:m].ravel(), saved[:m].ravel())[0, 1])
-        print(f"  resimulated raw field; refiltering it against the run's saved frames: "
+        print(f"  refiltering the unfiltered field against the run's saved frames: "
               f"r = {r:.6f}")
         if r < 0.99:
-            raise SystemExit("  the reconstruction does not reproduce the saved run")
+            raise SystemExit(
+                "  the unfiltered field does not reproduce the saved run when refiltered. "
+                "The two rows would differ in more than the filter, which is the one thing "
+                "this figure is for")
     else:
         F, G = saved, bandpass.apply(saved, frame_s, lo, hi)
 
