@@ -63,14 +63,17 @@ def main():
               diagnostics=False, run_fn=fit.run_fn())
     r = xspec.score_realisation(c, t, fit.p, Af, band=ref["band"], **kw)
 
-    # The SAME realisation with the passband off. viz/render_bandpass.py otherwise has to
-    # recover the unfiltered field by re-integrating from the saved drive, and that path
-    # goes through fluid.run - the numpy solver, which has no nl_flux, no nl_adv and no
-    # way to express a learned grading. For a nonlinear or map-fitted run it would draw
-    # the wrong physics on the raw row, which is the one mismatch run_fn exists to
-    # prevent. Realised here instead, through the same integrator, drive and medium the
-    # filtered frames came from; only `band` differs.
-    raw = xspec.score_realisation(c, t, fit.p, Af, band=None, **kw)
+    # The SAME realisation with NOTHING applied: the fluid itself, before the BOLD kernel
+    # and before the passband. Both of those belong to the observable - what a scanner
+    # would report - and the point of the pair figure is the fluid against that, not two
+    # versions of the observable.
+    #
+    # Realised here rather than recovered by viz/render_bandpass.py, which re-integrates
+    # from the saved drive through fluid.run: the numpy solver, with no nl_flux, no nl_adv
+    # and no way to express a learned grading. For a nonlinear or map-fitted run that draws
+    # the wrong physics on the raw row, the one mismatch run_fn exists to prevent.
+    kwf = dict(kw); kwf["kernel"] = None
+    raw = xspec.score_realisation(c, t, fit.p, Af, band=None, **kwf)
 
     fp = os.path.join(RESULTS, f"frames_{vtag}.npy")
     rp = os.path.join(RESULTS, f"frames_{vtag}_raw.npy")
@@ -78,8 +81,8 @@ def main():
     np.save(fp, np.asarray(r["frames"], np.float32))
     np.save(rp, np.asarray(raw["frames"], np.float32))
     np.save(dp, np.asarray(r["drive"].Aser, np.float32))
-    print(f"  wrote {rp}  {np.shape(raw['frames'])}  (unfiltered; BOLD smoothing kept, "
-          f"since that is part of the observable in both rows)")
+    print(f"  wrote {rp}  {np.shape(raw['frames'])}  (the bare field: no BOLD kernel, "
+          f"no passband)")
     print(f"  draw {a.seed}: sim {r['sim']:+.4f}   (the fit's six-draw mean was "
           f"{float(z['best_sim']):+.4f})")
     print(f"  wrote {fp}  {np.shape(r['frames'])}")

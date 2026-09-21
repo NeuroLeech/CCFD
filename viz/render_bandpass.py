@@ -82,11 +82,13 @@ def main():
                          "realisation")
     ap.add_argument("--raw-npy", default=None, dest="raw_npy",
                     help="frames_<vtag>_raw.npy from fit/render_fit.py: the SAME "
-                         "realisation with the passband off, produced by the integrator "
-                         "that actually ran. Use this for any torch fit - --resimulate "
-                         "re-integrates through fluid.run, which has no nl_flux, no nl_adv "
-                         "and no learned grading, so it would put the wrong physics on the "
-                         "raw row. The refilter check below applies either way")
+                         "realisation with NOTHING applied - the fluid before the BOLD "
+                         "kernel and before the passband. The top row is then the field "
+                         "itself and the bottom row the observable, which is the "
+                         "comparison worth drawing. Use this for any torch fit: "
+                         "--resimulate re-integrates through fluid.run, which has no "
+                         "nl_flux, no nl_adv and no learned grading, so it would put the "
+                         "wrong physics on the raw row")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -96,21 +98,28 @@ def main():
     saved = np.asarray(np.load(os.path.join(RESULTS, f"frames_{a.tag}.npy")), np.float32)
     if a.raw_npy or a.resimulate:
         if a.raw_npy:
+            # the BARE field. The observable it has to reproduce is kernel THEN band, in
+            # that order, which is the order score_realisation applies them.
+            import units
             F = np.asarray(np.load(a.raw_npy), np.float32)
-            print(f"  unfiltered field from {os.path.basename(a.raw_npy)} {F.shape}")
+            kern = units.smoothing_kernel(
+                timescale.bold_fwhm_frames(frame_s, verbose=False), verbose=False)
+            G = bandpass.apply(units.smooth_frames(F, kern), frame_s, lo, hi)
+            print(f"  bare field from {os.path.basename(a.raw_npy)} {F.shape}; "
+                  f"observable = BOLD kernel (FWHM {len(kern)} taps) then {lo}-{hi} Hz")
         else:
-            F = resimulate_raw(c, a.tag, frame_s)
-        G = bandpass.apply(F, frame_s, lo, hi)
+            F = resimulate_raw(c, a.tag, frame_s)      # already BOLD-smoothed
+            G = bandpass.apply(F, frame_s, lo, hi)
         # the reconstruction is only right if refiltering it returns what the run saved
         m = min(len(G), len(saved))
         r = float(np.corrcoef(G[:m].ravel(), saved[:m].ravel())[0, 1])
-        print(f"  refiltering the unfiltered field against the run's saved frames: "
-              f"r = {r:.6f}")
+        print(f"  reprocessing it into the observable and comparing with the run's "
+              f"saved frames: r = {r:.6f}")
         if r < 0.99:
             raise SystemExit(
-                "  the unfiltered field does not reproduce the saved run when refiltered. "
-                "The two rows would differ in more than the filter, which is the one thing "
-                "this figure is for")
+                "  the field does not reproduce the saved run when the observable is "
+                "applied to it. The two rows would then differ in more than the "
+                "observable, which is the one thing this figure is for")
     else:
         F, G = saved, bandpass.apply(saved, frame_s, lo, hi)
 
@@ -136,8 +145,11 @@ def main():
         loud = np.argsort(D.std(0))[::-1][:a.ndrive]
 
     proj = _proj(c.V, c.F)
-    labels = [f"raw field\n{pb_raw:.0%} of power in band",
-              f"bandpassed {lo}-{hi} Hz\n{pb_filt:.0%} of power in band"]
+    labels = [(f"the fluid\n{pb_raw:.0%} of power in band" if a.raw_npy else
+               f"raw field\n{pb_raw:.0%} of power in band"),
+              (f"the observable: BOLD-smoothed + {lo}-{hi} Hz\n{pb_filt:.0%} of power "
+               f"in band" if a.raw_npy else
+               f"bandpassed {lo}-{hi} Hz\n{pb_filt:.0%} of power in band")]
     fig = plt.figure(figsize=(4.0 * len(proj), 8.4), facecolor="black")
     gs = fig.add_gridspec(3, len(proj), height_ratios=[3.1, 3.1, 1.0],
                           hspace=0.08, wspace=0.02)
