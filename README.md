@@ -22,34 +22,11 @@ every candidate is realised and simulated before any number is quoted.
 
 ## What it looks like
 
-[![the best fit, on the surface](docs/best_field.gif)](docs/best_field.mp4)
-
-The loop above is the first 15 s, surfaces only; the full clip is
-[`docs/best_field.mp4`](docs/best_field.mp4) — 30 s, with the drive traced underneath.
-
-Both show depth `h` on the left fsaverage5 inflated surface, lateral / medial / dorsal,
-on a colour scale held fixed across the clip so amplitude stays comparable frame to frame
-instead of being renormalised. The mp4 adds the six loudest drive channels underneath,
-with a cursor on the current frame. It covers 600 saved frames of the 3,578-frame
-realisation — 97 s of 577 s — at 20 fps, about 3.2x real time.
-
-The run is `pr_taper`: 47 subcortically driven pieces over
-8,542 mm², spread 6 mm/s, decay 9.03 s pinned to the NKI autocorrelation, scoring
-**+0.7204 ± 0.0009** Spearman over 2M edges. To rebuild it:
-
-```bash
-python fit/best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
-  --pad 4096 --impulse-frames 224 --iters 400 --val-vert 0 --draws 2 \
-  --regions subcortical --split 40 --profile taper
-python viz/render_frames.py --tag pr_taper --start 200 --n 600 --save 16 --fps 20
-```
-
-### The nonlinear medium
-
 [![the fluid and the observable](docs/nonlinear_pair.png)](docs/nonlinear_pair.mp4)
 
-[`docs/nonlinear_pair.mp4`](docs/nonlinear_pair.mp4) — 30 s at 20 fps, 600 frames of a
-3,578-frame realisation. **Top row is the fluid itself**: no BOLD kernel, no passband,
+The clip is [`docs/nonlinear_pair.mp4`](docs/nonlinear_pair.mp4) — 30 s at 20 fps, 600
+frames of a 3,578-frame realisation, depth `h` on the left fsaverage5 inflated surface,
+lateral / medial / dorsal. **Top row is the fluid itself**: no BOLD kernel, no passband,
 nothing applied. **Bottom row is the observable** — the same realisation BOLD-smoothed and
 then bandpassed to 0.01–0.08 Hz, which is what the model is scored on and what a scanner
 would report. Same drive, same medium, same frames; only the observable differs. Colour
@@ -76,6 +53,21 @@ python fit/torch_fit.py --ref grclip100_nolag --init warm --seconds 577 --iters 
 python fit/render_fit.py --tag nl100_ld100_200 --ref grclip100_nolag
 python viz/render_bandpass.py --tag nl100_ld100_200v \
   --raw-npy results/frames_nl100_ld100_200v_raw.npy --start 200 --n 600 --save 4
+```
+
+### The linear fit it starts from
+
+The nonlinear run above is warm-started from a convex solve in the same medium, which
+scores **+0.6799 ± 0.0035** over the same 2,308 s. `docs/bandpass_pair.mp4` is the older
+pair figure, and [`docs/best_field.mp4`](docs/best_field.mp4) is a single-row surface clip
+of `pr_taper` — a different basis and clock, 47 subcortically driven pieces over 8,542 mm²
+at 6 mm/s and a 9.03 s decay, scoring **+0.7204 ± 0.0009**:
+
+```bash
+python fit/best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smooth \
+  --pad 4096 --impulse-frames 224 --iters 400 --val-vert 0 --draws 2 \
+  --regions subcortical --split 40 --profile taper
+python viz/render_frames.py --tag pr_taper --start 200 --n 600 --save 16 --fps 20
 ```
 
 `RUNS.md` indexes every solve and fit on disk with its parameters and its score.
