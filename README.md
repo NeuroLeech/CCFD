@@ -44,6 +44,42 @@ python fit/best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smoo
 python viz/render_frames.py --tag pr_taper --start 200 --n 600 --save 16 --fps 20
 ```
 
+### The nonlinear medium
+
+[![the fluid and the observable](docs/nonlinear_pair.png)](docs/nonlinear_pair.mp4)
+
+[`docs/nonlinear_pair.mp4`](docs/nonlinear_pair.mp4) — 30 s at 20 fps, 600 frames of a
+3,578-frame realisation. **Top row is the fluid itself**: no BOLD kernel, no passband,
+nothing applied. **Bottom row is the observable** — the same realisation BOLD-smoothed and
+then bandpassed to 0.01–0.08 Hz, which is what the model is scored on and what a scanner
+would report. Same drive, same medium, same frames; only the observable differs. Colour
+scales are per row and printed, because the observable is 0.29x the fluid's amplitude and
+a shared scale would leave the bottom row nearly blank.
+
+The fluid carries **14.2%** of its power in the 0.01–0.08 Hz band the observable keeps.
+
+This is a rotating, advecting, nonlinear medium — `(H + h)` in the depth update,
+momentum advection in vector-invariant form, and a 113 s inertial period against a 25 s
+decay. It is warm-started from the convex solve in the same medium and fitted by gradient
+descent through the simulation, which is what a nonlinearity requires: there is no `H` to
+factorise, so the cross-spectrum is no longer a convex problem. 200 iterations, converged
+(the last 25 gained 0.0001), no bed strikes. Scored **+0.6818 ± 0.0041** over 2,308 s,
+against the linear solve's **+0.6799 ± 0.0035** in the same medium.
+
+```bash
+python fit/best_fit.py --oversample 4 --decay-s 25 --spread-mm-s 1.5 --impulse-decays 7 \
+  --bandpass 0.01,0.08 --pad 4096 --nfreq 192 --bold-smooth --regions hybrid \
+  --hybrid-file results/xspec_asc_first_area_100.npz --split 50 --maps-scale 1 \
+  --map-clip iqr --seconds 2308 --iters 400 --draws 2 --val-vert 0 --tag grclip100_nolag
+python fit/torch_fit.py --ref grclip100_nolag --init warm --seconds 577 --iters 200 \
+  --coef-lim 0.45 --nl-flux 1 --nl-adv 1 --ld 100 --amp 3e-3 --tag nl100_ld100_200
+python fit/render_fit.py --tag nl100_ld100_200 --ref grclip100_nolag
+python viz/render_bandpass.py --tag nl100_ld100_200v \
+  --raw-npy results/frames_nl100_ld100_200v_raw.npy --start 200 --n 600 --save 4
+```
+
+`RUNS.md` indexes every solve and fit on disk with its parameters and its score.
+
 ## Layout
 
 The tree is five folders and no package: there is no install step and every script is run
