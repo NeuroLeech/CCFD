@@ -14,7 +14,7 @@ matter most here - wa, lag_taus, seed - are exactly the ones that were never sav
   python analysis/runs.py --print      # to stdout, leave the file alone
 """
 import _path  # noqa: F401  - puts the sibling code folders on sys.path
-import os, glob, json, argparse, datetime
+import os, re, glob, json, argparse, datetime
 import numpy as np
 
 import provenance
@@ -41,8 +41,10 @@ def scores_for(tag, z):
             out.update(json.load(open(sp)))
         except (ValueError, OSError):
             pass
-    return dict(sorted(out.items(),
-                       key=lambda kv: float(kv[0][:-1]) if kv[0][:-1].isdigit() else 0))
+    def _sec(k):
+        m = re.match(r"(\d+)s", k)
+        return float(m.group(1)) if m else 0.0
+    return dict(sorted(out.items(), key=lambda kv: (_sec(kv[0]), kv[0])))
 
 
 def _scalar(z, key, default=None):

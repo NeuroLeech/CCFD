@@ -126,7 +126,7 @@ def main():
                 rec = json.load(open(sp))
             except (ValueError, OSError):
                 rec = {}
-        rec[f"{int(round(a.seconds))}s"] = dict(
+        rec[f"{int(round(a.seconds))}s_{a.draws}d"] = dict(
             sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
             gap=float(np.mean(gaps)), field_rank=float(np.mean(rks)),
             frames=int(frames), draws=int(a.draws), seconds=float(a.seconds),
@@ -192,9 +192,19 @@ def main():
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
         if d == 0 and a.save_frames:
             sec = int(round(a.seconds))
+            # The SAME realisation with nothing applied - no BOLD kernel, no passband - so
+            # viz/render_bandpass.py can put the fluid itself on the top row. Its own
+            # resimulate_raw would re-integrate from the drive without reading map_clip,
+            # rebuilding an UNCLIPPED medium, and would leave the kernel on. Realised here
+            # instead, same drive and same medium as the observable beside it.
+            raw = xspec.score_realisation(c, t, p, A, save=save, profiles=P, kernel=None,
+                                          band=None, frame_s=None, segment=seg)
             np.save(os.path.join(RESULTS, f"frames_{a.tag}_{sec}s.npy"), r["frames"])
+            np.save(os.path.join(RESULTS, f"frames_{a.tag}_{sec}s_raw.npy"),
+                    np.asarray(raw["frames"], np.float32))
             np.save(os.path.join(RESULTS, f"drive_{a.tag}_{sec}s.npy"), r["drive"].Aser)
-            print(f"    wrote frames_{a.tag}_{sec}s.npy", flush=True)
+            print(f"    wrote frames_{a.tag}_{sec}s.npy and _raw.npy "
+                  f"(the bare field: no BOLD kernel, no passband)", flush=True)
     if pool is not None:
         for sim, gap, rk, _sa in res.get():
             sims.append(sim); gaps.append(gap); rks.append(rk)
@@ -214,7 +224,10 @@ def main():
             rec = json.load(open(sp))
         except (ValueError, OSError):
             rec = {}
-    rec[f"{int(round(a.seconds))}s"] = dict(
+    # keyed by length AND draw count: a one-draw check and a six-draw measurement are two
+    # estimates of the same quantity, not revisions of one, and keying by length alone lets
+    # the cheaper one silently replace the better.
+    rec[f"{int(round(a.seconds))}s_{a.draws}d"] = dict(
         sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
         gap=float(np.mean(gaps)), field_rank=float(np.mean(rks)),
         frames=int(frames), draws=int(a.draws), seconds=float(a.seconds))
