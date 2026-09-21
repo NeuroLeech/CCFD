@@ -57,10 +57,26 @@ python viz/render_bandpass.py --tag nl100_ld100_200v \
 
 ### The linear fit it starts from
 
-The nonlinear run above is warm-started from a convex solve in the same medium, which
-scores **+0.6799 ± 0.0035** over the same 2,308 s. `docs/bandpass_pair.mp4` is the older
-pair figure, and [`docs/best_field.mp4`](docs/best_field.mp4) is a single-row surface clip
-of `pr_taper` — a different basis and clock, 47 subcortically driven pieces over 8,542 mm²
+![the linear solve, fluid and observable](docs/linear_pair.gif)
+
+The nonlinear run above is warm-started from a convex solve in the **same medium**, and
+that solve is what the loop above shows — same two rows, same 577 s realisation, same
+window. It scores **+0.6799 ± 0.0035** over 2,308 s, against the nonlinear fit's
+**+0.6818 ± 0.0041**. Its fluid carries **11.9%** of its power in band where the
+nonlinear one carries 14.2%, and it runs about a ninth of the amplitude, since the
+convex drive sits at x1 where the nonlinear fit is driven at x15.
+
+The loop is cut to 10 s at 10 fps; the full 30 s clip lands in `results/`, which is
+gitignored, so it is rebuilt rather than fetched:
+
+```bash
+python fit/rescore.py --tag grclip100_nolag --seconds 577 --draws 1 --save-frames
+python viz/render_bandpass.py --tag grclip100_nolag_577s \
+  --raw-npy results/frames_grclip100_nolag_577s_raw.npy --start 200 --n 600 --save 4
+```
+
+[`docs/best_field.mp4`](docs/best_field.mp4) is an older single-row surface clip of
+`pr_taper` — a different basis and clock, 47 subcortically driven pieces over 8,542 mm²
 at 6 mm/s and a 9.03 s decay, scoring **+0.7204 ± 0.0009**:
 
 ```bash
