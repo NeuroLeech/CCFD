@@ -4,7 +4,16 @@ data/msc/
 
 # Derived and reproducible: caches, simulation output, videos.
 data/cache/
-results/
+results/*
+!results/fc/
+results/fc/*
+# ...except the group FC target. Everything is scored against it, it is not rebuildable
+# without the RBC DataLad clone, and a fresh checkout - a cloud session included - can
+# otherwise build a mesh and a basis but has nothing to compare them to. 331 MiB, so it
+# goes through Git LFS; see .gitattributes.
+!results/fc/group-RBCNKI100_hemi-L_space-fsaverage5_mask-glasser_spearmanfc.npy
+!results/fc/group-RBCNKI100_hemi-L_space-fsaverage5_mask-glasser_vertices.npy
+!results/fc/group-RBCNKI100_hemi-L_space-fsaverage5_mask-glasser_meta.json
 
 # local tool config
 .claude/
