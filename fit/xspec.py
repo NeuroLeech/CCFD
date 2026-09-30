@@ -105,9 +105,30 @@ def profile_tag(profiles):
     return f"prof{profiles.shape[0]}x{float(profiles.sum()):.3f}h{h}"
 
 
+def keep_tag(keep):
+    """Short content hash of a vertex restriction, for cache keys."""
+    import hashlib
+    k = np.ascontiguousarray(np.asarray(keep, np.int64))
+    return f"_keep{k.size}h{hashlib.sha1(k.tobytes()).hexdigest()[:10]}"
+
+
 def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=None,
-                      verbose=True, dt=None, coupling=None, workers=0, cache=True):
+                      verbose=True, dt=None, coupling=None, workers=0, cache=True,
+                      keep=None):
     """(K, nframes, nV) response of the field to one impulse in each region.
+
+    `keep` stores only those vertex columns, giving (K, nframes, len(keep)). The
+    INTEGRATION is unchanged - every step still evolves the whole sheet - so this costs
+    nothing and changes no number; it only stops the array being carried at full width
+    when almost none of it is read. `transfer` is the sole consumer and it uses the solve
+    vertices alone, 1,000 of 9,374, and `best_fit` then pads that array to a power of two
+    while the original is still live. At the incumbent window that peak is ~18 GiB; at the
+    window a ten-times-faster medium needs, where decay runs 1,550 frames instead of 155,
+    it is ~95 GiB at full width against ~10 GiB restricted.
+
+    `keep` is indices into the cortex submesh, and the returned columns are in the order
+    given, so a caller must re-index its own `cols` into that frame - which is what makes
+    the restriction visible rather than silent.
 
     `profiles` overrides the parcel tapers with an explicit (K, nV) profile matrix, which
     is how sub-parcel pieces are driven. `dt` overrides the CFL timestep, which switching
@@ -129,12 +150,15 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
     # every cache already on disk still hits.
     mc = p.get("map_clip")
     mtag = "" if mc in (None, "", "none") else f"_mc{mc}"
+    # Narrowing the stored columns changes the ARRAY, not the physics, but a full-width
+    # cache cannot stand in for a restricted one or the reverse, so the key says which.
+    ktag = "" if keep is None else keep_tag(keep)
     dtag = "" if dt is None else f"_dt{float(dt):.8g}"
     ctag = "" if coupling is None else "_" + coupling.key()
     key = (f"{cortex.mesh}_sig{p['sig0']:.6g}_c{p['c0']:.6g}_Ld{p['Ld']:.6g}"
            f"_spg{p.get('sponge_scale', 1.0):.4g}_a{np.round(p.get('a', 0), 3)}"
            f"_b{np.round(p.get('b', 0), 3)}{mtag}_{len(regions)}_{nsteps}_{save}"
-           f"{ptag}{dtag}{ctag}")
+           f"{ptag}{dtag}{ctag}{ktag}")
     cache_f = os.path.join(CACHE, "impulse_" + key.replace(" ", "") + ".npy")
     # `cache=False` for medium SEARCHES. The key carries a and b, so every candidate is a
     # miss, and one 47-piece set is 1.79 GB - a few dozen candidates fill the disk.
@@ -144,9 +168,10 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
         T, ids = parcel_tapers(cortex, verbose=False)
         pos = {int(q): i for i, q in enumerate(ids)}
         profiles = np.stack([T[pos[int(k)]] for k in regions])
+    kv = None if keep is None else np.asarray(keep, np.int64)
     if workers and workers > 1:
         out = _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling,
-                                 workers, verbose)
+                                 workers, verbose, kv)
     else:
         s, dt, g, H = fl.build(cortex, p, sponge=True, dt=dt, coupling=coupling)
         out = []
@@ -157,11 +182,11 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
                 s.coupling.reset()
             h = profiles[k].astype(np.float32).copy()
             ue = np.zeros(s.nE, np.float32)
-            fr = [h.copy()]
+            fr = [(h if kv is None else h[kv]).copy()]
             for n in range(1, nsteps):
                 ue, h = s.step(ue, h, np.float32(dt), g, H)
                 if n % save == 0:
-                    fr.append(h.copy())
+                    fr.append((h if kv is None else h[kv]).copy())
             out.append(np.asarray(fr))
             if verbose:
                 print(f"  impulse {k:3d}: peak {np.abs(fr[0]).max():.3f} -> "
@@ -175,8 +200,9 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
 _W_IMP = {}
 
 
-def _imp_init(cortex, p, profiles, dt, coupling):
-    _W_IMP.update(cortex=cortex, p=p, profiles=profiles, dt=dt, coupling=coupling)
+def _imp_init(cortex, p, profiles, dt, coupling, keep=None):
+    _W_IMP.update(cortex=cortex, p=p, profiles=profiles, dt=dt, coupling=coupling,
+                  keep=keep)
 
 
 def _imp_one(args):
@@ -187,17 +213,19 @@ def _imp_one(args):
     # this is the same hazard as the serial loop, not merely defensive
     if s.coupling is not None:
         s.coupling.reset()
+    kv = _W_IMP.get("keep")
     h = _W_IMP["profiles"][k].astype(np.float32).copy()
     ue = np.zeros(s.nE, np.float32)
-    fr = [h.copy()]
+    fr = [(h if kv is None else h[kv]).copy()]
     for n in range(1, nsteps):
         ue, h = s.step(ue, h, np.float32(dt), g, H)
         if n % save == 0:
-            fr.append(h.copy())
+            fr.append((h if kv is None else h[kv]).copy())
     return np.asarray(fr)
 
 
-def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers, verbose):
+def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers, verbose,
+                       keep=None):
     """One impulse per piece, across processes.
 
     The pieces are completely independent - each is a separate initial condition evolving
@@ -209,7 +237,7 @@ def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers,
     if verbose:
         print(f"  {K} impulses over {workers} workers", flush=True)
     with ctx.Pool(workers, initializer=_imp_init,
-                  initargs=(cortex, p, profiles, dt, coupling)) as pool:
+                  initargs=(cortex, p, profiles, dt, coupling, keep)) as pool:
         out = pool.map(_imp_one, [(k, nsteps, save) for k in range(K)])
     return np.asarray(out)
 

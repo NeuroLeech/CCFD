@@ -671,14 +671,31 @@ def main():
               f"(needs << 1); window {a.impulse_frames} > {need:.0f} frames needed")
     nb = a.regimes
     if nb == 1:
+        # `transfer` reads the solve vertices and the held-out ones and nothing else, so
+        # only those columns are stored. The integration is untouched - every step still
+        # evolves the whole sheet - and no number changes; what changes is that the array
+        # is not carried at 9,374 columns when 1,000 are read, then padded to a power of
+        # two with the original still live. The saving scales with the impulse window, so
+        # it is small now and decisive for a faster medium, where a lower per-step damping
+        # makes the response ring for ten times as many frames.
+        cols_need = t.cols[sub] if val is None else np.concatenate([t.cols[sub],
+                                                                    t.cols[val]])
+        keep, inv = np.unique(np.asarray(cols_need, np.int64), return_inverse=True)
+        sub_k = inv[:len(sub)]                       # the same vertices, re-indexed
+        val_k = None if val is None else inv[len(sub):]
         resp = xspec.impulse_responses(c, list(range(len(P))), p, a.impulse_frames * save, save,
                                        profiles=P, verbose=False, coupling=cpl,
-                                       workers=a.workers)
+                                       workers=a.workers, keep=keep)
         R = np.pad(resp, ((0, 0), (0, max(0, a.pad - resp.shape[1])), (0, 0)))
-        H, w, idx = xspec.transfer(R, t.cols[sub], a.nfreq, kernel=kern)
-        Hv = (xspec.transfer(R, t.cols[val], a.nfreq, kernel=kern)[0]
+        del resp                                     # the pad already copied it
+        print(f"  impulse responses over {len(keep)} of {c.nV} vertices "
+              f"({R.nbytes/2**30:.2f} GiB padded, {9374/max(len(keep),1):.1f}x smaller "
+              f"than full width)")
+        H, w, idx = xspec.transfer(R, sub_k, a.nfreq, kernel=kern)
+        Hv = (xspec.transfer(R, val_k, a.nfreq, kernel=kern)[0]
               if val is not None else None)
         ref_frames, ps, dt = R.shape[1], None, None
+        del R                    # H and Hv are all that is wanted from it
         if bp is not None:
             # the filter is linear, so like the smoothing kernel it simply multiplies the
             # transfer function - the solve is unchanged and costs nothing extra
