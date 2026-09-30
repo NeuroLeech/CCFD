@@ -57,7 +57,15 @@ def _subfields_cached():
     return bool(glob.glob(os.path.join(ascending.CACHE, "thalamus_subfields_*.npz")))
 
 
+# Two preconditions, not one. A cached subfield is not enough: the cache is
+# content-hashed, so a manifest or cortex that does not match one on disk falls through to
+# _run_dsi and the test fails on a missing binary rather than skipping. Tractography is not
+# on the path any current fit uses - ascending_basis.py, which builds the hybrid basis, has
+# no import of this module, and best_fit only imports it under --regions ascending - so a
+# machine without DSI Studio should skip here, not fail.
 @pytest.mark.skipif(not _subfields_cached(), reason="subfields cache missing")
+@pytest.mark.skipif(not os.path.exists(ascending.DSI_STUDIO),
+                    reason="dsi_studio not installed; a cache miss would have to track")
 def test_relay_fields_anatomy():
     c = _cortex()
     names, F = ascending.load_fields(c, verbose=False)
