@@ -43,13 +43,29 @@ independent noise and not a pipeline that computes the wrong quantity.
     linear        -      0.912   0.961    0.978       ~106 s
     envelope    0.128    0.171   0.288    0.392       ~12,700 s
 
-Fitting r^2 = T/(T+T0): the envelope needs about 120x the data the linear observable needs
-for the same relative accuracy, because it is a fourth moment of a signal whose passband
-leaves ~40 independent samples in 577 s. The realised score then tracks r almost exactly:
-r x (closed form score) predicts +0.128 against +0.123 measured at 577 s, +0.293 against
-+0.286 at 2,308 s, and for the linear +0.702 against +0.7057. So +0.198 at 577 s is a
-statement about the estimator, not about the model, and a realised envelope score near
-+0.70 needs r ~ 0.94, which is ~96,000 s of simulated time - about 42 draws at 2,308 s.
+Fitting r^2 = T/(T+T0) the envelope needs ~120x the data for the same relative accuracy,
+and that factor decomposes to within 1%:
+
+    fourth- vs second-moment sampling error   4.90/sqrt(N) vs 1.41/sqrt(N)    3.46x
+      for Gaussian x, E[x^8] = 105 sigma^8, so var(x^4) = 96 sigma^8
+    pattern contrast, correlation form        sd 0.0680 vs 0.2132             3.14x
+      C_ij(tau)^2 is non-negative, so the envelope discards the sign: 22% of its
+      off-diagonals are negative against the linear's 40%
+    product 10.9x against the measured sqrt(12713/106) = 11.0x
+
+The realised score tracks r x (closed form score): +0.128 predicted against +0.123 measured
+at 577 s, +0.293 against +0.286 at 2,308 s, +0.702 against +0.7057 for the linear. So
++0.198 at 577 s is a statement about the estimator, not about the model.
+
+WHAT THE REALISATION IS AND IS NOT FOR. Reaching r ~ 0.94 would take ~96,000 s of simulated
+time, and paying that to SCORE the model would be a mistake: the drive is drawn Gaussian
+and the medium is linear, so the field is exactly Gaussian, Wick is exact rather than
+approximate, and the closed form IS the model's prediction. Simulating is for three
+narrower things - catching a pipeline that computes the wrong quantity (the split half does
+this for free), reaching all 9,310 vertices where the envelope closed form cannot go, and
+testing the Gaussianity itself: a field left non-Gaussian by the solver would bias the
+closed form, and the only signature is pooled r PLATEAUING BELOW the curve as draws
+accumulate, which the split half cannot see.
 
 MATCHED, both at 400 solve vertices on the same medium and target, as population
 quantities with no estimator noise in either - the interpolant row, which is what each
