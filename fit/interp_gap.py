@@ -67,6 +67,24 @@ testing the Gaussianity itself: a field left non-Gaussian by the solver would bi
 closed form, and the only signature is pooled r PLATEAUING BELOW the curve as draws
 accumulate, which the split half cannot see.
 
+That test ran, 16 draws of 2,308 s pooled as covariances, and the curve held across a 16x
+range of effective length - 90% of prediction at 2 draws rising to 98% and staying there:
+
+    draws     1      2      3      4      6      8     11     14     16
+    r      0.392  0.465  0.568  0.615  0.706  0.756  0.797  0.837  0.849
+    pred      -   0.516  0.594  0.649  0.722  0.770  0.816  0.847  0.863
+
+No plateau, so no detectable non-Gaussianity: the real-scale envelope closed form is
+confirmed empirically and not only on the toy. The matched realised comparison at the end
+of it, both on the same 400 vertices:
+
+    linear    +0.7029 of a closed form +0.7219 in ONE draw of 2,308 s   (r 0.970, T0 145s)
+    envelope  +0.6319 of a closed form +0.7470 in SIXTEEN              (r 0.849, T0 12.7ks)
+
+The envelope's realised number is lower at every finite budget and its POPULATION number is
+higher. Matching the linear's +0.7029 would need r ~ 0.941, about 43 draws. There is no
+reason to pay it: the closed forms are the predictions and they are already in hand.
+
 MATCHED, both at 400 solve vertices on the same medium and target, as population
 quantities with no estimator noise in either - the interpolant row, which is what each
 one actually draws:
