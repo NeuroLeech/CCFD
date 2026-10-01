@@ -117,6 +117,86 @@ def lagged_from_full(Phi, nframes):
     return np.fft.irfft(Z, n=nframes, axis=0) * nframes
 
 
+def env_forward(H, w, S, ph, rho):
+    """-> (E, C). The envelope covariance and the lagged field covariances behind it.
+
+    UNCENTRED, unlike lagged.model_lagged: the square has to happen before any centring,
+    since centring is a linear operation on the observable and the observable here is
+    h^2, not h."""
+    nf, nV, _ = H.shape
+    C = np.zeros((ph.shape[0], nV, nV))
+    for f in range(nf):
+        M = (H[f] @ S[f]) @ H[f].conj().T
+        for k in range(ph.shape[0]):
+            C[k] += (w[f] * 2.0) * np.real(ph[k, f] * M)
+    return 2.0 * np.einsum("t,tij->ij", rho, C ** 2), C
+
+
+def env_adjoint(H, w, G, C, ph, rho):
+    """dJ/dS given dJ/dE = G, chained through E = 2 sum_tau rho(tau) C(tau)^2.
+
+    dE/dC_k = 4 rho_k C_k elementwise, then the same adjoint lagged.adjoint_lagged
+    derives for the linear map S -> Phi(tau): w_f 2 exp(-i th) H^H M H, Hermitianised.
+    Without the centring adjoint, to match env_forward."""
+    Ms = (4.0 * rho[:, None, None]) * C * G[None]
+    nf, nV, K = H.shape
+    out = np.zeros((nf, K, K), complex)
+    for f in range(nf):
+        acc = np.zeros((K, K), complex)
+        for k in range(ph.shape[0]):
+            acc += np.conj(ph[k, f]) * (H[f].conj().T @ Ms[k] @ H[f])
+        acc = (w[f] * 2.0) * acc
+        out[f] = 0.5 * (acc + acc.conj().T)
+    return out
+
+
+def solve_envelope(H, w, ph, rho, T, iters=200, S0=None, verbose=False):
+    """Projected gradient for max corr(E(S), T) over S >= 0, E the envelope covariance.
+
+    The same scheme xspec.solve uses on a ratio objective over the PSD cone, with one
+    difference that is the whole question: E is QUADRATIC in S, where the FC objective is
+    linear in it. Convexity is therefore not given, and random restarts are the test."""
+    nf, nV, K = H.shape
+    S = (np.stack([np.eye(K, dtype=complex) for _ in range(nf)]) if S0 is None
+         else np.array(S0, complex, copy=True))
+    iu = np.triu_indices(nV, 1)
+    t = np.asarray(T[iu], float); t = (t - t.mean()); t /= max(np.linalg.norm(t), 1e-300)
+
+    def obj(S):
+        E, C = env_forward(H, w, S, ph, rho)
+        e = E[iu] - E[iu].mean()
+        n = max(np.linalg.norm(e), 1e-300)
+        return float(e @ t / n), E, C, n
+
+    val, E, C, n = obj(S)
+    step = 1.0
+    for it in range(iters):
+        # d/dE of <e_hat, t>: (t - val * e_hat) / n, scattered back to a full matrix
+        g = (t - val * (E[iu] - E[iu].mean()) / n) / n
+        # HALF on each of (i,j) and (j,i): the objective reads the upper triangle only,
+        # while env_adjoint sums over every entry, so mirroring g unhalved counts each
+        # off-diagonal twice. Caught by finite differences as an exact factor of 2.
+        G = np.zeros((nV, nV)); G[iu] = g; G = 0.5 * (G + G.T)
+        grad = env_adjoint(H, w, G, C, ph, rho)
+        moved = False
+        for _ in range(40):
+            Tn = xspec._project(S + step * grad, 1, False, None)
+            tr = sum(np.trace(Tn[f]).real for f in range(nf))
+            if tr > 0:
+                Tn = Tn / tr
+            v2, E2, C2, n2 = obj(Tn)
+            if v2 > val:
+                S, val, E, C, n = Tn, v2, E2, C2, n2
+                step *= 1.6; moved = True
+                break
+            step *= 0.4
+        if not moved:
+            break
+        if verbose and it % 25 == 0:
+            print(f"      iter {it:4d}  corr {val:+.6f}", flush=True)
+    return S, val
+
+
 def corr(a, b):
     a = np.asarray(a, float).ravel(); b = np.asarray(b, float).ravel()
     a = a - a.mean(); b = b - b.mean()
@@ -189,6 +269,10 @@ def main():
                          "(square, then filter) on the same known drive, and check the "
                          "closed form against a simulation")
     ap.add_argument("--sim-reps", type=int, default=24, dest="sim_reps")
+    ap.add_argument("--solve-envelope", action="store_true", dest="solve_env",
+                    help="fit S against an ENVELOPE target: finite-difference check the "
+                         "gradient, then solve from random restarts. E(S) is quadratic in "
+                         "S where the FC objective is linear, so convexity is the question")
     ap.add_argument("--burn", type=int, default=128)
     a = ap.parse_args()
     lo, hi = (float(v) for v in a.band.split(","))
@@ -233,6 +317,67 @@ def main():
     S_true = psd_truth(len(idx), K, a.rank, rng, keep=sel)
     print(f"  true S: rank {a.rank}, power {a.true_band}"
           + ("" if sel is None else f" ({int(sel.sum())} of {len(idx)} bins)"))
+
+    if a.solve_env:
+        import lagged as _lg
+        nb = pad // 2 + 1
+        kr = units.kernel_response(kern, nb, pad)
+        rho_all = filter_autocorr(nb, pad, np.arange(pad), kr)
+        m = np.abs(rho_all) > 1e-8 * np.abs(rho_all).max()
+        lags, rho = np.arange(pad)[m], rho_all[m]
+        ph = _lg.phases(idx, pad, lags)
+        iu = np.triu_indices(a.nvert, 1)
+        print(f"\n  envelope objective: {len(lags)} lags carry the kernel "
+              f"autocorrelation (of {pad})")
+
+        # ---- the adjoint has to be right before anything downstream means anything
+        r3 = np.random.default_rng(7)
+        Sg = psd_truth(len(idx), K, K, r3)
+        Tg, _ = env_forward(H0, w, S_true, ph, rho)
+        tv = Tg[iu] - Tg[iu].mean(); tv /= max(np.linalg.norm(tv), 1e-300)
+
+        def J(S):
+            E, C = env_forward(H0, w, S, ph, rho)
+            e = E[iu] - E[iu].mean()
+            return float(e @ tv / max(np.linalg.norm(e), 1e-300)), E, C
+
+        v0, E0, C0 = J(Sg)
+        g0 = (tv - v0 * (E0[iu] - E0[iu].mean())
+              / max(np.linalg.norm(E0[iu] - E0[iu].mean()), 1e-300))
+        g0 = g0 / max(np.linalg.norm(E0[iu] - E0[iu].mean()), 1e-300)
+        G0 = np.zeros((a.nvert, a.nvert)); G0[iu] = g0; G0 = 0.5 * (G0 + G0.T)
+        grad = env_adjoint(H0, w, G0, C0, ph, rho)
+        D = r3.normal(size=(len(idx), K, K)) + 1j * r3.normal(size=(len(idx), K, K))
+        D = 0.5 * (D + np.conj(np.transpose(D, (0, 2, 1))))
+        D /= np.linalg.norm(D)
+        ana = float(sum(np.real(np.trace(grad[f].conj().T @ D[f]))
+                        for f in range(len(idx))))
+        print("  finite-difference check of the adjoint:")
+        for eps in (1e-5, 1e-6):
+            num = (J(Sg + eps * D)[0] - J(Sg - eps * D)[0]) / (2 * eps)
+            print(f"    eps {eps:.0e}: analytic {ana:+.8f}  numeric {num:+.8f}  "
+                  f"rel err {abs(num-ana)/max(abs(ana),1e-30):.2e}")
+
+        # ---- recover a known drive through the envelope observable
+        print(f"\n  recovering the true drive from an ENVELOPE target, "
+              f"{a.starts} restarts:")
+        vals, sims, smarg = [], [], []
+        for st in range(a.starts):
+            r4 = np.random.default_rng(2000 + st)
+            S0 = psd_truth(len(idx), K, K, r4)
+            Sh, v = solve_envelope(H0, w, ph, rho, Tg, iters=a.iters, S0=S0)
+            Eh, _ = env_forward(H0, w, Sh, ph, rho)
+            vals.append(v)
+            sims.append(corr(Eh[iu], Tg[iu]))
+            smarg.append(corr(np.real(Sh.sum(0)), np.real(S_true.sum(0))))
+            print(f"    start {st}: objective {v:+.6f}  corr(E_hat, T) {sims[-1]:+.6f}  "
+                  f"corr(sum_f S) {smarg[-1]:+.4f}", flush=True)
+        rel = np.std(vals) / max(abs(np.mean(vals)), 1e-30)
+        print(f"  objective {np.mean(vals):+.6f}, spread {np.std(vals):.2e} "
+              f"({rel:.1e} relative) "
+              + ("- one optimum, behaves convexly" if rel < 1e-3
+                 else "- STARTS DISAGREE, not convex on this problem"))
+        return
 
     if a.envelope:
         nb = pad // 2 + 1
