@@ -126,7 +126,12 @@ def env_forward(H, w, S, ph, rho):
     nf, nV, _ = H.shape
     # as one gemm rather than nf x nlag Python iterations: at 192 bins and 55 lags the
     # loop is ~10,000 passes per objective evaluation and a line search wants hundreds
-    M = np.einsum("fva,fab,fwb->fvw", H, S, H.conj())
+    # Batched matmuls, NOT np.einsum without optimize=True: einsum does not plan a
+    # pairwise contraction and materialises an (f,v,a,b,w) intermediate - 4e7 elements at
+    # toy scale and harmless, 1e13 at 1,000 vertices and 100 channels, where it runs the
+    # machine out of memory outright. Measured at real scale this form costs 0.88 s
+    # against the linear forward's 0.52 s, a factor of 1.7.
+    M = (H @ S) @ np.conj(np.transpose(H, (0, 2, 1)))
     C = 2.0 * np.real((ph * w[None, :]) @ M.reshape(nf, -1)).reshape(-1, nV, nV)
     return 2.0 * np.einsum("t,tij->ij", rho, C ** 2), C
 
@@ -441,7 +446,7 @@ def main():
     if a.envelope:
         nb = pad // 2 + 1
         lags = np.arange(pad)
-        Phi = np.einsum("fva,fab,fwb->fvw", H_raw, S_true, H_raw.conj())
+        Phi = (H_raw @ S_true) @ np.conj(np.transpose(H_raw, (0, 2, 1)))
         Clag = field_lagged_cov(Phi, w, idx, pad, lags)
         iu = np.triu_indices(a.nvert, 1)
 
@@ -463,7 +468,7 @@ def main():
         Hf, wf, idxf = xspec.transfer(R, np.arange(a.nvert), 0, kernel=None,
                                       idx=np.arange(1, nb))
         Sf = interp_S(S_true, idx, pad, pad)[1:]
-        Phif = np.einsum("fva,fab,fwb->fvw", Hf, Sf, Hf.conj())
+        Phif = (Hf @ Sf) @ np.conj(np.transpose(Hf, (0, 2, 1)))
         Pfull = np.zeros((nb,) + Phif.shape[1:], complex)
         Pfull[1:] = Phif
         Clag_f = lagged_from_full(Pfull, pad)
