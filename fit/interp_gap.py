@@ -43,15 +43,28 @@ independent noise and not a pipeline that computes the wrong quantity.
     linear        -      0.912   0.961    0.978       ~106 s
     envelope    0.128    0.171   0.288    0.392       ~12,700 s
 
-Fitting r^2 = T/(T+T0) the envelope needs ~120x the data for the same relative accuracy,
-and that factor decomposes to within 1%:
+Fitting r^2 = T/(T+T0) the envelope needs ~90-120x the data for the same relative accuracy.
+WHY is only partly established; see fit/why_noisy.py, which measures both observables on one
+simulation of one drive. What that found:
 
-    fourth- vs second-moment sampling error   4.90/sqrt(N) vs 1.41/sqrt(N)    3.46x
-      for Gaussian x, E[x^8] = 105 sigma^8, so var(x^4) = 96 sigma^8
-    pattern contrast, correlation form        sd 0.0680 vs 0.2132             3.14x
+    in-band spectral shape    centroid 0.0405 Hz vs 0.0394 Hz        SAME
+      so both have the same number of independent samples - the obvious explanation,
+      that the envelope's in-band power piles up at 0.01 Hz, is not what happens
+    estimator noise per edge  0.0446 vs 0.0538                       1.21x
+      consistent with the kurtosis, sqrt((2+1.27)/2) = 1.28: the bandpass removes most
+      of the fourth-moment penalty, which a scalar-Gaussian var(x^4)/var(x^2) argument
+      puts at 3.46x and which is NOT what the measurement shows
+    pattern contrast          sd 0.2535 vs 0.0852                    2.98x
       C_ij(tau)^2 is non-negative, so the envelope discards the sign: 22% of its
       off-diagonals are negative against the linear's 40%
-    product 10.9x against the measured sqrt(12713/106) = 11.0x
+
+Product 3.59x, so T0 should scale 13x against the measured 88x, and a factor of ~7 is
+unaccounted for. An earlier version of this docstring multiplied the 3.46x paper figure by
+3.14x to get 10.9x against a measured 11.0x and called it closed; that was two wrong numbers
+landing on the right answer. Two untested reasons the shortfall may be in the measurement:
+the block-split noise scales 16 blocks of 144 s by sqrt(16) when the passband's memory is
+~255 s so they are not independent, and the contrast and noise above are raw
+correlation-form while r and T0 come from DOUBLE-CENTRED upper triangles.
 
 The realised score tracks r x (closed form score): +0.128 predicted against +0.123 measured
 at 577 s, +0.293 against +0.286 at 2,308 s, +0.702 against +0.7057 for the linear. So
