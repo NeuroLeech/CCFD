@@ -124,11 +124,10 @@ def env_forward(H, w, S, ph, rho):
     since centring is a linear operation on the observable and the observable here is
     h^2, not h."""
     nf, nV, _ = H.shape
-    C = np.zeros((ph.shape[0], nV, nV))
-    for f in range(nf):
-        M = (H[f] @ S[f]) @ H[f].conj().T
-        for k in range(ph.shape[0]):
-            C[k] += (w[f] * 2.0) * np.real(ph[k, f] * M)
+    # as one gemm rather than nf x nlag Python iterations: at 192 bins and 55 lags the
+    # loop is ~10,000 passes per objective evaluation and a line search wants hundreds
+    M = np.einsum("fva,fab,fwb->fvw", H, S, H.conj())
+    C = 2.0 * np.real((ph * w[None, :]) @ M.reshape(nf, -1)).reshape(-1, nV, nV)
     return 2.0 * np.einsum("t,tij->ij", rho, C ** 2), C
 
 
@@ -140,12 +139,10 @@ def env_adjoint(H, w, G, C, ph, rho):
     Without the centring adjoint, to match env_forward."""
     Ms = (4.0 * rho[:, None, None]) * C * G[None]
     nf, nV, K = H.shape
-    out = np.zeros((nf, K, K), complex)
+    Y = (np.conj(ph).T @ Ms.reshape(ph.shape[0], -1)).reshape(nf, nV, nV)
+    out = np.empty((nf, K, K), complex)
     for f in range(nf):
-        acc = np.zeros((K, K), complex)
-        for k in range(ph.shape[0]):
-            acc += np.conj(ph[k, f]) * (H[f].conj().T @ Ms[k] @ H[f])
-        acc = (w[f] * 2.0) * acc
+        acc = (w[f] * 2.0) * (H[f].conj().T @ Y[f] @ H[f])
         out[f] = 0.5 * (acc + acc.conj().T)
     return out
 
@@ -269,6 +266,14 @@ def main():
                          "(square, then filter) on the same known drive, and check the "
                          "closed form against a simulation")
     ap.add_argument("--sim-reps", type=int, default=24, dest="sim_reps")
+    ap.add_argument("--grid-sweep", default="", dest="grid_sweep",
+                    help="comma-separated nfreq values. Fixes S_true on the FULL rfft "
+                         "grid, builds the target from it, then solves at each density "
+                         "against that one truth - so only the model's resolution varies, "
+                         "where regenerating S_true per grid would change the problem too. "
+                         "Runs both objectives: the linear one sees C(0) alone, the "
+                         "envelope sees C(tau) at every lag, so the spectrum's fine "
+                         "structure enters them differently")
     ap.add_argument("--solve-envelope", action="store_true", dest="solve_env",
                     help="fit S against an ENVELOPE target: finite-difference check the "
                          "gradient, then solve from random restarts. E(S) is quadratic in "
@@ -323,6 +328,51 @@ def main():
     S_true = psd_truth(len(idx), K, a.rank, rng, keep=sel)
     print(f"  true S: rank {a.rank}, power {a.true_band}"
           + ("" if sel is None else f" ({int(sel.sum())} of {len(idx)} bins)"))
+
+    if a.grid_sweep:
+        import lagged as _lg
+        nb = pad // 2 + 1
+        iu = np.triu_indices(a.nvert, 1)
+        kr = units.kernel_response(kern, nb, pad)
+        resp = kr * bandpass.response(np.arange(nb) / (pad * cl["frame_s"]),
+                                      cl["frame_s"], lo, hi)
+        rho_all = filter_autocorr(nb, pad, np.arange(pad), resp)
+        m = np.abs(rho_all) > 1e-8 * np.abs(rho_all).max()
+        lags, rho = np.arange(pad)[m], rho_all[m]
+
+        # the TRUTH, on every bin, held fixed across the sweep
+        idx_t = np.arange(1, nb)
+        H_t = xspec.transfer(R, np.arange(a.nvert), 0, kernel=None, idx=idx_t)[0]
+        w_t = np.ones(len(idx_t))
+        f_t = idx_t / (pad * cl["frame_s"])
+        sel_t = {"all": None, "slow": (f_t >= lo) & (f_t <= hi),
+                 "fast": ~((f_t >= lo) & (f_t <= hi))}[a.true_band]
+        St = psd_truth(len(idx_t), K, a.rank, np.random.default_rng(a.seed), keep=sel_t)
+        ph_t = _lg.phases(idx_t, pad, lags)
+        T_lin = forward(H_t * resp[idx_t][:, None, None], w_t, St)
+        T_env, _ = env_forward(H_t, w_t, St, ph_t, rho)
+        marg_t = np.real(St.sum(0))
+        indep = imp // 2
+        print(f"\n  truth fixed on all {len(idx_t)} bins; the impulse window is {imp} "
+              f"frames, so only ~{indep} of them are independent - above that a denser "
+              f"grid interpolates rather than informs, and recovery should flatten")
+        print(f"\n  {'nfreq':>6} {'bins':>5} | {'LINEAR':>26} | {'ENVELOPE':>26}")
+        print(f"  {'':>6} {'':>5} | {'corr(C,T)':>12} {'corr(sum S)':>13} "
+              f"| {'corr(E,T)':>12} {'corr(sum S)':>13}")
+        for nq in [int(v) for v in a.grid_sweep.split(",") if v.strip()]:
+            ii = np.unique(np.round(np.geomspace(1, nb - 1, nq)).astype(int))
+            Hc = xspec.transfer(R, np.arange(a.nvert), 0, kernel=None, idx=ii)[0]
+            wc = np.gradient(ii).astype(float)
+            Sl, Cl = xspec.solve(Hc * resp[ii][:, None, None], wc, T_lin,
+                                 iters=a.iters, verbose=False)
+            ph_c = _lg.phases(ii, pad, lags)
+            Se, _ = solve_envelope(Hc, wc, ph_c, rho, T_env, iters=a.iters)
+            Ee, _ = env_forward(Hc, wc, Se, ph_c, rho)
+            print(f"  {nq:>6} {len(ii):>5} | {corr(Cl[iu], T_lin[iu]):>+12.6f} "
+                  f"{corr(np.real(Sl.sum(0)), marg_t):>+13.4f} "
+                  f"| {corr(Ee[iu], T_env[iu]):>+12.6f} "
+                  f"{corr(np.real(Se.sum(0)), marg_t):>+13.4f}", flush=True)
+        return
 
     if a.solve_env:
         import lagged as _lg
