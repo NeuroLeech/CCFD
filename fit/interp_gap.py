@@ -82,8 +82,27 @@ of it, both on the same 400 vertices:
     envelope  +0.6319 of a closed form +0.7470 in SIXTEEN              (r 0.849, T0 12.7ks)
 
 The envelope's realised number is lower at every finite budget and its POPULATION number is
-higher. Matching the linear's +0.7029 would need r ~ 0.941, about 43 draws. There is no
-reason to pay it: the closed forms are the predictions and they are already in hand.
+higher. Matching the linear's +0.7029 would need r ~ 0.941, about 43 draws.
+
+WHICH NUMBER IS THE SPEARMAN AGAINST EMPIRICAL FC. Not the objective: that is a Pearson
+against a normal-scored target on the solve vertices. The headline `sim` is
+_prep(model_edges) @ y, and _prep ranks, centres and normalises both sides while model_z
+ranks each TIMECOURSE first - so it is a Spearman between a Spearman model FC and the
+Spearman empirical FC over 2M edges on all 9,310 vertices. Three things separate it from the
+closed form, and only the first is estimator noise.
+
+The rank transform is not one of them. Measured on one 2,308 s draw, the Spearman FC scores
++0.4199 against the raw target where the covariance the closed form predicts scores +0.3931,
+so ranking the timecourses costs nothing here; the two model FCs agree at r +0.5643, which
+conflates the transform with how differently noise propagates through each and cannot be
+split by this measurement.
+
+What IS missing is the pooled headline number. `realise` pools the SOLVE-VERTEX covariance
+across draws, not the 9,310-vertex FC, so every all-9,310 figure in a 16-draw run is still a
+single-draw estimate: the envelope's +0.36 +- 0.03 per draw against the linear's +0.6536,
+while the pooled solve-vertex objective over the same draws went +0.286 -> +0.6319. The two
+are not comparable and the converged envelope Spearman is not known. Pooling the 2M-edge
+vector would cost 16 MB a draw and settle it.
 
 MATCHED, both at 400 solve vertices on the same medium and target, as population
 quantities with no estimator noise in either - the interpolant row, which is what each
@@ -335,6 +354,11 @@ def realise(a, c, t, g, S, kern, Cref, Tgt, iu, raw, centre, label):
     print(f'\n  simulating {a.draws} draw(s) of {nframes} frames ({a.realise:.0f}s)',
           flush=True)
     ref_score, Esum, T0 = score(Cref), None, None
+
+    def emp0(X):
+        E = np.cov(X, rowvar=False)
+        return double_centre(E) if centre else E
+
     for d in range(a.draws):
         t2 = time.time()
         Af = xspec.realise(S, g['idx'], nframes, ref_frames=g['pad'], seed=1000 + d)
@@ -352,6 +376,26 @@ def realise(a, c, t, g, S, kern, Cref, Tgt, iu, raw, centre, label):
         Z = (Z / np.maximum(Z.std(0, keepdims=True), 1e-300)).T
         all9 = float(t._prep(t.model_edges(Z=Z)[0]) @ t.y)
         Us = np.asarray(U[:, g['sub']], np.float64)
+
+        # The closed form predicts a COVARIANCE. The realised score does not read one: it
+        # rank-transforms each timecourse first, so the model FC it scores is a SPEARMAN
+        # FC, and the headline number is a Spearman across edges on top of that. For a
+        # Gaussian field the two FCs are monotonically related and ranking across edges
+        # nearly cancels it, which is why the linear path tracks its closed form. The
+        # envelope's observable is bandpass(h^2) and is NOT Gaussian, so the size of that
+        # step is an open quantity rather than a known-negligible one - measure it.
+        from scipy.stats import rankdata
+        Rz = rankdata(Us, axis=0)
+        Rz = Rz - Rz.mean(0, keepdims=True)
+        Rz = Rz / np.maximum(np.linalg.norm(Rz, axis=0, keepdims=True), 1e-300)
+        Sp = Rz.T @ Rz
+        if centre:
+            Sp = double_centre(Sp)
+        print(f'      model FC metric: pearson-FC spearman vs raw '
+              f'{spearmanr(emp0(Us)[iu], raw[iu]).statistic:+.4f}  vs  spearman-FC '
+              f'{spearmanr(Sp[iu], raw[iu]).statistic:+.4f}   '
+              f'(the two FCs agree at r {np.corrcoef(emp0(Us)[iu], Sp[iu])[0,1]:+.4f})',
+              flush=True)
 
         def emp(X):
             E = np.cov(X, rowvar=False)
