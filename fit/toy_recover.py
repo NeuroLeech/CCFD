@@ -324,7 +324,10 @@ def main():
           f"reach {cl['reach_mm']:.0f} mm   [setup {time.time()-t0:.1f}s]")
     print(f"  passband response over the solved bins: {br.min():.3f}-{br.max():.3f}")
 
-    sel = {"all": None, "slow": inband, "fast": ~inband}[a.true_band]
+    # "fast" means ABOVE the band, not merely outside it: ~inband also catches the bins
+    # below 0.01 Hz - bin 1 is 0.006 Hz at this clock - and the passband's lower skirt
+    # passes some of those, so a drive built that way is not the fast-input case at all.
+    sel = {"all": None, "slow": inband, "fast": f_hz > hi}[a.true_band]
     S_true = psd_truth(len(idx), K, a.rank, rng, keep=sel)
     print(f"  true S: rank {a.rank}, power {a.true_band}"
           + ("" if sel is None else f" ({int(sel.sum())} of {len(idx)} bins)"))
@@ -346,7 +349,7 @@ def main():
         w_t = np.ones(len(idx_t))
         f_t = idx_t / (pad * cl["frame_s"])
         sel_t = {"all": None, "slow": (f_t >= lo) & (f_t <= hi),
-                 "fast": ~((f_t >= lo) & (f_t <= hi))}[a.true_band]
+                 "fast": f_t > hi}[a.true_band]
         St = psd_truth(len(idx_t), K, a.rank, np.random.default_rng(a.seed), keep=sel_t)
         ph_t = _lg.phases(idx_t, pad, lags)
         T_lin = forward(H_t * resp[idx_t][:, None, None], w_t, St)
@@ -495,11 +498,22 @@ def main():
                                        cl["frame_s"], lo, hi))
         Cenv = envelope_cov(Clag, filter_autocorr(nb, pad, lags, resp))
         Clin = forward(H_raw * resp[np.asarray(idx)][:, None, None], w, S_true)
+        # The FRACTION of each observable's own variance that survives the passband.
+        # Comparing var(filter(h^2)) against var(filter(h)) directly is meaningless: one
+        # has units of h^4 and the other h^2, so their ratio carries units of h^2 and
+        # moves with an arbitrary scaling of S. Each fraction is dimensionless, and the
+        # question - does a fast drive leave anything in band - is per observable anyway.
+        rho_k_only = filter_autocorr(nb, pad, lags, kr)
+        lin_all = forward(H_raw * kr[np.asarray(idx)][:, None, None], w, S_true)
+        env_all = envelope_cov(Clag, rho_k_only)
+        fl = np.mean(np.diag(Clin)) / max(np.mean(np.diag(lin_all)), 1e-300)
+        fe = np.mean(np.diag(Cenv)) / max(np.mean(np.diag(env_all)), 1e-300)
         print(f"\n  === through the passband, true drive '{a.true_band}' ===")
-        print(f"    linear   observable variance  {np.mean(np.diag(Clin)):.4e}")
-        print(f"    envelope observable variance  {np.mean(np.diag(Cenv)):.4e}")
-        print(f"    envelope keeps {np.mean(np.diag(Cenv))/max(np.mean(np.diag(Clin)),1e-300):.2e}x "
-              f"the in-band variance of the linear one")
+        print(f"    fraction of its OWN variance each observable keeps in band:")
+        print(f"      linear   (filter the field)     {fl:.4e}")
+        print(f"      envelope (square, then filter)  {fe:.4e}")
+        print(f"      the envelope retains {fe/max(fl,1e-300):.1f}x the fraction "
+              f"the linear observable does")
         print(f"    corr(envelope FC, linear FC) = {corr(rmat(Cenv)[iu], rmat(Clin)[iu]):+.4f}"
               f"   (1.0 would mean the envelope sees nothing new)")
         return
