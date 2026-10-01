@@ -303,6 +303,12 @@ def main():
     kern = units.smoothing_kernel(timescale.bold_fwhm_frames(cl["frame_s"], verbose=False),
                                   verbose=False)
     H0, w, idx = xspec.transfer(R, np.arange(a.nvert), a.nfreq, kernel=kern)
+    # transfer() folds the kernel INTO H, which is what best_fit wants: its observable is
+    # linear in the field, so every filter can be pushed into the transfer function. An
+    # envelope observable cannot do that - it is smooth(h^2), not smooth(h)^2, so the
+    # square has to act on the RAW field and the filtering has to come after it. H_raw is
+    # the same transfer function with no filter applied, on the same bins.
+    H_raw = xspec.transfer(R, np.arange(a.nvert), a.nfreq, kernel=None, idx=idx)[0]
     br = bandpass.transfer_response(idx, pad, cl["frame_s"], lo, hi)
     f_hz = np.asarray(idx, float) / (pad * cl["frame_s"])
     inband = (f_hz >= lo) & (f_hz <= hi)
@@ -333,11 +339,11 @@ def main():
         # ---- the adjoint has to be right before anything downstream means anything
         r3 = np.random.default_rng(7)
         Sg = psd_truth(len(idx), K, K, r3)
-        Tg, _ = env_forward(H0, w, S_true, ph, rho)
+        Tg, _ = env_forward(H_raw, w, S_true, ph, rho)
         tv = Tg[iu] - Tg[iu].mean(); tv /= max(np.linalg.norm(tv), 1e-300)
 
         def J(S):
-            E, C = env_forward(H0, w, S, ph, rho)
+            E, C = env_forward(H_raw, w, S, ph, rho)
             e = E[iu] - E[iu].mean()
             return float(e @ tv / max(np.linalg.norm(e), 1e-300)), E, C
 
@@ -346,7 +352,7 @@ def main():
               / max(np.linalg.norm(E0[iu] - E0[iu].mean()), 1e-300))
         g0 = g0 / max(np.linalg.norm(E0[iu] - E0[iu].mean()), 1e-300)
         G0 = np.zeros((a.nvert, a.nvert)); G0[iu] = g0; G0 = 0.5 * (G0 + G0.T)
-        grad = env_adjoint(H0, w, G0, C0, ph, rho)
+        grad = env_adjoint(H_raw, w, G0, C0, ph, rho)
         D = r3.normal(size=(len(idx), K, K)) + 1j * r3.normal(size=(len(idx), K, K))
         D = 0.5 * (D + np.conj(np.transpose(D, (0, 2, 1))))
         D /= np.linalg.norm(D)
@@ -365,8 +371,8 @@ def main():
         for st in range(a.starts):
             r4 = np.random.default_rng(2000 + st)
             S0 = psd_truth(len(idx), K, K, r4)
-            Sh, v = solve_envelope(H0, w, ph, rho, Tg, iters=a.iters, S0=S0)
-            Eh, _ = env_forward(H0, w, Sh, ph, rho)
+            Sh, v = solve_envelope(H_raw, w, ph, rho, Tg, iters=a.iters, S0=S0)
+            Eh, _ = env_forward(H_raw, w, Sh, ph, rho)
             vals.append(v)
             sims.append(corr(Eh[iu], Tg[iu]))
             smarg.append(corr(np.real(Sh.sum(0)), np.real(S_true.sum(0))))
@@ -382,7 +388,7 @@ def main():
     if a.envelope:
         nb = pad // 2 + 1
         lags = np.arange(pad)
-        Phi = np.einsum("fva,fab,fwb->fvw", H0, S_true, H0.conj())
+        Phi = np.einsum("fva,fab,fwb->fvw", H_raw, S_true, H_raw.conj())
         Clag = field_lagged_cov(Phi, w, idx, pad, lags)
         iu = np.triu_indices(a.nvert, 1)
 
@@ -401,7 +407,7 @@ def main():
         # On the FULL grid, interpolated the way realise interpolates, so the closed form
         # describes the process actually simulated rather than one with the same total
         # power in a different shape.
-        Hf, wf, idxf = xspec.transfer(R, np.arange(a.nvert), 0, kernel=kern,
+        Hf, wf, idxf = xspec.transfer(R, np.arange(a.nvert), 0, kernel=None,
                                       idx=np.arange(1, nb))
         Sf = interp_S(S_true, idx, pad, pad)[1:]
         Phif = np.einsum("fva,fab,fwb->fvw", Hf, Sf, Hf.conj())
@@ -438,7 +444,7 @@ def main():
         resp = (kr * bandpass.response(np.arange(nb) / (pad * cl["frame_s"]),
                                        cl["frame_s"], lo, hi))
         Cenv = envelope_cov(Clag, filter_autocorr(nb, pad, lags, resp))
-        Clin = forward(H0 * resp[np.asarray(idx)][:, None, None], w, S_true)
+        Clin = forward(H_raw * resp[np.asarray(idx)][:, None, None], w, S_true)
         print(f"\n  === through the passband, true drive '{a.true_band}' ===")
         print(f"    linear   observable variance  {np.mean(np.diag(Clin)):.4e}")
         print(f"    envelope observable variance  {np.mean(np.diag(Cenv)):.4e}")
