@@ -51,6 +51,18 @@ r x (closed form score) predicts +0.128 against +0.123 measured at 577 s, +0.293
 statement about the estimator, not about the model, and a realised envelope score near
 +0.70 needs r ~ 0.94, which is ~96,000 s of simulated time - about 42 draws at 2,308 s.
 
+MATCHED, both at 400 solve vertices on the same medium and target, as population
+quantities with no estimator noise in either - the interpolant row, which is what each
+one actually draws:
+
+                  objective   vs raw (rho)   drive power in 0.01-0.08 Hz
+    linear          +0.7219      +0.7154              21.6%
+    envelope        +0.7470      +0.7691               3.7%
+
+The envelope fits the same bandpassed FC slightly better while keeping 96% of the drive
+OUTSIDE the band the target is measured in. Both solves were still climbing when they
+stopped (400 and 200 iterations), so neither number is a ceiling.
+
   python fit/interp_gap.py grclip100_nolag          # linear, results/xspec_<tag>.npz
   python fit/interp_gap.py env_grclip400 --envelope # envelope, results/envfit_<tag>.npz
   python fit/interp_gap.py env_grclip400 --envelope --realise 2308 --draws 1
@@ -280,8 +292,15 @@ def realise(a, c, t, g, S, kern, Cref, Tgt, iu, raw, centre, label):
     save, P, p = g['save'], g['P'], g['p']
     nframes = timescale.frames_for(a.realise, g['frame_s'])
     cols = np.asarray(t.cols)
+    tg = Tgt[iu] - Tgt[iu].mean()
+
+    def score(M):
+        m = M[iu] - M[iu].mean()
+        return float(m @ tg / (np.linalg.norm(m) * np.linalg.norm(tg)))
+
     print(f'\n  simulating {a.draws} draw(s) of {nframes} frames ({a.realise:.0f}s)',
           flush=True)
+    ref_score, Esum, T0 = score(Cref), None, None
     for d in range(a.draws):
         t2 = time.time()
         Af = xspec.realise(S, g['idx'], nframes, ref_frames=g['pad'], seed=1000 + d)
@@ -305,13 +324,27 @@ def realise(a, c, t, g, S, kern, Cref, Tgt, iu, raw, centre, label):
             return double_centre(E) if centre else E
 
         Ee = emp(Us)
-        e = Ee[iu] - Ee[iu].mean()
-        tg = Tgt[iu] - Tgt[iu].mean()
         print(f'    draw {d}: corr(empirical, {label}_interp) '
               f'{np.corrcoef(Ee[iu], Cref[iu])[0,1]:+.4f}  |  objective on the '
-              f'{len(g["sub"])} solve vertices {float(e @ tg / (np.linalg.norm(e) * np.linalg.norm(tg))):+.4f}'
+              f'{len(g["sub"])} solve vertices {score(Ee):+.4f}'
               f', spearman vs raw {spearmanr(Ee[iu], raw[iu]).statistic:+.4f}'
               f'  |  sim on all {Z.shape[0]} {all9:+.4f}   [{time.time()-t2:.0f}s]',
+              flush=True)
+        # AVERAGE THE COVARIANCES, not the scores. D draws of length T estimate the same
+        # population E as one run of length D*T, so the mean matrix has r ~
+        # sqrt(DT/(DT+T0)) while the mean of D noisy SCORES stays at the single-draw level
+        # and only its error bar shrinks. envelope_fit reports the latter.
+        Esum = Ee.copy() if Esum is None else Esum + Ee
+        Eb = Esum / (d + 1)
+        rb = np.corrcoef(Eb[iu], Cref[iu])[0, 1]
+        pred = ''
+        if T0 is not None and T0 > 0:
+            T = (d + 1) * a.realise
+            rp = np.sqrt(T / (T + T0))
+            pred = (f'   predicted r {rp:+.4f}, score {rp*ref_score:+.4f}'
+                    f'  [{"on curve" if rb > 0.85*rp else "BELOW CURVE"}]')
+        print(f'      pooled over {d+1} draw(s) ({(d+1)*a.realise:.0f}s effective): '
+              f'r {rb:+.4f}  score {score(Eb):+.4f}  of {ref_score:+.4f}{pred}',
               flush=True)
         # SPLIT HALF, free: the two halves share one truth, so if the shortfall against
         # the closed form is sampling then r(h1,h2) ~ r(h1,ref) * r(h2,ref). A r(h1,h2)
@@ -326,6 +359,16 @@ def realise(a, c, t, g, S, kern, Cref, Tgt, iu, raw, centre, label):
               f'{r2:+.4f}  r(h1,h2) {r12:+.4f}  vs r1*r2 {r1*r2:+.4f}'
               f'  -> {"sampling" if abs(r12 - r1*r2) < 0.1 else "SHARED STRUCTURE the closed form lacks"}',
               flush=True)
+        if d == 0:
+            # T0 from this run's own single-draw r, so the forward prediction needs no
+            # constant carried in from another configuration
+            rf = np.corrcoef(Ee[iu], Cref[iu])[0, 1]
+            T0 = a.realise * (1.0 / max(rf, 1e-6) ** 2 - 1.0) if rf > 0 else None
+            if T0:
+                need = T0 * (0.9 ** 2) / (1 - 0.9 ** 2)
+                print(f'      variance floor T0 ~ {T0:.0f}s from this draw; r = 0.90 needs '
+                      f'{need:.0f}s, {int(np.ceil(need/a.realise))} draws of this length',
+                      flush=True)
 
 
 if __name__ == '__main__':
