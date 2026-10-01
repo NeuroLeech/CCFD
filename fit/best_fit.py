@@ -397,17 +397,6 @@ def main():
                          "radial room: pieces are 2-4 rings deep at --split 40 and 2-6 "
                          "at --split 1, and a shell count past the ring count collapses "
                          "back to one-hot")
-    ap.add_argument("--band-grid", type=int, default=0, dest="band_grid", metavar="N",
-                    help="place N solved frequency bins geometrically ACROSS the passband "
-                         "instead of across the whole rfft range, plus a few beyond it "
-                         "(timescale.band_grid). The default grid is geometric from bin 1 "
-                         "to Nyquist, so when the clock speeds up, Nyquist rises with it, "
-                         "the log range widens by a decade and the same --nfreq spreads "
-                         "thinner: measured, 37 of 135 bins land in 0.01-0.08 Hz at "
-                         "oversample 4 and only 29 of 152 at oversample 40. Placement "
-                         "cannot create resolution - the window still sets how many "
-                         "DISTINCT bins exist in the band - but it stops samples being "
-                         "spent on a decade the observable discards")
     ap.add_argument("--map-clip", default="none", dest="map_clip",
                     choices=("none", "iqr", "tukey", "sd2"),
                     help="clip the z-scored cortical maps' tails before grading the "
@@ -702,16 +691,8 @@ def main():
         print(f"  impulse responses over {len(keep)} of {c.nV} vertices "
               f"({R.nbytes/2**30:.2f} GiB padded, {9374/max(len(keep),1):.1f}x smaller "
               f"than full width)")
-        gidx = None
-        if a.band_grid:
-            if clock is None:
-                raise SystemExit("  --band-grid needs --oversample: the band is in Hz "
-                                 "and placing bins in it needs a clock")
-            import timescale
-            gidx = timescale.band_grid(R.shape[1], clock["frame_s"], a.band_grid,
-                                       band=(bp if bp else timescale.BAND))
-        H, w, idx = xspec.transfer(R, sub_k, a.nfreq, kernel=kern, idx=gidx)
-        Hv = (xspec.transfer(R, val_k, a.nfreq, kernel=kern, idx=gidx)[0]
+        H, w, idx = xspec.transfer(R, sub_k, a.nfreq, kernel=kern)
+        Hv = (xspec.transfer(R, val_k, a.nfreq, kernel=kern)[0]
               if val is not None else None)
         ref_frames, ps, dt = R.shape[1], None, None
         del R                    # H and Hv are all that is wanted from it

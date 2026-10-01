@@ -44,10 +44,120 @@ def psd_truth(nf, K, rank, rng, keep=None):
     return S / max(tr, 1e-300)
 
 
+def field_lagged_cov(Phi, w, idx, ref_frames, lags):
+    """C_ij(tau) = sum_f w_f 2 Re(Phi_f e^{i 2 pi f tau}) for each lag, tau in frames.
+
+    The same expression solve_lagged uses, which at tau = 0 reduces to the covariance the
+    ordinary solve matches. Summed directly over the solved bins rather than by an inverse
+    transform: there are only a few dozen of them and the direct form is checkable."""
+    out = np.zeros((len(lags), Phi.shape[1], Phi.shape[1]))
+    fb = np.asarray(idx, float)
+    for n, L in enumerate(lags):
+        ph = np.exp(2j * np.pi * fb * (L / ref_frames))
+        out[n] = np.real(np.einsum("f,fij->ij", w * ph, Phi)) * 2.0
+    return out
+
+
+def filter_autocorr(nb, ref_frames, lags, resp):
+    """rho(tau) = the autocorrelation of the observable's filter, at those lags.
+
+    The envelope is squared, THEN filtered, so what weights each lag is the filter applied
+    twice - its autocorrelation - not the filter itself."""
+    rho_full = np.fft.irfft(np.abs(resp) ** 2, n=ref_frames)
+    return rho_full[np.asarray(lags) % ref_frames]
+
+
+def envelope_cov(Clag, rho):
+    """cov(u_i, u_j) for u = filter(h^2), in closed form.
+
+    The drive is Gaussian and the medium linear, so the field is Gaussian and Wick gives
+    cov(h_i(t)^2, h_j(s)^2) = 2 C_ij(t-s)^2 exactly. Filtering then weights each lag by
+    the filter's autocorrelation:
+
+        cov(u_i, u_j) = 2 sum_tau rho(tau) C_ij(tau)^2
+
+    The squaring is what moves power between frequencies: C_ij(tau)^2 in time is the
+    cross-spectrum convolved with itself in frequency, so a pair of fast components at f1
+    and f2 contributes at |f1 - f2|. That is the down-conversion a linear observable
+    cannot produce, and it is why a fast medium can carry slow observable structure."""
+    return 2.0 * np.einsum("t,tij->ij", rho, Clag ** 2)
+
+
+def interp_S(S, idx, ref_frames, nframes):
+    """S on every bin of an nframes grid, exactly as xspec.realise interpolates it.
+
+    realise does NOT drive the solved bins as discrete lines - it interpolates S linearly
+    in frequency across the whole grid, so the drive's spectrum is a continuum between the
+    solved points. A closed form that sums the sampled bins with band weights describes a
+    different process: same total power, different shape, and a C(tau) that diverges from
+    it at long lags. That is the repo's "interpolation gap", +0.006 for zero-lag FC and
+    harmless there, but an envelope observable integrates C(tau)^2 over every lag and is
+    far more exposed to it."""
+    K = S.shape[1]
+    nb = nframes // 2 + 1
+    f_src = np.asarray(idx, float) / float(ref_frames)
+    f_dst = np.arange(nb) / float(nframes)
+    out = np.empty((nb, K, K), complex)
+    for i in range(K):
+        for j in range(K):
+            out[:, i, j] = (np.interp(f_dst, f_src, S[:, i, j].real, left=0.0, right=0.0)
+                            + 1j * np.interp(f_dst, f_src, S[:, i, j].imag,
+                                             left=0.0, right=0.0))
+    return out
+
+
+def lagged_from_full(Phi, nframes):
+    """C_ij(tau) for every lag, from a cross-spectrum defined on EVERY bin.
+
+    C(tau) = sum_k 2 Re(Phi_k e^{i 2 pi k tau / N}) over k >= 1, which is what irfft
+    computes once DC is removed - an FFT instead of a sum over sampled bins, so the full
+    grid costs no more than the sparse one."""
+    Z = np.array(Phi, complex, copy=True)
+    Z[0] = 0.0
+    return np.fft.irfft(Z, n=nframes, axis=0) * nframes
+
+
 def corr(a, b):
     a = np.asarray(a, float).ravel(); b = np.asarray(b, float).ravel()
     a = a - a.mean(); b = b - b.mean()
     return float(a @ b / max(np.linalg.norm(a) * np.linalg.norm(b), 1e-30))
+
+
+def simulate_envelope(c, p, P, keep, S, idx, pad, save, nframes, kern, frame_s, band,
+                      amp=2e-4, seed=0, filtered=True):
+    """Realise a drive from S, integrate, and form the envelope observable for real.
+
+    The closed form is only worth anything if it matches this. Squares the field FIRST,
+    then applies the same kernel and passband the linear observable applies to the field
+    itself - the ordering is the whole point, since filtering before squaring removes the
+    carriers before they can beat."""
+    import fluid as fl
+    from xspec import ProfileDrive
+    # The drive realised at `nframes` is periodic with that period, but the field starts
+    # from rest, so a single period is a transient and not the stationary response the
+    # closed form describes. Driving two periods and keeping the second gives the periodic
+    # steady state - which is what C(tau) from a cross-spectrum actually is.
+    A1 = xspec.realise(S, idx, nframes, ref_frames=pad, seed=seed)
+    A = np.concatenate([A1, A1], axis=0)
+    nframes = 2 * nframes
+    nsteps = nframes * save
+    Aser = np.repeat(A, save, axis=0)[:nsteps] / save
+    Aser = (Aser * (amp / np.sqrt((Aser ** 2).mean()))).astype(np.float32)
+    frames, _ = fl.run(c, ProfileDrive(c, P, Aser, amp), p, nsteps, save)
+    X = np.asarray(frames[:, keep], np.float64)[nframes // 2:]    # second period only
+    if not filtered:
+        return X, None, None
+    lin = bandpass.apply(units.smooth_frames(X, kern), frame_s, *band)
+    env = bandpass.apply(units.smooth_frames(X ** 2, kern), frame_s, *band)
+    return X, lin, env
+
+
+def cmat(X, burn=50):
+    """Correlation over vertices from a (T, V) series, dropping the filter transient."""
+    Z = np.asarray(X[burn:], float)
+    Z = Z - Z.mean(0, keepdims=True)
+    sd = np.maximum(Z.std(0, keepdims=True), 1e-300)
+    return (Z / sd).T @ (Z / sd) / Z.shape[0]
 
 
 def main():
@@ -74,6 +184,12 @@ def main():
                     help="random restarts. A convex problem reaches the same objective "
                          "from any of them; spread across starts is the diagnostic")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--envelope", action="store_true",
+                    help="compare the LINEAR observable against the ENVELOPE one "
+                         "(square, then filter) on the same known drive, and check the "
+                         "closed form against a simulation")
+    ap.add_argument("--sim-reps", type=int, default=24, dest="sim_reps")
+    ap.add_argument("--burn", type=int, default=128)
     a = ap.parse_args()
     lo, hi = (float(v) for v in a.band.split(","))
     rng = np.random.default_rng(a.seed)
@@ -117,6 +233,75 @@ def main():
     S_true = psd_truth(len(idx), K, a.rank, rng, keep=sel)
     print(f"  true S: rank {a.rank}, power {a.true_band}"
           + ("" if sel is None else f" ({int(sel.sum())} of {len(idx)} bins)"))
+
+    if a.envelope:
+        nb = pad // 2 + 1
+        lags = np.arange(pad)
+        Phi = np.einsum("fva,fab,fwb->fvw", H0, S_true, H0.conj())
+        Clag = field_lagged_cov(Phi, w, idx, pad, lags)
+        iu = np.triu_indices(a.nvert, 1)
+
+        def rmat(M):
+            d = np.sqrt(np.maximum(np.diag(M), 1e-300))
+            return M / np.outer(d, d)
+
+        # Validate Wick against simulation with the SMOOTHING KERNEL ONLY. The passband is
+        # just another linear filter, but its impulse response is ~620 frames at 0.01 Hz,
+        # so including it here would test the burn-in rather than the algebra. And the
+        # realisations are exactly `pad` frames long, because realise() INTERPOLATES S
+        # from the solved grid onto the realisation grid - at any other length the field's
+        # spectrum is not the Phi the closed form assumes, and the comparison measures the
+        # interpolation instead.
+        kr = units.kernel_response(kern, nb, pad)
+        # On the FULL grid, interpolated the way realise interpolates, so the closed form
+        # describes the process actually simulated rather than one with the same total
+        # power in a different shape.
+        Hf, wf, idxf = xspec.transfer(R, np.arange(a.nvert), 0, kernel=kern,
+                                      idx=np.arange(1, nb))
+        Sf = interp_S(S_true, idx, pad, pad)[1:]
+        Phif = np.einsum("fva,fab,fwb->fvw", Hf, Sf, Hf.conj())
+        Pfull = np.zeros((nb,) + Phif.shape[1:], complex)
+        Pfull[1:] = Phif
+        Clag_f = lagged_from_full(Pfull, pad)
+        print(f"    C(0) from the sampled bins vs the full grid: corr "
+              f"{corr(Clag[0][iu], Clag_f[0][iu]):+.4f}")
+        rho_k = filter_autocorr(nb, pad, lags, kr)
+        Cenv_k = envelope_cov(Clag_f, rho_k)
+        Clin_k = Clag_f[0] * 0.0
+        for n, L in enumerate(lags):
+            pass
+        Clin_k = np.einsum("t,tij->ij", rho_k, Clag_f)      # linear: filter, do not square
+
+        print(f"\n  === validating the closed form, kernel only, "
+              f"{a.sim_reps} x {pad} frames ===", flush=True)
+        t1 = time.time()
+        Ae = np.zeros((a.nvert, a.nvert)); Al = np.zeros((a.nvert, a.nvert))
+        for rep in range(a.sim_reps):
+            X, _, _ = simulate_envelope(c, p, P, keep, S_true, idx, pad, save, pad,
+                                        kern, cl["frame_s"], (lo, hi), seed=100 + rep,
+                                        filtered=False)
+            e = units.smooth_frames(X ** 2, kern)[a.burn:]
+            l = units.smooth_frames(X, kern)[a.burn:]
+            Ae += np.cov(e, rowvar=False); Al += np.cov(l, rowvar=False)
+        print(f"    simulated [{time.time()-t1:.0f}s]")
+        print(f"    envelope: corr(closed form, simulated) = "
+              f"{corr(rmat(Cenv_k)[iu], rmat(Ae)[iu]):+.4f}")
+        print(f"    linear:   corr(closed form, simulated) = "
+              f"{corr(rmat(Clin_k)[iu], rmat(Al)[iu]):+.4f}")
+
+        # What the two observables carry, with the passband applied to each
+        resp = (kr * bandpass.response(np.arange(nb) / (pad * cl["frame_s"]),
+                                       cl["frame_s"], lo, hi))
+        Cenv = envelope_cov(Clag, filter_autocorr(nb, pad, lags, resp))
+        Clin = forward(H0 * resp[np.asarray(idx)][:, None, None], w, S_true)
+        print(f"\n  === through the passband, true drive '{a.true_band}' ===")
+        print(f"    linear   observable variance  {np.mean(np.diag(Clin)):.4e}")
+        print(f"    envelope observable variance  {np.mean(np.diag(Cenv)):.4e}")
+        print(f"    envelope keeps {np.mean(np.diag(Cenv))/max(np.mean(np.diag(Clin)),1e-300):.2e}x "
+              f"the in-band variance of the linear one")
+        print(f"    corr(envelope FC, linear FC) = {corr(rmat(Cenv)[iu], rmat(Clin)[iu]):+.4f}"
+              f"   (1.0 would mean the envelope sees nothing new)")
+        return
 
     for mode in [m.strip() for m in a.observable.split(",") if m.strip()]:
         H = H0 * br[:, None, None] if mode == "band" else H0
