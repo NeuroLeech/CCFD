@@ -30,7 +30,7 @@ def realise_score(c, t, g, S, idx, kern, envelope, seconds, draws, label):
     save, P, p = g['save'], g['P'], g['p']
     nframes = timescale.frames_for(seconds, g['frame_s'])
     cols = np.asarray(t.cols)
-    out = []
+    out, esum = [], None
     for d in range(draws):
         t0 = time.time()
         Af = xspec.realise(S, idx, nframes, ref_frames=g['pad'], seed=1000 + d)
@@ -46,10 +46,18 @@ def realise_score(c, t, g, S, idx, kern, envelope, seconds, draws, label):
         del X
         Z = U - U.mean(0, keepdims=True)
         Z = (Z / np.maximum(Z.std(0, keepdims=True), 1e-300)).T
-        out.append(float(t._prep(t.model_edges(Z=Z)[0]) @ t.y))
-        print(f'    {label} draw {d}: sim {out[-1]:+.4f}   [{time.time()-t0:.0f}s]',
-              flush=True)
-    return out
+        ev = t.model_edges(Z=Z)[0]
+        out.append(float(t._prep(ev) @ t.y))
+        # POOL THE EDGE VECTOR, not the scores. Each draw's model FC estimates the same
+        # population FC, so averaging the 2M-edge vectors is the all-vertex equivalent of
+        # pooling covariances - 16 MB a draw. Averaging the SCORES instead leaves every
+        # estimate at the single-draw attenuation and only shrinks its error bar, which is
+        # what made the envelope's +0.3416 look like a converged number when it was not.
+        esum = np.asarray(ev, np.float64) if esum is None else esum + ev
+        pooled = float(t._prep(esum / (d + 1)) @ t.y)
+        print(f'    {label} draw {d}: sim {out[-1]:+.4f}   pooled over {d+1} '
+              f'{pooled:+.4f}   [{time.time()-t0:.0f}s]', flush=True)
+    return out, pooled
 
 
 def main():
@@ -73,14 +81,17 @@ def main():
           f'spread {float(q["spread"])/float(q["target_spread"]):.2f}x the target, '
           f'J {float(q["J"]):.4e}', flush=True)
 
-    new = realise_score(c, t, g, q['S'], idx, kern, isenv, a.seconds, a.draws, 'NEW')
-    old = ([] if a.skip_source else
-           realise_score(c, t, g, z['S'], idx, kern, isenv, a.seconds, a.draws, 'OLD'))
+    new, newp = realise_score(c, t, g, q['S'], idx, kern, isenv, a.seconds, a.draws, 'NEW')
+    old, oldp = (([], None) if a.skip_source else
+                 realise_score(c, t, g, z['S'], idx, kern, isenv, a.seconds, a.draws, 'OLD'))
     print(f'\n  over {a.seconds:.0f}s, {a.draws} draws, all {t.nV} vertices:')
-    print(f'    correlation-form objective  sim {np.mean(new):+.4f} +- {np.std(new):.4f}')
+    print(f'    correlation-form objective  per draw {np.mean(new):+.4f} +- {np.std(new):.4f}'
+          f'   POOLED {newp:+.4f}')
     if old:
-        print(f'    the recorded solve          sim {np.mean(old):+.4f} +- {np.std(old):.4f}')
+        print(f'    the recorded solve          per draw {np.mean(old):+.4f} +- {np.std(old):.4f}'
+              f'   POOLED {oldp:+.4f}')
     np.savez(os.path.join(RESULTS, f'corrscore_{a.tag}.npz'), new=new, old=old,
+             new_pooled=newp, old_pooled=(oldp if oldp is not None else np.nan),
              seconds=a.seconds, draws=a.draws, tag=a.tag, src=src)
 
 
