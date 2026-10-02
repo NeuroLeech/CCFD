@@ -115,6 +115,21 @@ draw is attenuated - which is exactly why pooling the edge vector rather than th
 matters. Neither envelope row has converged at 6 draws; the new one is nearer its asymptote
 because its higher contrast attenuates less. The linear needs no pooling at all.
 
+ITERATION COUNT IS A REGULARISATION PARAMETER HERE TOO, exactly as xspec.solve's docstring
+says it is for the old objective. Continuing the envelope lam=0 solve from 400 to 1,000
+iterations improves EVERY solve-side number - J 188 -> 139, spread 0.86x -> 0.89x, pearson
++0.9278 -> +0.9470, solve-vertex spearman +0.7559 -> +0.7724, the last now within 0.007 of
+what the old objective reached while carrying 1.8x its dynamic range - and makes the REALISED
+score worse:
+
+    pooled draws              1       2       3       4       5       6      12
+    400 iterations        +0.4929 +0.5512 +0.5869 +0.5955 +0.6165 +0.6237    -
+    1,000 iterations      +0.4652 +0.4990 +0.5369 +0.5529 +0.5731 +0.5858 +0.6139
+
+0.038 worse at matched draws. So J on 400 solve vertices and the score on 9,310 part company
+past a few hundred iterations, and --iters has to be chosen on held-out vertices rather than
+run to convergence.
+
 The attenuation argument is approximate, not exact: at lam=0 it predicts spread/sd(T) =
 pearson = 0.730 and the measured ratio is 0.801, because the prediction holds the model's
 SHAPE fixed and only optimises amplitude, while here the shape co-adapts.
