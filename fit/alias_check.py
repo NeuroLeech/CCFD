@@ -49,9 +49,11 @@ essentially none of it. The responses did carry content above the frame Nyquist 
 that folded content was not what the solve needed. So 9728014 stands as written: the sweep's
 drop is the medium.
 
-That run was killed during its realisation - 42,940 frames through a 329-tap kernel and the
-bandpass makes several float64 copies of a 9,374 x 42,940 array - so it wrote no npz and there is
-no realised figure or RUNS.md row for it. The solve-space numbers above come from its log.
+The solve-space numbers above come from that run's log while it was still going. Its realisation
+is slow rather than fatal - 42,940 frames at save=1, through a 329-tap kernel, the passband and a
+rank transform over 9,374 vertices, at ~41 GB resident - and an earlier note here said it had been
+killed. That was wrong: `pgrep -c best_fit` matches process NAMES, which are all "Python", so it
+reported nothing running. Use `pgrep -f` for a command line.
 
   python fit/alias_check.py
 """
