@@ -50,8 +50,25 @@ grclip400_nolag, which the old objective solved to spread 1.58x the target:
 lam=10 lands the spread on the target while holding pearson at +0.734, which is where the
 unconstrained squared-error optimum already was - so matching the magnitude costs almost
 nothing against least squares. What it costs is against the OLD objective: spearman +0.658
-rather than +0.716. Whether that trade is worth making is a question about the realised
-score on all 9,310 vertices, which fit/corr_score.py measures.
+rather than +0.716. Realised over 2,308 s on all 9,310 vertices that trade is cheaper still:
++0.6356 +- 0.0033 against the recorded solve's +0.6537 +- 0.0017, a cost of 0.018 for an
+exact dynamic-range match. lam=0 realises +0.6277 and lam=100 collapses to +0.5557.
+
+THE SAME SWEEP ON THE ENVELOPE, and the two models are not symmetric:
+
+    lam     spread  x target   pearson(R,T)   spearman vs empirical
+    -        0.0626    0.49x      +0.7322           +0.7798
+    0        0.1068    0.83x      +0.9061           +0.7313
+    10       0.1249    0.98x      +0.7446           +0.5757
+    100      0.1273    0.99x      +0.4675           +0.3072
+
+The envelope starts BELOW the target and has to be pushed up, where the linear starts above
+and comes down. Coming down is free; going up is not. At lam=0, with no constraint at all,
+asking the envelope to fit magnitudes took its spread from 0.49x to 0.83x and its pearson
+from +0.7322 to +0.9061 - so its flatness was never a ceiling, and the fit it reaches on the
+correlation form is well above anything the linear reaches. Forcing the last 17% costs
+pearson 0.16 at lam=10 and 0.44 at lam=100. Both envelope runs at 150 iterations were still
+falling fast (lam=10: J 718 -> 660 over the last 24), so those are lower bounds.
 
 The attenuation argument is approximate, not exact: at lam=0 it predicts spread/sd(T) =
 pearson = 0.730 and the measured ratio is 0.801, because the prediction holds the model's
