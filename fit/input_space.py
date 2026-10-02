@@ -10,6 +10,25 @@ target FC's own structure on the same vertices.
 Reported in correlation form, since the diagonal of S carries each vertex's input power and
 the off-diagonal is what says how the drive is organised in space.
 
+WHAT IT FOUND on flat1880_r20 - 1,880 one-hot channels, rank 20 permitted, 700 vertices sampled:
+
+                              effective rank (of 700)   correlation length
+      in band 0.01-0.08 Hz              4.1                   5.7 mm
+      above the band                    5.8                   7.0 mm
+      all bins                          7.1                   6.8 mm
+
+Given a complete basis on the driven territory the solve did NOT build detailed spatial
+structure. It chose a smooth input - 5.7 to 7.0 mm, smoother than the field's own 3.8 mm from
+analysis/spatial_scale.py - carrying about four effective modes in the band that matters, with
+twenty available. The expressive power went into tuning a few smooth modes precisely to the 400
+solve vertices rather than into spatial detail, which is the same story the fit tells: solve-space
+spearman +0.8468 against the 100-tile baseline's +0.6530, realised +0.3047 against its +0.6104.
+
+The target comparison in this script is not apples to apples and should not be read as one: the
+empirical FC arrives double-centred, so putting it in correlation form after setting the diagonal
+to 1 removes much of its local structure and its numbers come out far lower than the input's for
+reasons that are about the centring rather than about the drive.
+
   python fit/input_space.py flat1880_r20
 """
 import _path  # noqa: F401
