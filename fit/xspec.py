@@ -1277,7 +1277,8 @@ def draw_eta(rng, K, law="gaussian"):
     raise ValueError(f"unknown law {law!r}")
 
 
-def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian"):
+def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian",
+            factor_draw=None):
     """Draw a drive whose cross-spectrum is S: at each bin, z = L eta with S = L L^H.
 
     S is solved on a coarse grid, so it is interpolated first - in FREQUENCY, not in bin
@@ -1290,17 +1291,63 @@ def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian"):
     ref = ref_frames or 280
     f_src = np.asarray(idx, float) / ref                  # cycles per frame
     f_dst = np.arange(nb) / float(nframes)
+    rng = np.random.default_rng(seed)
+    if factor_draw is None:
+        factor_draw = K > 512
+    if factor_draw:
+        return _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law)
     Sf = np.empty((nb, K, K), complex)
     for a in range(K):
         for b in range(K):
             Sf[:, a, b] = np.interp(f_dst, f_src, S[:, a, b].real, left=0.0, right=0.0) \
                 + 1j * np.interp(f_dst, f_src, S[:, a, b].imag, left=0.0, right=0.0)
-    rng = np.random.default_rng(seed)
     Z = np.zeros((nb, K), complex)
     for f in range(1, nb):
         ev, U = np.linalg.eigh(0.5 * (Sf[f] + Sf[f].conj().T))
         L = U * np.sqrt(np.clip(ev, 0, None))
         Z[f] = L @ draw_eta(rng, K, law)
+    A = np.fft.irfft(Z, n=nframes, axis=0)
+    return A / max(A.std(), 1e-30)
+
+
+def _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law):
+    """The same draw without ever forming the interpolated S.
+
+    The default path allocates (nb, K, K) and eigendecomposes one K x K matrix per
+    REALISATION bin. At K = 1,880 and a 577 s run that array is 101 GiB and the eigh bill is
+    1,790 decompositions of a 1,880-square matrix, so the realisation costs more than the
+    solve it is realising.
+
+    Neither is necessary. A linear interpolant of two PSD matrices has an exact factor built
+    from the two factors:
+
+        (1-t) A A^H + t B B^H  =  [sqrt(1-t) A, sqrt(t) B] [sqrt(1-t) A, sqrt(t) B]^H
+
+    so ONE eigendecomposition per SOLVED bin - 135, not 1,790 - gives everything, each
+    realisation bin is a concatenation, and eta has the rank's dimension rather than K's.
+    Solved S is often low rank (rank 20 from solve_factor), which makes that dimension small.
+
+    The draw is statistically identical, NOT bit-identical: eta has a different dimension so
+    the random stream differs. Seeds therefore do not correspond between the two paths, which
+    is why K <= 512 keeps the original - every recorded realisation came through it."""
+    As = []
+    for f in range(len(f_src)):
+        M = 0.5 * (S[f] + S[f].conj().T)
+        ev, U = np.linalg.eigh(M)
+        k = ev > max(float(ev.max()), 0.0) * 1e-12
+        As.append((U[:, k] * np.sqrt(ev[k])) if k.any() else np.zeros((K, 0), complex))
+    Z = np.zeros((nb, K), complex)
+    j = np.clip(np.searchsorted(f_src, f_dst, side="right") - 1, 0, len(f_src) - 1)
+    for b in range(1, nb):
+        # outside the solved range S is zero, exactly as left=0/right=0 gives
+        if f_dst[b] < f_src[0] or f_dst[b] > f_src[-1]:
+            continue
+        lo = min(int(j[b]), len(f_src) - 2)
+        span = f_src[lo + 1] - f_src[lo]
+        t = 0.0 if span <= 0 else float(np.clip((f_dst[b] - f_src[lo]) / span, 0.0, 1.0))
+        Lb = np.concatenate([np.sqrt(1.0 - t) * As[lo], np.sqrt(t) * As[lo + 1]], axis=1)
+        if Lb.shape[1]:
+            Z[b] = Lb @ draw_eta(rng, Lb.shape[1], law)
     A = np.fft.irfft(Z, n=nframes, axis=0)
     return A / max(A.std(), 1e-30)
 
