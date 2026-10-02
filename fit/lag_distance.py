@@ -36,11 +36,27 @@ which pairs look simultaneous and above which lag becomes visible - is wrong as 
 whole model is inside that regime: the largest lag anywhere is 11.6 s. The passband never sees the
 model timing, so every bit of FC structure it carries comes from amplitude and coherence.
 
-The lags are also far below ballistic propagation. At 1x, 40-60 mm would take ~34 s at 1.47 mm/s
-and the measured lag is 4.3 s, so the field is not arriving as a travelling front - its covariance
-is dominated by a near-instantaneous shared component, consistent with the raw field decorrelating
-in 3.8 mm (analysis/spatial_scale.py). In the observable this medium behaves more like locally
-filtered noise than like a wave medium.
+An earlier version of this note read the small lags as the field not arriving as a travelling
+front, on the grounds that 40-60 mm would take ~34 s at 1.47 mm/s. That was comparing against the
+wrong number. TIME-TO-PEAK of |response| against distance, the statistic units.model_speed itself
+uses, measured on the same caches:
+
+                       0-10   10-20   20-30   30-40   40-60   60-80  80-120  120-250
+    1x                  0.6     1.5     2.6     3.8     5.6     8.3    13.5    22.9
+    2x                  0.3     0.7     1.2     1.8     2.9     4.4     7.2    12.1
+    3x                    -     0.6     1.0     1.4     2.4     3.8     6.1     9.0
+
+which agrees with the cross-correlation lags above, so the lag statistic is sound. What does not
+agree is spread_mm_s. It is computed from MM_PER_STEP = MM_PER_FRAME_AT_33 / 33, where the 1.96
+mm/frame was measured once on a different configuration and hard-coded, so it is a label rather
+than a per-run measurement. Arrival times give ~9 mm/s at 1x where the label says 1.47, about 6x
+off; the relative scaling roughly holds (5.6, 2.9, 2.4 s at 40-60 mm is 1 : 1.9 : 2.3 against a
+nominal 1 : 2 : 3) but the absolute figure does not describe these runs.
+
+The consequence is that REACH is also mislabelled. At ~9 mm/s with a 25 s decay the 1x reach is
+~225 mm rather than the 37 mm the logs print, against a sheet whose largest geodesic is ~185 mm,
+and at 3x it is ~520 mm. So the wave crosses the sheet within a decay time at every speed in the
+sweep, and wraparound is not something that begins at 10x.
 
 Beyond the reach - 37 mm at 1x - the response is negligible, so the 80-120 and 120-250 columns are
 lags measured on near-zero signal and should not be leaned on.
