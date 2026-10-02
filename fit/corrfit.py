@@ -103,6 +103,18 @@ The best single model is the envelope at lam 0: 0.86x the empirical spread with 
 +0.9278, which is above every other row here, and a Spearman only 0.024 below what the old
 objective reached while carrying 1.8x its dynamic range.
 
+REALISED, 2,308 s, 6 draws pooled as edge vectors, all 9,310 vertices, matched seeds:
+
+    envelope  lam 0, 400 it    per draw +0.4998 +- 0.0237    POOLED +0.6237
+    envelope  old objective    per draw +0.3569 +- 0.0325    POOLED +0.5225
+    linear    lam 10           per draw +0.6356 +- 0.0033    (r 0.97, already converged)
+    linear    old objective    per draw +0.6537 +- 0.0017    (r 0.98, already converged)
+
++0.101 pooled for the envelope, and the per-draw figures understate it by 0.12 because each
+draw is attenuated - which is exactly why pooling the edge vector rather than the scores
+matters. Neither envelope row has converged at 6 draws; the new one is nearer its asymptote
+because its higher contrast attenuates less. The linear needs no pooling at all.
+
 The attenuation argument is approximate, not exact: at lam=0 it predicts spread/sd(T) =
 pearson = 0.730 and the measured ratio is 0.801, because the prediction holds the model's
 SHAPE fixed and only optimises amplitude, while here the shape co-adapts.
