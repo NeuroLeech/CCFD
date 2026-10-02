@@ -20,6 +20,26 @@ spread of the real thing and the linear 1.56x too much. The envelope scores high
 being the one further from the data in absolute terms, which is exactly what a rank metric
 cannot see.
 
+IS THE FLATNESS STRUCTURAL? NO, AND THE OBVIOUS ARGUMENT THAT IT IS, IS WRONG.
+
+E_ij = 2 sum_tau rho(tau) C_ij(tau)^2 involves the Hadamard square of C, and squaring a
+correlation maps [-1,1] -> [0,1], losing the sign and compressing the range - squaring the
+empirical FC compresses its spread 3.53x, from 0.1280 to 0.0362. That looks like a ceiling
+the envelope cannot clear, and it is not one: the solve produced 0.0628, which is 1.7x past
+it, and that alone disproves it.
+
+The argument needs rho >= 0 and rho is 60.7% negative over the 1,579 kept lags, with
+positive mass +0.9581 against negative -0.9626 - cancelling to 0.5%. That cancellation is
+exact in principle, because sum_tau rho(tau) is the filter's squared response at DC and the
+passband excludes DC. So E is a DIFFERENCE of Hadamard squares, with no positivity and no
+compression bound, and what it measures is how squared correlation VARIES WITH LAG rather
+than its level - which is also why its edges can be negative.
+
+What the reachable spread actually is remains unmeasured. xspec.family_member moves along a
+regulariser while holding the fit within eps of the argmax, so correlation-form spread as
+that regulariser would answer it as a number and separate "the solve picked a flat member of
+the admissible family" from "the family is flat".
+
 CENTRE AND NORMALISE THE SAME WAY ON BOTH SIDES, or the comparison measures the convention.
 The target is double-centred, so the model has to be. And Spearman is NOT invariant to
 dividing each edge by sqrt(d_i d_j): the realised scoring path z-scores every vertex
