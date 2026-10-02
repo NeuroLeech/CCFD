@@ -131,11 +131,23 @@ past a few hundred iterations, and --iters has to be chosen on held-out vertices
 run to convergence.
 
 The 400-iteration solution pooled over 12 draws reaches +0.6507 and has flattened there
-(+0.6475, +0.6501, +0.6507 over the last three). That is level with the linear's +0.6537 and
-above the linear under the SAME objective, +0.6356. But the linear's figures are 2-draw
-per-draw means rather than pooled, and at r ~ 0.978 pooling would lift them by roughly
-0.01-0.015, so a strictly matched comparison is not yet in hand and the envelope should not be
-called equal to the linear on this metric.
+(+0.6475, +0.6501, +0.6507 over the last three).
+
+POOLED THE SAME WAY, THE LINEAR REACHES +0.6807. Its 2-draw per-draw mean was +0.6356, so
+pooling lifted it by 0.045, not the 0.01-0.015 an r of 0.978 suggested. Matched at 12 pooled
+draws on all 9,310 vertices:
+
+    linear    lam 10, 400 it     POOLED +0.6807   (plateaued by draw 6)
+    envelope  lam 0,  400 it     POOLED +0.6507   (plateaued by draw 10)
+
+So the envelope sits 0.030 below the linear on the realised metric, and the earlier reading
+that it had drawn level came from comparing its pooled figure against the linear's unpooled
+one. The envelope's advantage is confined to the solve side: at matched dynamic range its
+pearson on the correlation form is +0.8408 against +0.7564, and at lam 0 it is +0.9470 while
+carrying 0.89x the empirical spread.
+
+The linear under the OLD objective was not pooled - the run was stopped after one of twelve
+draws, at +0.6520 - so there is no 12-draw figure for it.
 
 The attenuation argument is approximate, not exact: at lam=0 it predicts spread/sd(T) =
 pearson = 0.730 and the measured ratio is 0.801, because the prediction holds the model's
