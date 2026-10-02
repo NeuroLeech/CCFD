@@ -85,6 +85,24 @@ noise as r = contrast / sqrt(contrast^2 + noise^2), and raising the contrast fro
 same intervention, because low contrast was what made the fourth moment so hard to estimate
 - see fit/why_noisy.py, where the contrast factor was the dominant one.
 
+AT 400 ITERATIONS, where 150 was not close to converged (envelope lam=10 fell J 660 -> 414):
+
+                            spread  x target   pearson(R,T)   spearman vs empirical
+    envelope  old            0.0626    0.49x      +0.7322           +0.7798
+    envelope  lam 0          0.1102    0.86x      +0.9278           +0.7559
+    envelope  lam 10         0.1253    0.98x      +0.8408           +0.6721
+    linear    old            0.2028    1.58x      +0.7351           +0.7159
+    linear    lam 10         0.1248    0.98x      +0.7564           +0.6721
+
+At MATCHED dynamic range and matched iterations the two models tie exactly on Spearman and
+the envelope fits the values far better, +0.8408 against +0.7564. Under the OLD objective
+their pearson was +0.7322 against +0.7351 - indistinguishable - so the rank objective was
+hiding a real difference between the models rather than finding none.
+
+The best single model is the envelope at lam 0: 0.86x the empirical spread with pearson
++0.9278, which is above every other row here, and a Spearman only 0.024 below what the old
+objective reached while carrying 1.8x its dynamic range.
+
 The attenuation argument is approximate, not exact: at lam=0 it predicts spread/sd(T) =
 pearson = 0.730 and the measured ratio is 0.801, because the prediction holds the model's
 SHAPE fixed and only optimises amplitude, while here the shape co-adapts.
