@@ -88,8 +88,39 @@ past the peak more channels degrade more SLOWLY, +0.4875 against +0.3924 at 400 
 optimum.
 
 The best realised figure anywhere in this sweep is +0.6196 against the incumbent's +0.6104, a gain of
-0.009 inside a +-0.026 error bar. So neither the input basis nor the stopping point lifts the realised
-fit materially, which leaves H - the medium and the observable - as what is binding.
+0.009 inside a +-0.026 error bar.
+
+WHY THE REALISATION IS LIMITED, which is the part that explains all of the above. Decomposing the gap
+with fit/interp_gap.py at both ends of the ladder:
+
+                        closed form   one draw,      one draw,     corr(draw,     T0
+                        400 verts     400 verts      9310 verts    closed form)
+    maxfun   60          +0.7302       +0.6506        +0.6229        +0.8978      139 s
+    maxfun 1500          +0.8150       +0.1497        +0.1024        +0.1602   21,909 s
+
+It is NOT spatial overfitting. At maxfun 1500 extrapolation from 400 vertices to 9,310 costs 0.047
+while the expectation-to-one-draw step costs 0.665, and the draw's empirical FC correlates with its own
+closed-form prediction at r = 0.16. The solve finds an S whose EXPECTED FC matches the target at
++0.8150 and which cannot be realised in a scan: the variance floor goes from 139 s to 21,909 s, a
+factor of 157, so that expectation needs ~22,000 s of data to become visible.
+
+The mechanism is concentration. Input participation ratio against optimisation effort, out of 100
+channels:
+
+    maxfun      15     30     45     60    150    400   1500
+    input PR  89.1   80.8   68.9   54.2   20.4   10.0    8.5
+    in-band   20.3   15.0   10.3    8.7    7.2    6.5    7.9
+    realised +.5549 +.6049 +.6126 +.6196 +.5718 +.3924 +.1661
+
+Optimising concentrates the drive into fewer modes, a low-rank drive has a high variance floor, and the
+realised score peaks where the input still spreads over ~54 of 100 modes. That is why more channels
+cannot help: the failure mode is concentration and extra channels are extra freedom to concentrate, so
+1,880 one-hot channels reach ~8 effective modes sooner rather than buying anything.
+
+So maxfun was standing in for a realisability term the objective does not have. xspec.prank_reg is
+exactly that quantity - "Participation-ratio rank of the input. sign=+1 spreads power over modes" - and
+family_member already moves along a regulariser while holding the fit within eps of the argmax, which
+would constrain the cause rather than tuning a magic number.
 
 The target comparison in this script is not apples to apples and should not be read as one: the
 empirical FC arrives double-centred, so putting it in correlation form after setting the diagonal
