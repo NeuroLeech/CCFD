@@ -35,6 +35,24 @@ slowly out to 3x. So that sweep varies speed AND folded content together from 2x
 attributing its drop to the medium alone does not follow. The frequency-grid control is
 unaffected - that was measured at 1x, where there is no folding.
 
+THE FOLDING IS REAL AND IT COSTS ALMOST NOTHING. Re-run at the 3x medium with save=1, which
+needs --oversample 48 rather than 40: save must be an integer, so 40 rounds it to 1 and drops
+the achieved speed to 3.68 mm/s, while 48 keeps dt at 0.013437 s and the medium bit-identical
+to the sweep run at 4.42 mm/s and reach 110.5 mm.
+
+    3x, save 12, 37 passband bins    solve spearman +0.3874
+    3x, save  1, 27 passband bins    solve spearman +0.3973
+
++0.010, and the save=1 run had the COARSER grid of the two, so at matched grid it is perhaps
++0.02. Against the 0.27 the sweep lost from 1x to 3x, removing the decimation entirely recovers
+essentially none of it. The responses did carry content above the frame Nyquist and it did fold;
+that folded content was not what the solve needed. So 9728014 stands as written: the sweep's
+drop is the medium.
+
+That run was killed during its realisation - 42,940 frames through a 329-tap kernel and the
+bandpass makes several float64 copies of a 9,374 x 42,940 array - so it wrote no npz and there is
+no realised figure or RUNS.md row for it. The solve-space numbers above come from its log.
+
   python fit/alias_check.py
 """
 import _path  # noqa: F401
