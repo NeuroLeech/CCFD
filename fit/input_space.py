@@ -66,11 +66,30 @@ destroyed:
     1,880 one-hot        60     +0.7327    +0.6074 +- 0.0127    0.053   15.8
     1,880 one-hot      1500     +0.8468    +0.3047 +- 0.0234    0.221    3.8
 
-At 60 evaluations the 100-tile run beats the gradient-solver baseline on BOTH axes - solve +0.7162
-against +0.6530, realised +0.6196 against +0.6104 - so the incumbent --iters 400 was not even at the
-right stopping point. And the 1,880-channel basis fits better in sample, +0.7327 against +0.7162,
-while realising the same or marginally worse, +0.6074 against +0.6196, a difference inside both error
-bars. The expressive power is real and it buys nothing out of sample.
+THE FULL LADDER. Realised score is an inverted U in optimisation effort, for both bases:
+
+    maxfun    100 tiles  solve / realised     1,880 one-hot  solve / realised
+        15       +0.6094 / +0.5549 +- 0.0166     +0.5954 / +0.5333 +- 0.0031
+        30       +0.6653 / +0.6049 +- 0.0177     +0.6701 / +0.5888 +- 0.0100
+        45       +0.6976 / +0.6126 +- 0.0176          -   / +0.6053 +- 0.0068
+        60       +0.7162 / +0.6196 +- 0.0262     +0.7327 / +0.6074 +- 0.0127
+       150       +0.7532 / +0.5718 +- 0.0501     +0.7866 / +0.5934 +- 0.0020
+       400       +0.7830 / +0.3924 +- 0.0104     +0.8289 / +0.4875 +- 0.0213
+      1500       +0.8108 / +0.1661 +- 0.0465     +0.8468 / +0.3047 +- 0.0234
+
+      incumbent gradient solver, --iters 400:   +0.6530 / +0.6104
+
+Three readings. The peak is near maxfun 45-60 and it is sharp - solve-space keeps climbing the whole
+way while realised turns over - so the stopping point is the dominant regularisation and the
+incumbent --iters 400 was close to but not at the optimum. More channels do NOT help at the peak:
++0.6074 against +0.6196, inside both error bars, from a basis complete on the driven territory. And
+past the peak more channels degrade more SLOWLY, +0.4875 against +0.3924 at 400 and +0.3047 against
++0.1661 at 1500, so the channel count buys robustness to over-optimisation rather than a better
+optimum.
+
+The best realised figure anywhere in this sweep is +0.6196 against the incumbent's +0.6104, a gain of
+0.009 inside a +-0.026 error bar. So neither the input basis nor the stopping point lifts the realised
+fit materially, which leaves H - the medium and the observable - as what is binding.
 
 The target comparison in this script is not apples to apples and should not be read as one: the
 empirical FC arrives double-centred, so putting it in correlation form after setting the diagonal
