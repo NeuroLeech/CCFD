@@ -24,6 +24,17 @@ twenty available. The expressive power went into tuning a few smooth modes preci
 solve vertices rather than into spatial detail, which is the same story the fit tells: solve-space
 spearman +0.8468 against the 100-tile baseline's +0.6530, realised +0.3047 against its +0.6104.
 
+RANK IS NOT THE BINDING FREEDOM. The same basis at three ranks:
+
+    rank 3     solve +0.8494    realised +0.2804 +- 0.0430
+    rank 8     solve +0.8475    realised +0.2919 +- 0.1005
+    rank 20    solve +0.8468    realised +0.3047 +- 0.0234
+
+Flat in both columns, so three modes overfit exactly as well as twenty. With one-hot channels each
+mode can be an ARBITRARY function on 1,880 vertices - 5,640 spatial degrees of freedom at rank 3 -
+where the 100-tile basis gives each mode 100, every tile smooth over ~19 vertices. The tiling was
+acting as a SPATIAL regulariser and removing it is what broke generalisation, not the mode count.
+
 The target comparison in this script is not apples to apples and should not be read as one: the
 empirical FC arrives double-centred, so putting it in correlation form after setting the diagonal
 to 1 removes much of its local structure and its numbers come out far lower than the input's for
