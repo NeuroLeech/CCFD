@@ -130,6 +130,13 @@ score worse:
 past a few hundred iterations, and --iters has to be chosen on held-out vertices rather than
 run to convergence.
 
+The 400-iteration solution pooled over 12 draws reaches +0.6507 and has flattened there
+(+0.6475, +0.6501, +0.6507 over the last three). That is level with the linear's +0.6537 and
+above the linear under the SAME objective, +0.6356. But the linear's figures are 2-draw
+per-draw means rather than pooled, and at r ~ 0.978 pooling would lift them by roughly
+0.01-0.015, so a strictly matched comparison is not yet in hand and the envelope should not be
+called equal to the linear on this metric.
+
 The attenuation argument is approximate, not exact: at lam=0 it predicts spread/sd(T) =
 pearson = 0.730 and the measured ratio is 0.801, because the prediction holds the model's
 SHAPE fixed and only optimises amplitude, while here the shape co-adapts.
