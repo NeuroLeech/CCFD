@@ -56,6 +56,22 @@ Solve-space rises monotonically with channels while realised stays flat at 0.25-
 tiles the lone outlier below. All sit far under +0.6104, so regularisation dominates the basis and
 the expressive-power question cannot be settled with a solver that converges.
 
+MAXFUN IS THE KNOB, AND AT THE RIGHT BUDGET THE CHANNEL COUNT DOES NOT MATTER. The factor solver's
+evaluation budget is its analogue of --iters, and 60 evaluations recovers everything convergence
+destroyed:
+
+    basis            maxfun   solve-space    realised            gap    rank
+    100 tiles            60     +0.7162    +0.6196 +- 0.0262    0.061   13.7
+    100 tiles          1500     +0.8108    +0.1661 +- 0.0465    0.282    4.6
+    1,880 one-hot        60     +0.7327    +0.6074 +- 0.0127    0.053   15.8
+    1,880 one-hot      1500     +0.8468    +0.3047 +- 0.0234    0.221    3.8
+
+At 60 evaluations the 100-tile run beats the gradient-solver baseline on BOTH axes - solve +0.7162
+against +0.6530, realised +0.6196 against +0.6104 - so the incumbent --iters 400 was not even at the
+right stopping point. And the 1,880-channel basis fits better in sample, +0.7327 against +0.7162,
+while realising the same or marginally worse, +0.6074 against +0.6196, a difference inside both error
+bars. The expressive power is real and it buys nothing out of sample.
+
 The target comparison in this script is not apples to apples and should not be read as one: the
 empirical FC arrives double-centred, so putting it in correlation form after setting the diagonal
 to 1 removes much of its local structure and its numbers come out far lower than the input's for
