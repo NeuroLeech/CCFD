@@ -80,6 +80,12 @@ def main():
                          "field linearly instead would show a quantity those models are "
                          "not scored on, and would remove the carriers before they can "
                          "beat, which is the whole mechanism")
+    ap.add_argument("--zscore", action="store_true",
+                    help="z-score every vertex over the whole run before windowing, which "
+                         "is what fc_score.model_z does before the model FC is formed. "
+                         "Without it the picture is dominated by high-variance vertices "
+                         "that contribute no more to the score than quiet ones, so the "
+                         "spatial impression on screen is not the structure the score reads")
     ap.add_argument("--ndrive", type=int, default=6)
     ap.add_argument("--resimulate", action="store_true",
                     help="the tag was fitted WITH --bandpass, so its saved frames are "
@@ -143,12 +149,21 @@ def main():
         return float(P[(f >= lo) & (f <= hi)].sum() / max(P[1:].sum(), 1e-300))
 
     pb_raw, pb_filt = power_in_band(F), power_in_band(G)
+    if a.zscore:
+        # over the WHOLE run, like the filter, so the window carries no edge of its own
+        def z(X):
+            X = np.asarray(X, np.float64)
+            X = X - X.mean(0, keepdims=True)
+            return np.asarray(X / np.maximum(X.std(0, keepdims=True), 1e-300), np.float32)
+        F, G = z(F), z(G)
+        print("  z-scored per vertex over the whole run; colour limits are in SD")
     sel = np.arange(a.start, min(a.start + a.n, len(F)))
     Hs = [np.asarray(F[sel]), np.asarray(G[sel])]
     lims = [float(np.percentile(np.abs(h), a.clip)) for h in Hs]
     print(f"  {a.tag}: {len(F)} frames, showing {len(sel)} from {a.start}")
     print(f"  power in {lo}-{hi} Hz: raw {pb_raw:.1%}, filtered {pb_filt:.1%}")
-    print(f"  amplitude scale: raw {lims[0]:.3e}, filtered {lims[1]:.3e} "
+    unit = " SD" if a.zscore else ""
+    print(f"  amplitude scale: raw {lims[0]:.3e}{unit}, filtered {lims[1]:.3e}{unit} "
           f"({lims[1]/max(lims[0],1e-30):.2f}x)")
 
     dpath = os.path.join(RESULTS, f"drive_{a.tag}.npy")
@@ -158,10 +173,11 @@ def main():
         loud = np.argsort(D.std(0))[::-1][:a.ndrive]
 
     proj = _proj(c.V, c.F)
-    labels = [(f"the fluid\n{pb_raw:.0%} of power in band" if a.raw_npy else
-               f"raw field\n{pb_raw:.0%} of power in band"),
-              (f"the observable: SQUARED, BOLD-smoothed + {lo}-{hi} Hz\n{pb_filt:.0%} "
-               f"of power in band" if a.envelope else
+    zs = ", z-scored per vertex" if a.zscore else ""
+    labels = [(f"the fluid{zs}\n{pb_raw:.0%} of power in band" if a.raw_npy else
+               f"raw field{zs}\n{pb_raw:.0%} of power in band"),
+              (f"the observable: SQUARED, BOLD-smoothed + {lo}-{hi} Hz{zs}\n"
+               f"{pb_filt:.0%} of power in band" if a.envelope else
                f"the observable: BOLD-smoothed + {lo}-{hi} Hz\n{pb_filt:.0%} of power "
                f"in band" if a.raw_npy else
                f"bandpassed {lo}-{hi} Hz\n{pb_filt:.0%} of power in band")]
