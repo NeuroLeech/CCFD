@@ -73,6 +73,13 @@ def main():
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--clip", type=float, default=99.0)
     ap.add_argument("--band", default="0.01,0.08")
+    ap.add_argument("--envelope", action="store_true",
+                    help="the bottom row is the ENVELOPE observable - square, then smooth, "
+                         "then bandpass - which is what fit/envelope_fit.py and the "
+                         "correlation-form envelope solves are scored on. Filtering the "
+                         "field linearly instead would show a quantity those models are "
+                         "not scored on, and would remove the carriers before they can "
+                         "beat, which is the whole mechanism")
     ap.add_argument("--ndrive", type=int, default=6)
     ap.add_argument("--resimulate", action="store_true",
                     help="the tag was fitted WITH --bandpass, so its saved frames are "
@@ -104,9 +111,15 @@ def main():
             F = np.asarray(np.load(a.raw_npy), np.float32)
             kern = units.smoothing_kernel(
                 timescale.bold_fwhm_frames(frame_s, verbose=False), verbose=False)
-            G = bandpass.apply(units.smooth_frames(F, kern), frame_s, lo, hi)
+            if a.envelope:
+                import envelope as env
+                G = np.asarray(env.observable(F, kern, frame_s, (lo, hi), burn=0),
+                               np.float32)
+            else:
+                G = bandpass.apply(units.smooth_frames(F, kern), frame_s, lo, hi)
             print(f"  bare field from {os.path.basename(a.raw_npy)} {F.shape}; "
-                  f"observable = BOLD kernel (FWHM {len(kern)} taps) then {lo}-{hi} Hz")
+                  f"observable = {'SQUARE then ' if a.envelope else ''}BOLD kernel "
+                  f"(FWHM {len(kern)} taps) then {lo}-{hi} Hz")
         else:
             F = resimulate_raw(c, a.tag, frame_s)      # already BOLD-smoothed
             G = bandpass.apply(F, frame_s, lo, hi)
@@ -147,7 +160,9 @@ def main():
     proj = _proj(c.V, c.F)
     labels = [(f"the fluid\n{pb_raw:.0%} of power in band" if a.raw_npy else
                f"raw field\n{pb_raw:.0%} of power in band"),
-              (f"the observable: BOLD-smoothed + {lo}-{hi} Hz\n{pb_filt:.0%} of power "
+              (f"the observable: SQUARED, BOLD-smoothed + {lo}-{hi} Hz\n{pb_filt:.0%} "
+               f"of power in band" if a.envelope else
+               f"the observable: BOLD-smoothed + {lo}-{hi} Hz\n{pb_filt:.0%} of power "
                f"in band" if a.raw_npy else
                f"bandpassed {lo}-{hi} Hz\n{pb_filt:.0%} of power in band")]
     fig = plt.figure(figsize=(4.0 * len(proj), 8.4), facecolor="black")

@@ -23,7 +23,7 @@ import corrfit as cf
 from interp_gap import build_H
 
 
-def realise_score(c, t, g, S, idx, kern, envelope, seconds, draws, label):
+def realise_score(c, t, g, S, idx, kern, envelope, seconds, draws, label, save_tag=''):
     """-> list of Spearman scores on all target vertices, one per draw."""
     import fluid as fl
     from xspec import ProfileDrive
@@ -37,6 +37,25 @@ def realise_score(c, t, g, S, idx, kern, envelope, seconds, draws, label):
         Aser = np.repeat(Af, save, axis=0)[:nframes * save] / save
         fr, _ = fl.run(c, ProfileDrive(c, P, Aser, 2e-4), p, nframes * save, save)
         X = np.asarray(fr[:, cols], np.float64)
+        if save_tag and d == 0:
+            # the WHOLE sheet for the video, not just the target's columns, and the bare
+            # field with no burn trimmed so the two arrays align frame for frame. The
+            # observable is saved alongside it so render_bandpass's reconstruction check
+            # has something to compare against.
+            full = np.asarray(fr, np.float32)
+            obs = (env.observable(full, kern, g['frame_s'], (g['lo'], g['hi']), burn=0)
+                   if envelope else
+                   bp.apply(units.smooth_frames(np.asarray(full, np.float64), kern),
+                            g['frame_s'], g['lo'], g['hi']))
+            np.save(os.path.join(RESULTS, f'frames_{save_tag}_raw.npy'), full)
+            np.save(os.path.join(RESULTS, f'frames_{save_tag}.npy'),
+                    np.asarray(obs, np.float32))
+            np.save(os.path.join(RESULTS, f'drive_{save_tag}.npy'), Aser)
+            print(f'    wrote frames_{save_tag}_raw.npy, frames_{save_tag}.npy and '
+                  f'drive_{save_tag}.npy ({full.shape[0]} frames x {full.shape[1]} '
+                  f'vertices, {"envelope" if envelope else "linear"} observable)',
+                  flush=True)
+            del full, obs
         del fr
         if envelope:
             U = env.observable(X, kern, g['frame_s'], (g['lo'], g['hi']), burn=t.burn)
@@ -67,6 +86,9 @@ def main():
     ap.add_argument('--draws', type=int, default=2)
     ap.add_argument('--skip-source', action='store_true',
                     help='do not re-score the source solve (its number is already recorded)')
+    ap.add_argument('--save-frames', default='', dest='save_frames',
+                    help='write frames_<tag>_raw.npy, frames_<tag>.npy and drive_<tag>.npy '
+                         'from draw 0, which is what viz/render_bandpass.py reads')
     ap.add_argument('--workers', type=int, default=8)
     a = ap.parse_args()
 
@@ -81,7 +103,8 @@ def main():
           f'spread {float(q["spread"])/float(q["target_spread"]):.2f}x the target, '
           f'J {float(q["J"]):.4e}', flush=True)
 
-    new, newp = realise_score(c, t, g, q['S'], idx, kern, isenv, a.seconds, a.draws, 'NEW')
+    new, newp = realise_score(c, t, g, q['S'], idx, kern, isenv, a.seconds, a.draws, 'NEW',
+                              save_tag=a.save_frames)
     old, oldp = (([], None) if a.skip_source else
                  realise_score(c, t, g, z['S'], idx, kern, isenv, a.seconds, a.draws, 'OLD'))
     print(f'\n  over {a.seconds:.0f}s, {a.draws} draws, all {t.nV} vertices:')
