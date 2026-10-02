@@ -74,7 +74,24 @@ def main():
     Sb = S.copy()
     Sb[~inb] = 0.0
     print(f'  {a.tag}: {len(idx)} solved bins, {int(inb.sum())} in {lo}-{hi} Hz')
-    print(f'  power zeroed: {100*(1 - tr[inb].sum()/tr.sum()):.1f}% of sum_f w_f tr(S_f)',
+    print(f'  out-of-band power: {100*(1 - tr[inb].sum()/tr.sum()):.1f}% of sum_f w_f tr(S_f)',
+          flush=True)
+
+    # 1/f FILL. Out-of-band bins get tr(S_f) proportional to 1/f with an IDENTITY spatial
+    # structure - uncorrelated across regions, the neutral choice, since the data cannot
+    # determine that structure either. Scaled so the out-of-band power matches what the solve
+    # had, so this differs from `full S` only in the SHAPE of the out-of-band input and not in
+    # how much of it there is.
+    Sf = S.copy()
+    K = S.shape[1]
+    oob = ~inb
+    dens = 1.0 / np.maximum(f_hz[oob], 1e-12)
+    raw = (w[oob] * dens * K)                      # power each bin would carry at tr = dens*K
+    Sf[oob] = (dens * (tr[oob].sum() / raw.sum()))[:, None, None] * np.eye(K)[None]
+    trf = np.array([np.trace(Sf[i]).real for i in range(len(idx))]) * w
+    print(f'  1/f fill: out-of-band power {100*(1 - trf[inb].sum()/trf.sum()):.1f}%, '
+          f'tr(S) ratio lowest/highest out-of-band bin '
+          f'{np.trace(Sf[np.flatnonzero(oob)[0]]).real/np.trace(Sf[np.flatnonzero(oob)[-1]]).real:.1f}x',
           flush=True)
 
     import fluid as fl
@@ -82,7 +99,7 @@ def main():
     nframes = timescale.frames_for(a.seconds, fs)
     cols = np.asarray(t.cols)
     out = {}
-    for nm, Suse in (('full S', S), ('in-band S only', Sb)):
+    for nm, Suse in (('full S', S), ('in-band S only', Sb), ('1/f fast fill', Sf)):
         sims = []
         for d in range(a.draws):
             t0 = time.time()
@@ -101,8 +118,9 @@ def main():
     print(f'\n  over {a.seconds:.0f}s, {a.draws} draws, all {t.nV} vertices:')
     for nm, v in out.items():
         print(f'    {nm:<16s} sim {np.mean(v):+.4f} +- {np.std(v):.4f}')
-    d = np.mean(out['in-band S only']) - np.mean(out['full S'])
-    print(f'    difference {d:+.4f}')
+    base = np.mean(out['full S'])
+    for nm in ('in-band S only', '1/f fast fill'):
+        print(f'    {nm:<16s} vs full S: {np.mean(out[nm]) - base:+.4f}')
 
 
 if __name__ == '__main__':

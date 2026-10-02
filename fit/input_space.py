@@ -33,7 +33,28 @@ RANK IS NOT THE BINDING FREEDOM. The same basis at three ranks:
 Flat in both columns, so three modes overfit exactly as well as twenty. With one-hot channels each
 mode can be an ARBITRARY function on 1,880 vertices - 5,640 spatial degrees of freedom at rank 3 -
 where the 100-tile basis gives each mode 100, every tile smooth over ~19 vertices. The tiling was
-acting as a SPATIAL regulariser and removing it is what broke generalisation, not the mode count.
+acting as a spatial regulariser, WHICH IS WRONG - see below.
+
+THE OVERFITTING IS THE SOLVER, not the basis. The same 100 tapered tiles, only the solver differing:
+
+    100 tiles, factor rank 20, maxfun 1500    solve +0.8108    realised +0.1661
+    100 tiles, gradient, 400 iterations       solve +0.6530    realised +0.6104
+
+which is what xspec.solve's docstring already says - the realised score peaks early and falls away
+as the objective converges, so --iters is a hidden regularisation parameter - and L-BFGS converging
+properly removes it. Every comparison between a factored large-K run and the gradient-solver
+baseline was confounded by that. At matched solver the channel count does not hurt:
+
+    basis                channels   solve-space    realised
+    100 tapered tiles       100       +0.8108      +0.1661 +- 0.0465
+    90 smooth modes          90       +0.7906      +0.3108 +- 0.0634
+    263 smooth modes        263       +0.8261      +0.2552 +- 0.0290
+    618 smooth modes        618       +0.8352      +0.3098 +- 0.0044
+    1,880 one-hot          1880       +0.8468      +0.3047 +- 0.0234
+
+Solve-space rises monotonically with channels while realised stays flat at 0.25-0.31, the disjoint
+tiles the lone outlier below. All sit far under +0.6104, so regularisation dominates the basis and
+the expressive-power question cannot be settled with a solver that converges.
 
 The target comparison in this script is not apples to apples and should not be read as one: the
 empirical FC arrives double-centred, so putting it in correlation form after setting the diagonal
