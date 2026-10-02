@@ -63,6 +63,16 @@ def old_objective(M, t, sub, centre):
             float(spearmanr(A[iu], raw[iu]).statistic))
 
 
+def _start(a, S_old):
+    """The initial S: white, the recorded solve, or another corrfit result to continue."""
+    if a.init_from:
+        q = np.load(os.path.join(RESULTS, a.init_from + '.npz'), allow_pickle=True)
+        print(f'  continuing from {a.init_from}: J {float(q["J"]):.4e}, spread '
+              f'{float(q["spread"])/float(q["target_spread"]):.2f}x the target', flush=True)
+        return q['S']
+    return S_old if a.init == 'warm' else None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('tag')
@@ -72,6 +82,12 @@ def main():
                     help="'warm' starts from the recorded S, so J can only improve on what "
                          "the old objective reached; 'white' is the independent run")
     ap.add_argument('--lag-tol', type=float, default=1e-3, dest='lag_tol')
+    ap.add_argument('--init-from', default='', dest='init_from',
+                    help="continue from another corrfit npz by tag. The solve keeps no "
+                         "state beyond S and the step size, so a resumed run is not "
+                         "identical to one long run - the step restarts at 1.0 and the "
+                         "line search has to find its scale again - but it beats "
+                         "discarding the iterations already paid for")
     ap.add_argument('--lam', type=float, default=0.0,
                     help='weight on (sd(R) - sd(T))^2. 0 is pure squared error, which '
                          'SHRINKS the spread to rho*sd(T); >0 pushes it back')
@@ -112,7 +128,7 @@ def main():
 
     t0, tr = time.time(), []
     S, J = cf.solve(fwd, adj, T, len(idx), K, iters=a.iters, lam=a.lam,
-                    S0=(S_old if a.init == 'warm' else None), trace=tr)
+                    S0=_start(a, S_old), trace=tr)
     M = fwd(S)
     Rc = cf.dcentre(cf.correlation_form(M)[0])
     o1, s1 = old_objective(M, t, sub, not a.envelope)
