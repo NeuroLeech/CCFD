@@ -70,6 +70,21 @@ correlation form is well above anything the linear reaches. Forcing the last 17%
 pearson 0.16 at lam=10 and 0.44 at lam=100. Both envelope runs at 150 iterations were still
 falling fast (lam=10: J 718 -> 660 over the last 24), so those are lower bounds.
 
+AND IT IS THE ENVELOPE THAT THIS OBJECTIVE IS FOR. Realised over 2,308 s on all 9,310
+vertices, same seeds for both:
+
+    ENVELOPE  correlation-form objective (lam 0)   sim +0.5019 +- 0.0216
+              the recorded solve                   sim +0.3416 +- 0.0183
+    LINEAR    correlation-form objective (lam 10)  sim +0.6356 +- 0.0033
+              the recorded solve                   sim +0.6537 +- 0.0017
+
+So it is worth +0.160 of Spearman to the envelope and costs the linear 0.018. The envelope's
+gain has a mechanism beyond the better fit: its realised score was attenuated by estimator
+noise as r = contrast / sqrt(contrast^2 + noise^2), and raising the contrast from 0.49x to
+0.83x of the target raises r directly. Fitting the magnitude and fixing the sampling are the
+same intervention, because low contrast was what made the fourth moment so hard to estimate
+- see fit/why_noisy.py, where the contrast factor was the dominant one.
+
 The attenuation argument is approximate, not exact: at lam=0 it predicts spread/sd(T) =
 pearson = 0.730 and the measured ratio is 0.801, because the prediction holds the model's
 SHAPE fixed and only optimises amplitude, while here the shape co-adapts.
