@@ -528,6 +528,25 @@ def prank_ratio(w):
     mean of per-bin PR_f = tr(S_f)^2/||S_f||_F^2 is the obvious alternative and is not
     implemented.
 
+    IT WORKS AND IT HURTS. Swept as --prank-mu on the incumbent config (rank 20, maxfun 1500,
+    K=100, 400 solve vertices, 577 s, 2 draws), against mu = 0 at participation 8.3 of 100,
+    fit +0.8165 and realised +0.2621 +- 0.0038:
+
+        mu     participation    fit       realised          Moran gap
+        0.1        99.8       +0.8184   +0.1989 +- 0.0078     0.414
+        0.5       100.0       +0.8184   +0.2015 +- 0.0030     0.420
+        2.0       100.0       +0.8184   +0.1981 +- 0.0097     0.414
+
+    mu = 0.1 already saturates the ratio at its ceiling, so the term is not underpowered. The
+    realised score FALLS by 0.06 while the fit rises by 0.002 and the gap worsens. The same
+    conclusion arrives independently from this file's adjoint fix, which moved the realised
+    score +0.1661 -> +0.2621 while leaving the participation ratio at 8.5 -> 8.3. One
+    measurement holds participation fixed and moves realisation; the other drives participation
+    to its maximum and moves realisation the wrong way. The participation ratio is not the
+    mediator of realisability, so this is kept as the measurement that says so rather than as a
+    knob to turn. The field's effective rank FELL as the realised score rose (4.6 -> 2.9 across
+    the fix, 3.3-3.4 under the penalty), which points at the output side, not the input side.
+
     -> R(S) -> (value, gradient), the signature solve_factor and family_member both take."""
     w = np.asarray(w, float)
 

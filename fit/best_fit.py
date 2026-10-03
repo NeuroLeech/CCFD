@@ -390,6 +390,14 @@ def main():
                     help="rank of L for --solver factor")
     ap.add_argument("--maxfun", type=int, default=20000,
                     help="evaluation budget for --solver factor")
+    ap.add_argument("--prank-mu", type=float, default=0.0, dest="prank_mu",
+                    help="weight on xspec.prank_ratio DURING the --solver factor solve, in "
+                         "the same units as the fit it is added to: the objective becomes "
+                         "rho + mu * PR(sum_f w_f S_f)/K, so mu is what one unit of "
+                         "normalised participation ratio is worth in Spearman. The "
+                         "realisability term --maxfun has been standing in for; unlike "
+                         "prank_reg through family_member it shapes the whole path rather "
+                         "than walking back from the argmax")
     ap.add_argument("--shells", type=int, default=1,
                     help="split each piece into this many concentric shells by erosion "
                          "depth, so the solve chooses the drive's RADIAL shape instead of "
@@ -813,7 +821,9 @@ def main():
                                          wa=a.wa, trace=tr, freq_keep=keep_f)
     elif a.solver == "factor":
         S, C = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
-                                  trace=tr, log_every=max(1, a.maxfun // 10))
+                                  trace=tr, log_every=max(1, a.maxfun // 10),
+                                  reg=(xspec.prank_ratio(w) if a.prank_mu else None),
+                                  mu=a.prank_mu)
     else:
         S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
                            share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
