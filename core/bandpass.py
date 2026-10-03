@@ -154,6 +154,54 @@ def _segment_selfcheck(frame_s=0.645, seg=28, ntrial=4000, seed=0):
     return ok
 
 
+def edge_frames(frame_s, lo=LO_HZ):
+    """Frames at EACH END that sosfiltfilt's edge replication has corrupted.
+
+    One period of the slowest component the passband keeps: 1/0.01 Hz = 100 s, which is 620
+    frames at a TR/4 clock. `apply` runs sosfiltfilt, which invents data past the ends by
+    repeating the edge values, so the filtered series is wrong over roughly that span at both
+    ends. _selfcheck has always discarded exactly this before comparing its two filter paths -
+    "the two can only be compared where neither edge treatment reaches" - and this is that same
+    number, lifted out so the SCORING path can apply the rule the self-check states.
+
+    It had not been applied there, and it mattered. fc_score drops burn = 50 frames from the
+    START and none from the end, so ~100 s of corrupted signal at each end was entering the
+    correlations. Re-scoring saved realisations of the same draw at a range of trims:
+
+        trim each end   converged solve   maxfun 60   maxfun 15
+          0 (burn only)     +0.2659        +0.6448     +0.5781
+                200         +0.3871        +0.6596     +0.5841
+                400         +0.5767        +0.6530     +0.5662
+                620         +0.5748        +0.6447     +0.5597
+               1200         +0.5282        +0.6176     +0.5270
+
+    The converged solve gains +0.311 and flattens by 400; the early-stopped ones move by less
+    than 0.02. The contamination is selective and monotone in optimisation budget (+0.008 at
+    maxfun 60, +0.042 at 150, +0.229 at 400, +0.311 at 1500), because a drive concentrated in
+    few frequencies and swinging hard gives the edge replication more to get wrong - which is
+    what a converged solve produces. Two things say artefact rather than property: trimming
+    SHORTENS the record 21%, and a shorter record carries more estimator variance, so the score
+    should fall; and the closed form for a single draw's attenuation, derived without reference
+    to any of this, predicts the trimmed scores at mean |error| 0.031 against 0.114 untrimmed
+    (0.056 against 0.214 on the two runs that moved).
+
+    So any realised score recorded before this was applied is not comparable with one after."""
+    return int(round(1.0 / (lo * frame_s)))
+
+
+def trim_edges(frames, frame_s, lo=LO_HZ):
+    """Drop `edge_frames` from both ends. -> the kept frames, which is what gets scored.
+
+    At the 3,578-frame / 577 s realisation this keeps 2,338 frames = 377 s. The score is flat
+    from a trim of 400 onward (see edge_frames), so the measured plateau would also be reached
+    at 448 s; this uses the derived number rather than the smallest one that works."""
+    e = edge_frames(frame_s, lo)
+    if 2 * e >= len(frames):
+        raise ValueError(f"record of {len(frames)} frames is shorter than the {2*e} frames "
+                         f"the {lo} Hz edge costs; realise longer or raise the low cutoff")
+    return frames[e:len(frames) - e]
+
+
 def _selfcheck(frame_s=0.16125, n=16384, seed=0):
     """The two paths have to agree, or the solved system is not the scored one."""
     rng = np.random.default_rng(seed)
@@ -166,7 +214,7 @@ def _selfcheck(frame_s=0.16125, n=16384, seed=0):
     # while the frequency-domain multiply wraps them, so the two can only be compared
     # where neither edge treatment reaches - and the trim must leave a series behind,
     # which at 3 periods and a 3,578-frame run it does not.
-    edge = int(round(1.0 / (LO_HZ * frame_s)))
+    edge = edge_frames(frame_s)
     a, b = td[edge:-edge], fd[edge:-edge]
     r = float(np.corrcoef(a.ravel(), b.ravel())[0, 1])
     rel = float(np.abs(a - b).mean() / np.abs(b).std())

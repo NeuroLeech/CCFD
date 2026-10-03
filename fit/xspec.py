@@ -245,9 +245,11 @@ def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers,
 _W_SCORE = {}
 
 
-def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s, segment):
+def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s, segment,
+                trim_edge=True):
     _W_SCORE.update(cortex=cortex, target=target, p=p, profiles=profiles, save=save,
-                    kernel=kernel, band=band, frame_s=frame_s, segment=segment)
+                    kernel=kernel, band=band, frame_s=frame_s, segment=segment,
+                    trim_edge=trim_edge)
 
 
 def _score_one(A):
@@ -257,12 +259,13 @@ def _score_one(A):
     r = score_realisation(_W_SCORE["cortex"], _W_SCORE["target"], _W_SCORE["p"], A,
                           save=_W_SCORE["save"], profiles=_W_SCORE["profiles"],
                           kernel=_W_SCORE["kernel"], band=_W_SCORE["band"],
-                          frame_s=_W_SCORE["frame_s"], segment=_W_SCORE["segment"])
+                          frame_s=_W_SCORE["frame_s"], segment=_W_SCORE["segment"],
+                          trim_edge=_W_SCORE["trim_edge"])
     return r["sim"], r["gap"], r["rank"], r.get("sim_aff", float("nan"))
 
 
 def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
-                    band=None, frame_s=None, segment=None):
+                    band=None, frame_s=None, segment=None, trim_edge=True):
     """Score several drawn realisations at once. -> [(sim, gap, rank), ...]
 
     Draws are independent runs of the same medium under different samples of the same
@@ -297,7 +300,7 @@ def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
     try:
         pool = ctx.Pool(n, initializer=_score_init,
                         initargs=(cortex, target, p, profiles, save, kernel, band,
-                                  frame_s, segment))
+                                  frame_s, segment, trim_edge))
     finally:
         for k, v in env.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
@@ -1489,12 +1492,18 @@ class ProfileDrive:
 
 def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=False,
                       seed=0, profiles=None, run_fn=None, kernel=None, band=None,
-                      frame_s=None, segment=None, diagnostics=True):
+                      frame_s=None, segment=None, diagnostics=True, trim_edge=True):
     """Hold each drawn sample over its block of steps, run, and score for real.
 
     `run_fn(drive, nsteps, save) -> (frames, dt)` replaces the plain integration, which is
     how a switching medium is scored without this module having to know about regimes.py
     (which imports this one). p is then unused.
+
+    `trim_edge` discards the frames at both ends that the filter's edge replication has
+    corrupted - bandpass.edge_frames, 620 per end at a TR/4 clock, 2,338 of 3,578 kept. It
+    defaults ON because scoring those frames is a measurement artefact, not a property of the
+    model; the figures are in that function's docstring. It shortens the record, so the T in
+    any variance expression is the KEPT length, 377 s rather than 577 s.
 
     `band` is the passband the TARGET was filtered to, as (lo_hz, hi_hz). The data XCP-D
     produced is bandpassed, so the observable has to be too or the model is scored on
@@ -1524,6 +1533,14 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
         if frame_s is None:
             raise ValueError("band needs frame_s; the filter is defined in Hz")
         frames = bandpass.apply(frames, frame_s, band[0], band[1])
+        if trim_edge:
+            # sosfiltfilt replicates the ends, so ~one period of the slowest passband
+            # component is corrupted at each. See bandpass.edge_frames for the measurement:
+            # scoring these frames cost the converged solve 0.311 of realised Spearman and
+            # the early-stopped ones under 0.02, which is why the stopping point looked far
+            # more load-bearing than it is. Pass trim_edge=False only to reproduce a
+            # pre-2026-10-03 number deliberately.
+            frames = bandpass.trim_edges(frames, frame_s, band[0])
     if segment:
         # The target was estimated from short demeaned blocks; the model's covariance has
         # to be estimated the same way, or the identity the solve rests on - that the
