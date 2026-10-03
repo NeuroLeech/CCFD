@@ -492,6 +492,59 @@ def prank_reg():
     return R
 
 
+def prank_ratio(w):
+    """The participation RATIO itself, as a penalty that survives trace normalisation.
+
+    prank_reg returns -||S||_F^2, whose gradient -2S is entirely radial. Under a solve that
+    renormalises S to unit trace every step that is a no-op, and inside solve_factor - where
+    rho is scale invariant so ||L|| drifts freely and is only normalised on return - it is
+    worse than a no-op: shrinking L lowers ||S||_F^2 without changing rho at all, so the
+    penalty is minimised by driving the solution to zero and the fit pays nothing. That is
+    why prank_reg is only ever used through family_member, which projects onto the tangent
+    space of the trace sphere and throws the radial part away.
+
+    This is the quantity family_member was recovering, written so no projection is needed.
+    With A = sum_f w_f S_f, the aggregate the participation diagnostic is computed from,
+
+        PR(A) = tr(A)^2 / ||A||_F^2,   in [1, K],   reported here as PR/K in [1/K, 1]
+
+    PR is homogeneous of degree ZERO, so by Euler's theorem Re tr(grad . A) = 0 exactly: the
+    gradient has no radial component to begin with. It can therefore go straight into a
+    smooth objective with a weight, which is the one form of the realisability idea
+    family_member could not test - it walks from a given point, and the finding that early
+    stopping beats it at matched fit says the point it walks from is the wrong region.
+
+        d PR / dA = (2 tr(A) / ||A||_F^2) I - (2 tr(A)^2 / ||A||_F^4) A
+        d PR / dS_f = w_f * d PR / dA
+
+    A is Hermitian PSD, so ||A||_F^2 = tr(A^2) = sum of squared eigenvalues and PR/K here is
+    exactly family_prank.participation(S, w) / K.
+
+    AGGREGATE, NOT PER FREQUENCY. A sums over frequency, so a drive that is rank one at every
+    bin but uses a DIFFERENT mode at each bin scores a high PR here. Whether that counts as
+    spread is not obvious and is not settled; this form is chosen because it is the statistic
+    the iteration sweep reported (participation 8.5 of 100 at convergence, 54.2 at fit
+    +0.7162), so a penalty on it is directly comparable with that ladder. A power-weighted
+    mean of per-bin PR_f = tr(S_f)^2/||S_f||_F^2 is the obvious alternative and is not
+    implemented.
+
+    -> R(S) -> (value, gradient), the signature solve_factor and family_member both take."""
+    w = np.asarray(w, float)
+
+    def R(S):
+        K = S.shape[1]
+        A = np.einsum('f,fij->ij', w, S, optimize=True)
+        A = 0.5 * (A + A.conj().T)
+        tr = float(np.trace(A).real)
+        fr = float((np.abs(A) ** 2).sum())
+        if fr <= 0.0:
+            return 0.0, np.zeros_like(S)
+        val = tr * tr / fr
+        GA = (2.0 * tr / fr) * np.eye(K) - (2.0 * val / fr) * A
+        return val / K, (w[:, None, None] * GA[None]) / K
+    return R
+
+
 def offdiag_reg(eps=1e-8):
     """Coordination between driven pieces. sign=-1 drives them independently.
 
@@ -897,8 +950,79 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
     return S, model(S, SL)
 
 
+def factor_objective(H, w, Ct, rank, reg=None, mu=0.0, nfev=None, log_every=0,
+                     trace=None):
+    """-> (fg, Ctn, cov), the objective solve_factor hands to L-BFGS.
+
+    Lifted out of solve_factor so the gradient can be finite-differenced directly;
+    tests/test_prank_mu.py does that, and a penalty whose adjoint is wrong still runs and
+    still returns a plausible S, so there is no other way to catch one. solve_factor is the
+    only caller that matters - it is kept byte-for-byte what it was, so a recorded solve is
+    unchanged by the extraction.
+
+    `fg(Lv) -> (-objective, gradient)` on the real packing [L.real.ravel(), L.imag.ravel()].
+    `cov(L) -> (C, X)` is the double-centred, zero-diagonal model covariance."""
+    nf, nV, K = H.shape
+    r = int(rank)
+    Ctn = Ct.copy()
+    np.fill_diagonal(Ctn, 0.0)
+    Ctn /= np.linalg.norm(Ctn)
+    Hs = H * np.sqrt(2.0 * np.asarray(w, float))[:, None, None]
+    Hsc = np.ascontiguousarray(Hs.conj().transpose(0, 2, 1))
+    half = nf * K * r
+    nfev = [0] if nfev is None else nfev
+
+    def _dc(M):
+        return M - M.mean(0, keepdims=True) - M.mean(1, keepdims=True) + M.mean()
+
+    def _dcz(M):
+        M = _dc(M).copy()
+        np.fill_diagonal(M, 0.0)
+        return M
+
+    def _cov(L):
+        X = (Hs @ L).transpose(1, 0, 2).reshape(nV, nf * r)
+        return _dcz(X.real @ X.real.T + X.imag @ X.imag.T), X
+
+    def fg(Lv):
+        nfev[0] += 1
+        L = Lv[:half].reshape(nf, K, r) + 1j * Lv[half:].reshape(nf, K, r)
+        C, X = _cov(L)
+        n = np.linalg.norm(C)
+        if n <= 0:
+            return 1e3, np.zeros_like(Lv)
+        rho = float((C * Ctn).sum() / n)
+        # DOUBLE-CENTRE ONLY. The forward map is C = Z(P(X X^H)) with P double-centring and
+        # Z zeroing the diagonal, so the adjoint is P o Z, not Z o P - and dcz applies them
+        # in the forward order. Both C and Ctn already have zero diagonals, so Z acts as the
+        # identity here and the adjoint is P alone. Applying _dcz instead zeroes a diagonal
+        # that double-centring has just made nonzero, which leaves a gradient that
+        # correlates 0.88 with the true one and carries a RADIAL component of -0.38 where
+        # rho, being degree-zero in L, has exactly none. `solve`'s adjoint never had this -
+        # it double-centres and stops - which is the difference between the two solvers.
+        M = _dc(Ctn / n - rho * C / (n * n))
+        Y = (M @ X).reshape(nV, nf, r).transpose(1, 0, 2)
+        G = 2.0 * (Hsc @ Y)
+        obj, pen = rho, 0.0
+        if reg is not None and mu != 0.0:
+            pen, Gs = reg(L @ np.conj(L).transpose(0, 2, 1))
+            obj = rho + mu * pen
+            G = G + mu * 2.0 * (Gs @ L)
+        g = -np.concatenate([G.real.ravel(), G.imag.ravel()])
+        if log_every and nfev[0] % log_every == 0:
+            if trace is not None:
+                trace.append(float(rho))
+            print(f"      nfev {nfev[0]:>6d}  rho {rho:+.8f}"
+                  + (f"  reg {pen:.6f}" if reg is not None and mu != 0.0 else "")
+                  + f"  |grad|*|L| {np.linalg.norm(g) * np.linalg.norm(Lv):.4e}", flush=True)
+        return -obj, g
+
+    return fg, Ctn, _cov
+
+
 def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
-                 ftol=1e-18, gtol=1e-16, maxcor=40, log_every=0, trace=None):
+                 ftol=1e-18, gtol=1e-16, maxcor=40, log_every=0, trace=None,
+                 reg=None, mu=0.0):
     """The same objective as `solve`, maximised over S = L L^H with L the free variable.
 
     `solve` walks the PSD cone by projected gradient and stops on an iteration count, with
@@ -922,45 +1046,26 @@ def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
     Hessian singular, and together they are why termination comes on the function
     tolerance rather than on a vanishing gradient.
 
+    `reg` with `mu` > 0 adds mu * R(S) to the MAXIMISED objective, R being the usual
+    regulariser signature S -> (value, gradient). It must be SCALE INVARIANT: rho is, so
+    ||L|| is a free direction the search wanders along, and a penalty with any degree of
+    homogeneity other than zero is optimised by moving along it for free - prank_reg's
+    -||S||_F^2 is maximised by L -> 0 at no cost in rho. prank_ratio is the degree-zero form
+    of the same quantity and is what this is for. The chain rule through S = L L^H is
+
+        dR = Re tr(G_f dS_f) = 2 Re tr((G_f L_f)^H dL_f)   =>   d/dL_f = 2 G_f L_f
+
+    for Hermitian G_f, the same shape as the fit's own gradient 2 A_f L_f, so the two add
+    directly. tests/test_prank_mu.py finite-differences the sum.
+
     -> (S, C), the pair `solve` returns, S normalised to unit total trace."""
     from scipy.optimize import minimize
     nf, nV, K = H.shape
     r = int(rank)
-    Ctn = Ct.copy()
-    np.fill_diagonal(Ctn, 0.0)
-    Ctn /= np.linalg.norm(Ctn)
-    Hs = H * np.sqrt(2.0 * np.asarray(w, float))[:, None, None]
-    Hsc = np.ascontiguousarray(Hs.conj().transpose(0, 2, 1))
     half = nf * K * r
     nfev = [0]
-
-    def _dcz(M):
-        M = M - M.mean(0, keepdims=True) - M.mean(1, keepdims=True) + M.mean()
-        np.fill_diagonal(M, 0.0)
-        return M
-
-    def _cov(L):
-        X = (Hs @ L).transpose(1, 0, 2).reshape(nV, nf * r)
-        return _dcz(X.real @ X.real.T + X.imag @ X.imag.T), X
-
-    def fg(Lv):
-        nfev[0] += 1
-        L = Lv[:half].reshape(nf, K, r) + 1j * Lv[half:].reshape(nf, K, r)
-        C, X = _cov(L)
-        n = np.linalg.norm(C)
-        if n <= 0:
-            return 1e3, np.zeros_like(Lv)
-        rho = float((C * Ctn).sum() / n)
-        M = _dcz(Ctn / n - rho * C / (n * n))
-        Y = (M @ X).reshape(nV, nf, r).transpose(1, 0, 2)
-        G = 2.0 * (Hsc @ Y)
-        g = -np.concatenate([G.real.ravel(), G.imag.ravel()])
-        if log_every and nfev[0] % log_every == 0:
-            if trace is not None:
-                trace.append(float(rho))
-            print(f"      nfev {nfev[0]:>6d}  rho {rho:+.8f}  "
-                  f"|grad|*|L| {np.linalg.norm(g) * np.linalg.norm(Lv):.4e}", flush=True)
-        return -rho, g
+    fg, Ctn, _cov = factor_objective(H, w, Ct, r, reg=reg, mu=mu, nfev=nfev,
+                                     log_every=log_every, trace=trace)
 
     rng = np.random.default_rng(seed)
     L0 = rng.standard_normal(2 * half) * (1.0 / np.sqrt(K * r))
