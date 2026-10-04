@@ -49,22 +49,27 @@ _W = {}
 
 
 def _init(tag, seconds):
-    import timescale, units
-    from interp_gap import build_H
+    import timescale, xspec
+    from interp_gap import medium_context
     z = np.load(os.path.join(RESULTS, f'xspec_{tag}.npz'), allow_pickle=True)
-    Hall, _, kern, c, t, g = build_H(tag, z, False, workers=1)
-    del Hall
-    _W.update(z=z, kern=kern, c=c, t=t, g=g,
-              nframes=timescale.frames_for(seconds, g['frame_s']))
+    kern, c, t, g = medium_context(z)
+    S = z['S']
+    # factor once per worker: at 1,880 channels a draw would otherwise repeat 135
+    # eigendecompositions of a 1,880-square matrix. Bit-identical draws either way; below
+    # 513 channels realise does not use the factored path, so neither does this.
+    fac = xspec.solved_factors(S) if S.shape[1] > 512 else None
+    _W.update(S=S, idx=z['idx'], ref=int(z['ref_frames']), fac=fac, kern=kern, c=c, t=t,
+              g=g, nframes=timescale.frames_for(seconds, g['frame_s']))
 
 
 def _one(seed):
     import xspec, units, bandpass
     import fluid as fl
     from fc_score import _rank_z
-    z, g, c, t = _W['z'], _W['g'], _W['c'], _W['t']
+    g, c, t = _W['g'], _W['c'], _W['t']
     nf = _W['nframes']
-    A = xspec.realise(z['S'], z['idx'], nf, ref_frames=int(z['ref_frames']), seed=seed)
+    A = xspec.realise(_W['S'], _W['idx'], nf, ref_frames=_W['ref'], seed=seed,
+                      factors=_W['fac'])
     Aser = np.repeat(A, g['save'], axis=0)[:nf * g['save']] / g['save']
     fr, _ = fl.run(c, xspec.ProfileDrive(c, g['P'], Aser, 2e-4), g['p'], nf * g['save'],
                    g['save'])

@@ -307,7 +307,7 @@ def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
     return pool, pool.map_async(_score_one, list(draws_A))
 
 
-def transfer(resp, cols, nfreq, kernel=None, idx=None):
+def transfer(resp, cols, nfreq, kernel=None, idx=None, n=None):
     """FFT the impulse responses -> H (nfreq, nVsub, K) and the bin weights.
 
     `kernel` is a temporal filter standing between the field and the observable - the
@@ -323,19 +323,37 @@ def transfer(resp, cols, nfreq, kernel=None, idx=None):
     of the power in 0.01-0.03 Hz, which the geometric grid covers with three samples,
     while spending a hundred on the decade above 0.1 Hz that holds 0.2%. See
     timescale.band_grid."""
-    G = resp[:, :, cols]                                  # (K, nframes, nVsub)
-    F = np.fft.rfft(G, axis=1)                            # (K, nbins, nVsub)
-    nb = F.shape[1]
-    if kernel is not None:
-        import units
-        F = F * units.kernel_response(kernel, nb, G.shape[1])[None, :, None]
+    # In blocks of channels, keeping only the solved bins as it goes. The whole-array form
+    # held the padded responses, a reindexed copy of them and the FFT of every bin at once,
+    # and only then kept ~135 of 2,049 bins: at 1,880 channels x 2,000 vertices that is
+    # ~185 GB for an H of 8 GB. Each block is exactly the arithmetic the whole array did,
+    # so H is bit-identical. `n` zero-pads inside the FFT, so callers need not pad first.
+    cols = np.asarray(cols)
+    K, nfr = resp.shape[0], resp.shape[1]
+    n = nfr if n is None else max(int(n), nfr)
+    nb = n // 2 + 1
     if idx is None:
         idx = np.unique(np.round(np.geomspace(1, nb - 1, nfreq)).astype(int))
     else:
         idx = np.unique(np.asarray(idx, int))
         idx = idx[(idx >= 1) & (idx <= nb - 1)]
+    kr = None
+    if kernel is not None:
+        import units
+        kr = units.kernel_response(kernel, nb, n)
+    out = None
+    kb = max(1, int(2e9 // max(nb * len(cols) * 16, 1)))
+    for k0 in range(0, K, kb):
+        F = np.fft.rfft(resp[k0:k0 + kb][:, :, cols], n=n, axis=1)
+        if kr is not None:
+            F = F * kr[None, :, None]
+        F = F[:, idx]                                     # (kb, nidx, nVsub)
+        if out is None:
+            out = np.empty((len(idx), len(cols), K), F.dtype)
+        out[:, :, k0:k0 + kb] = F.transpose(1, 2, 0)
+        del F
     w = np.gradient(idx).astype(float)                    # each sample stands for a band
-    return np.ascontiguousarray(F[:, idx].transpose(1, 2, 0)), w, idx
+    return out, w, idx
 
 
 # ------------------------------------------------------- the admissible family
@@ -1405,7 +1423,7 @@ def draw_eta(rng, K, law="gaussian"):
 
 
 def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian",
-            factor_draw=None):
+            factor_draw=None, factors=None):
     """Draw a drive whose cross-spectrum is S: at each bin, z = L eta with S = L L^H.
 
     S is solved on a coarse grid, so it is interpolated first - in FREQUENCY, not in bin
@@ -1421,8 +1439,8 @@ def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian",
     rng = np.random.default_rng(seed)
     if factor_draw is None:
         factor_draw = K > 512
-    if factor_draw:
-        return _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law)
+    if factor_draw or factors is not None:
+        return _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law, factors)
     Sf = np.empty((nb, K, K), complex)
     for a in range(K):
         for b in range(K):
@@ -1437,7 +1455,22 @@ def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian",
     return A / max(A.std(), 1e-30)
 
 
-def _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law):
+def solved_factors(S):
+    """One factor per solved bin, A_f with A_f A_f^H = S_f - what _realise_factored builds
+    before drawing. Pass it to `realise(..., factors=)` to draw many realisations of one S
+    without repeating 135 eigendecompositions per draw; the draws are bit-identical to
+    letting realise factor S itself."""
+    K = S.shape[1]
+    As = []
+    for f in range(S.shape[0]):
+        M = 0.5 * (S[f] + S[f].conj().T)
+        ev, U = np.linalg.eigh(M)
+        k = ev > max(float(ev.max()), 0.0) * 1e-12
+        As.append((U[:, k] * np.sqrt(ev[k])) if k.any() else np.zeros((K, 0), complex))
+    return As
+
+
+def _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law, factors=None):
     """The same draw without ever forming the interpolated S.
 
     The default path allocates (nb, K, K) and eigendecomposes one K x K matrix per
@@ -1457,12 +1490,7 @@ def _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law):
     The draw is statistically identical, NOT bit-identical: eta has a different dimension so
     the random stream differs. Seeds therefore do not correspond between the two paths, which
     is why K <= 512 keeps the original - every recorded realisation came through it."""
-    As = []
-    for f in range(len(f_src)):
-        M = 0.5 * (S[f] + S[f].conj().T)
-        ev, U = np.linalg.eigh(M)
-        k = ev > max(float(ev.max()), 0.0) * 1e-12
-        As.append((U[:, k] * np.sqrt(ev[k])) if k.any() else np.zeros((K, 0), complex))
+    As = solved_factors(S) if factors is None else factors
     Z = np.zeros((nb, K), complex)
     j = np.clip(np.searchsorted(f_src, f_dst, side="right") - 1, 0, len(f_src) - 1)
     for b in range(1, nb):

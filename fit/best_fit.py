@@ -694,16 +694,17 @@ def main():
         resp = xspec.impulse_responses(c, list(range(len(P))), p, a.impulse_frames * save, save,
                                        profiles=P, verbose=False, coupling=cpl,
                                        workers=a.workers, keep=keep)
-        R = np.pad(resp, ((0, 0), (0, max(0, a.pad - resp.shape[1])), (0, 0)))
-        del resp                                     # the pad already copied it
+        # transfer zero-pads to a.pad inside its FFT, in blocks of channels, so the padded
+        # copy is never formed - at 1,880 channels x 2,000 vertices it would be ~62 GB.
+        npad = max(a.pad, resp.shape[1])
         print(f"  impulse responses over {len(keep)} of {c.nV} vertices "
-              f"({R.nbytes/2**30:.2f} GiB padded, {9374/max(len(keep),1):.1f}x smaller "
+              f"({resp.nbytes/2**30:.2f} GiB, {9374/max(len(keep),1):.1f}x smaller "
               f"than full width)")
-        H, w, idx = xspec.transfer(R, sub_k, a.nfreq, kernel=kern)
-        Hv = (xspec.transfer(R, val_k, a.nfreq, kernel=kern)[0]
+        H, w, idx = xspec.transfer(resp, sub_k, a.nfreq, kernel=kern, n=npad)
+        Hv = (xspec.transfer(resp, val_k, a.nfreq, kernel=kern, n=npad)[0]
               if val is not None else None)
-        ref_frames, ps, dt = R.shape[1], None, None
-        del R                    # H and Hv are all that is wanted from it
+        ref_frames, ps, dt = npad, None, None
+        del resp                 # H and Hv are all that is wanted from it
         if bp is not None:
             # the filter is linear, so like the smoothing kernel it simply multiplies the
             # transfer function - the solve is unchanged and costs nothing extra

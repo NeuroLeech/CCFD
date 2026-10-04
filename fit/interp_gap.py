@@ -178,21 +178,34 @@ def spectra(S, idx, nb):
     return Si, Sb
 
 
+def medium_context(z):
+    """-> (kernel, cortex, target, grid facts): everything needed to REALISE and score a
+    recorded solve, without the impulse responses or H. build_H adds those; a caller that
+    only simulates (fit/pool_curve.py) must not pay for them - at 1,880 channels x 2,000
+    vertices H alone is 8 GB per process."""
+    idx, x, sub = z['idx'], z['x'], z['sub']
+    pad, save, frame_s = int(z['pad']), int(z['save']), float(z['frame_s'])
+    lo, hi = (float(v) for v in z['band'])
+    P, mc = np.asarray(z['profiles'], np.float32), str(z['map_clip'])
+    c = load_cortex('fsaverage5', verbose=False)
+    t = fc_score.default_target(c, verbose=False)
+    p, _, _ = bo_step.unpack(x, c)
+    p['map_clip'] = mc
+    kern = units.smoothing_kernel(timescale.bold_fwhm_frames(frame_s, verbose=False),
+                                  verbose=False)
+    return kern, c, t, dict(idx=idx, sub=sub, pad=pad, frame_s=frame_s, lo=lo, hi=hi,
+                            p=p, P=P, save=save)
+
+
 def build_H(tag, z, envelope, workers=8):
     """-> (H at every rfft bin, respf, cortex, target, grid facts).
 
     `envelope` decides whether the observable's filters are folded into H (linear) or left
     out of it entirely (envelope, where they belong in rho and nowhere else)."""
-    idx, x, sub = z['idx'], z['x'], z['sub']
-    pad, save, frame_s = int(z['pad']), int(z['save']), float(z['frame_s'])
-    lo, hi = (float(v) for v in z['band'])
-    P, mc = np.asarray(z['profiles'], np.float32), str(z['map_clip'])
+    kern, c, t, g = medium_context(z)
+    idx, sub, pad, save, frame_s = g['idx'], g['sub'], g['pad'], g['save'], g['frame_s']
+    lo, hi, P, p = g['lo'], g['hi'], g['P'], g['p']
     K, nV = z['S'].shape[1], len(sub)
-
-    c = load_cortex('fsaverage5', verbose=False)
-    t = fc_score.default_target(c, verbose=False)
-    p, _, _ = bo_step.unpack(x, c)
-    p['map_clip'] = mc
     if 'impulse_frames' in z.files:
         imp = int(z['impulse_frames'])
     else:                       # envelope_fit does not store it; rebuild its rule
