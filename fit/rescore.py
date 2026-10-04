@@ -145,7 +145,12 @@ def main():
     p, save, _ = bo_step.unpack(z["x"], c)
     p["map_clip"] = str(z["map_clip"]) if "map_clip" in z else "none"
     P = np.asarray(z["profiles"], np.float32)
-    S, idx = xspec.load_S(z), z["idx"].astype(int)
+    idx = z["idx"].astype(int)
+    # above 512 channels realise takes the factored path; factor ONCE rather than per draw
+    # (135 eigendecompositions of a 1,880-square matrix each time), and never hold the full S
+    big = xspec.solution_K(z) > 512
+    fac = xspec.load_factors(z) if big else None
+    S = None if big else xspec.load_S(z)
     ref_frames = int(z["ref_frames"])
     frame_s = float(z["frame_s"])
     band = tuple(z["band"]) if "band" in z and np.isfinite(z["band"]).all() else None
@@ -178,14 +183,16 @@ def main():
     sims, gaps, rks = [], [], []
     pool = res = None
     if a.workers > 1 and a.draws > 1:
-        rest = [xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d)
+        rest = [xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d,
+                              factors=fac)
                 for d in range(1, a.draws)]
         pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
                                           band=band, frame_s=frame_s if band else None,
                                           segment=seg)
         print(f"  draws 2-{a.draws} over {min(a.workers, len(rest))} workers", flush=True)
     for d in range(1 if pool is not None else a.draws):
-        A = xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d)
+        A = xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d,
+                              factors=fac)
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, kernel=kern,
                                     band=band, frame_s=frame_s if band else None,
                                     segment=seg)
