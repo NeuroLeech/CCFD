@@ -37,6 +37,19 @@ sat 0.03-0.19 below. The 400-vertex solves' shortfall was transfer off the solve
 fitting more of the sheet removes most of it; the solve's own decline with optimisation
 (maxfun 400 below 150 at 400 vertices) is gone at 1,000 and 2,000.
 
+1,880 ONE-HOT CHANNELS (one per driven vertex) AT 2,000 SOLVE VERTICES, same everything else:
+
+                          fit      one draw   D=16      fit - D=16
+    one-hot, maxfun 60   +0.6821   +0.6286   +0.6694     0.013
+    one-hot, maxfun 150  +0.7564   +0.6755   +0.7224     0.034
+    one-hot, maxfun 400  +0.7965   +0.6887   +0.7371     0.060
+    100 regions, mf 400  +0.7638   +0.6904   +0.7423     0.022
+
+The extra input freedom buys fit on the solve vertices (0.80 against 0.76) and none of it in
+the realisation: the same one-draw score, a slightly lower pooled one, and a fit-to-pooled gap
+that widens with optimisation where the 100-region one stays near 0.02. The 400-vertex finding
+that more channels do not help holds at 2,000.
+
   python fit/pool_curve.py fixgrad_mf60 flat100_fac20_fix --draws 16 --workers 4
 """
 import _path  # noqa: F401
