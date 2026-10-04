@@ -205,7 +205,7 @@ def build_H(tag, z, envelope, workers=8):
     kern, c, t, g = medium_context(z)
     idx, sub, pad, save, frame_s = g['idx'], g['sub'], g['pad'], g['save'], g['frame_s']
     lo, hi, P, p = g['lo'], g['hi'], g['P'], g['p']
-    K, nV = z['S'].shape[1], len(sub)
+    K, nV = xspec.solution_K(z), len(sub)
     if 'impulse_frames' in z.files:
         imp = int(z['impulse_frames'])
     else:                       # envelope_fit does not store it; rebuild its rule
@@ -293,7 +293,7 @@ def main():
 
     f = os.path.join(RESULTS, ('envfit_' if a.envelope else 'xspec_') + a.tag + '.npz')
     z = np.load(f, allow_pickle=True)
-    S = z['S']
+    S = xspec.load_S(z)
     w = np.asarray(z['w' if a.envelope else 'H_w'], float)
     H, respf, kern, c, t, g = build_H(a.tag, z, a.envelope, workers=a.workers)
     idx, nb, nV, sub = g['idx'], g['nb'], g['nV'], g['sub']

@@ -1062,7 +1062,7 @@ def factor_objective(H, w, Ct, rank, reg=None, mu=0.0, nfev=None, log_every=0,
 
 def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
                  ftol=1e-18, gtol=1e-16, maxcor=40, log_every=0, trace=None,
-                 reg=None, mu=0.0):
+                 reg=None, mu=0.0, return_factor=False):
     """The same objective as `solve`, maximised over S = L L^H with L the free variable.
 
     `solve` walks the PSD cone by projected gradient and stops on an iteration count, with
@@ -1115,6 +1115,7 @@ def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
     L = res.x[:half].reshape(nf, K, r) + 1j * res.x[half:].reshape(nf, K, r)
     S = L @ np.conj(L).transpose(0, 2, 1)
     tr = sum(np.trace(S[f]).real for f in range(nf))
+    L_raw = L
     if tr > 0:
         S, L = S / tr, L / np.sqrt(tr)
     C, _ = _cov(L)
@@ -1131,6 +1132,10 @@ def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
         print(f"    factored solve: rank {r}, corr = "
               f"{float((C * Ctn).sum() / np.linalg.norm(C)):+.6f}, "
               f"{res.nfev} evaluations ({msg})")
+    if return_factor:
+        # (L before normalisation, its trace): factor_to_S rebuilds S from these with the
+        # same two operations, so the rebuilt S is the returned one bit for bit.
+        return S, C, (L_raw, float(tr))
     return S, C
 
 
@@ -1431,7 +1436,7 @@ def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian",
     would move the whole spectrum whenever the run length changed; `ref_frames` is the
     length S was solved at. Linear interpolation of PSD matrices stays PSD, so every bin
     remains a valid covariance, and power is not extrapolated beyond the solved band."""
-    K = S.shape[1]
+    K = S.shape[1] if S is not None else factors[0].shape[0]
     nb = nframes // 2 + 1
     ref = ref_frames or 280
     f_src = np.asarray(idx, float) / ref                  # cycles per frame
@@ -1453,6 +1458,53 @@ def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian",
         Z[f] = L @ draw_eta(rng, K, law)
     A = np.fft.irfft(Z, n=nframes, axis=0)
     return A / max(A.std(), 1e-30)
+
+
+def factor_to_S(L, tr):
+    """S from the stored factor: exactly solve_factor's own two operations, so the result is
+    bit-identical to the S it returned."""
+    S = L @ np.conj(L).transpose(0, 2, 1)
+    return S / tr if tr > 0 else S
+
+
+def load_S(z):
+    """The solved cross-spectrum from a results npz, however it was stored.
+
+    Factored solves store `S_L` (nf, K, rank) and `S_tr` - the cross-spectrum before
+    normalisation is L L^H and the solve only ever produces rank 20 or so - and drop the full
+    (nf, K, K) array once K > 512, where it is 7.6 GB against ~80 MB at K = 1,880. Below that
+    the full array is kept as well, so scripts reading z['S'] on ordinary runs still work."""
+    if "S" in z.files:
+        return z["S"]
+    if "S_L" in z.files:
+        return factor_to_S(z["S_L"], float(z["S_tr"]))
+    raise KeyError("no S or S_L in this file" +
+                   (": " + str(z["S_stripped"]) if "S_stripped" in z.files else ""))
+
+
+def solution_K(z):
+    """Number of input channels, without loading the cross-spectrum."""
+    for k in ("S", "S_L"):
+        if k in z.files:
+            return int(z[k].shape[1])
+    return int(np.asarray(z["profiles"]).shape[0])
+
+
+def load_factors(z):
+    """realise(..., factors=) input for a recorded solve, built one bin at a time so a
+    1,880-channel S is never held whole. The same factors solved_factors(load_S(z)) gives."""
+    if "S" in z.files:
+        return solved_factors(z["S"])
+    L, tr = z["S_L"], float(z["S_tr"])
+    K = L.shape[1]
+    As = []
+    for f in range(L.shape[0]):
+        Sf = factor_to_S(L[f:f + 1], tr)[0]
+        M = 0.5 * (Sf + Sf.conj().T)
+        ev, U = np.linalg.eigh(M)
+        k = ev > max(float(ev.max()), 0.0) * 1e-12
+        As.append((U[:, k] * np.sqrt(ev[k])) if k.any() else np.zeros((K, 0), complex))
+    return As
 
 
 def solved_factors(S):

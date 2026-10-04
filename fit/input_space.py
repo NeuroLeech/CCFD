@@ -135,6 +135,7 @@ import numpy as np
 
 from mesh_cache import load_cortex
 from paths import RESULTS
+import xspec
 import units, fc_score
 
 EDGES = np.array([0, 2, 4, 6, 8, 10, 15, 20, 25, 30, 40, 60, 90, 140, 250])
@@ -170,7 +171,7 @@ def main():
     a = ap.parse_args()
 
     z = np.load(os.path.join(RESULTS, f'xspec_{a.tag}.npz'), allow_pickle=True)
-    S, idx, w = z['S'], np.asarray(z['idx'], np.int64), np.asarray(z['H_w'], float)
+    S, idx, w = xspec.load_S(z), np.asarray(z['idx'], np.int64), np.asarray(z['H_w'], float)
     pad, fs = int(z['pad']), float(z['frame_s'])
     lo_hz, hi_hz = (float(v) for v in z['band'])
     lab = np.asarray(z['labels'], np.int64)

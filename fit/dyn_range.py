@@ -54,6 +54,7 @@ import numpy as np
 from scipy.stats import spearmanr
 
 from paths import RESULTS
+import xspec
 from interp_gap import build_H, spectra, cov_linear, cov_envelope
 import envelope as env
 import lagged as _lg
@@ -64,7 +65,7 @@ def off_diagonals(tag, isenv, workers=8):
     f = os.path.join(RESULTS, ('envfit_' if isenv else 'xspec_') + tag + '.npz')
     z = np.load(f, allow_pickle=True)
     H, respf, kern, c, t, g = build_H(tag, z, isenv, workers=workers)
-    Si, _ = spectra(z['S'], g['idx'], g['nb'])
+    Si, _ = spectra(xspec.load_S(z), g['idx'], g['nb'])
     allb = np.arange(1, g['nb'])
     if isenv:
         lags, rho = env.filter_lags(respf, g['pad'], tol=1e-3)

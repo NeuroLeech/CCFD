@@ -145,7 +145,7 @@ def main():
     p, save, _ = bo_step.unpack(z["x"], c)
     p["map_clip"] = str(z["map_clip"]) if "map_clip" in z else "none"
     P = np.asarray(z["profiles"], np.float32)
-    S, idx = z["S"], z["idx"].astype(int)
+    S, idx = xspec.load_S(z), z["idx"].astype(int)
     ref_frames = int(z["ref_frames"])
     frame_s = float(z["frame_s"])
     band = tuple(z["band"]) if "band" in z and np.isfinite(z["band"]).all() else None

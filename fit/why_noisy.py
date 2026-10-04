@@ -77,7 +77,7 @@ def main():
     a = ap.parse_args()
 
     z = np.load(os.path.join(RESULTS, f'envfit_{a.tag}.npz'), allow_pickle=True)
-    S = z['S']
+    S = xspec.load_S(z)
     H, respf, kern, c, t, g = build_H(a.tag, z, True, workers=a.workers)
     del H                                    # only the medium and the grid facts are wanted
     lo, hi, frame_s, save = g['lo'], g['hi'], g['frame_s'], g['save']

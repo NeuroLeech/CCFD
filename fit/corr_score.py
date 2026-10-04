@@ -106,7 +106,7 @@ def main():
     new, newp = realise_score(c, t, g, q['S'], idx, kern, isenv, a.seconds, a.draws, 'NEW',
                               save_tag=a.save_frames)
     old, oldp = (([], None) if a.skip_source else
-                 realise_score(c, t, g, z['S'], idx, kern, isenv, a.seconds, a.draws, 'OLD'))
+                 realise_score(c, t, g, xspec.load_S(z), idx, kern, isenv, a.seconds, a.draws, 'OLD'))
     print(f'\n  over {a.seconds:.0f}s, {a.draws} draws, all {t.nV} vertices:')
     print(f'    correlation-form objective  per draw {np.mean(new):+.4f} +- {np.std(new):.4f}'
           f'   POOLED {newp:+.4f}')

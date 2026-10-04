@@ -59,6 +59,7 @@ import os, argparse
 import numpy as np
 
 from paths import RESULTS
+import xspec
 from interp_gap import build_H
 
 
@@ -80,7 +81,7 @@ def main():
         if not os.path.exists(f):
             print(f'  {tag}: missing'); continue
         z = np.load(f, allow_pickle=True)
-        S, w = z['S'], np.asarray(z['H_w'], float)
+        S, w = xspec.load_S(z), np.asarray(z['H_w'], float)
         Hall, _, _, c, t, g = build_H(tag, z, False, workers=a.workers)
         H = np.ascontiguousarray(Hall[g['idx']]); del Hall
         sub = g['sub']

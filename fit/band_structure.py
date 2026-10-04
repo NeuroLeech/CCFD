@@ -23,13 +23,14 @@ import os, argparse
 import numpy as np
 
 from paths import RESULTS
+import xspec
 
 
 def read(tag, kind):
     f = os.path.join(RESULTS, {'xspec': 'xspec_', 'envfit': 'envfit_',
                                'corrfit': ''}[kind] + tag + '.npz')
     z = np.load(f, allow_pickle=True)
-    S = z['S']
+    S = xspec.load_S(z)
     w = np.asarray(z['H_w' if 'H_w' in z.files else 'w'], float)
     idx = np.asarray(z['idx'], np.int64)
     pad = int(z['pad']) if 'pad' in z.files else 4096

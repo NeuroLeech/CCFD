@@ -53,11 +53,13 @@ def _init(tag, seconds):
     from interp_gap import medium_context
     z = np.load(os.path.join(RESULTS, f'xspec_{tag}.npz'), allow_pickle=True)
     kern, c, t, g = medium_context(z)
-    S = z['S']
     # factor once per worker: at 1,880 channels a draw would otherwise repeat 135
-    # eigendecompositions of a 1,880-square matrix. Bit-identical draws either way; below
-    # 513 channels realise does not use the factored path, so neither does this.
-    fac = xspec.solved_factors(S) if S.shape[1] > 512 else None
+    # eigendecompositions of a 1,880-square matrix, and the full S is never loaded - large
+    # solves store only their factor. Bit-identical draws either way; below 513 channels
+    # realise does not use the factored path, so neither does this.
+    big = xspec.solution_K(z) > 512
+    fac = xspec.load_factors(z) if big else None
+    S = None if big else xspec.load_S(z)
     _W.update(S=S, idx=z['idx'], ref=int(z['ref_frames']), fac=fac, kern=kern, c=c, t=t,
               g=g, nframes=timescale.frames_for(seconds, g['frame_s']))
 

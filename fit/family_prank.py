@@ -79,7 +79,7 @@ def main():
     a = ap.parse_args()
 
     z = np.load(os.path.join(RESULTS, f'xspec_{a.tag}.npz'), allow_pickle=True)
-    S0 = z['S']
+    S0 = xspec.load_S(z)
     w = np.asarray(z['H_w'], float)
     ref_fr, seg = int(z['ref_frames']), int(z['segment'])
     Hall, respf, kern, c, t, g = build_H(a.tag, z, False, workers=a.workers)

@@ -799,6 +799,7 @@ def main():
                                Lw, keep_f, spec, band=bp, frame_s=fs_bp,
                                segment=seg_fr)
     tr = []
+    s_fac = None                 # (factor, trace) when the solve is factored; see the save
     if a.lag_taus:
         import lagged as _lg
         taus = [int(v) for v in a.lag_taus.split(",") if v.strip()]
@@ -821,10 +822,10 @@ def main():
         S, (C, _Ca) = xspec.solve_lagged(H, w, Tgt, E, ph0, iters=a.iters, verbose=True,
                                          wa=a.wa, trace=tr, freq_keep=keep_f)
     elif a.solver == "factor":
-        S, C = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
-                                  trace=tr, log_every=max(1, a.maxfun // 10),
-                                  reg=(xspec.prank_ratio(w) if a.prank_mu else None),
-                                  mu=a.prank_mu)
+        S, C, s_fac = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
+                                         trace=tr, log_every=max(1, a.maxfun // 10),
+                                         reg=(xspec.prank_ratio(w) if a.prank_mu else None),
+                                         mu=a.prank_mu, return_factor=True)
     else:
         S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
                            share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
@@ -915,7 +916,19 @@ def main():
         pool.close(); pool.join()
     # pad, ref_frames and the clock go in the file. Without them a reader has to guess
     # what frequency a solved bin is, and piece_power's answer depends on that guess.
-    np.savez(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), S=S, idx=idx, x=x,
+    # A factored solve stores its factor, and drops the full cross-spectrum once K > 512,
+    # where it is 7.6 GB against ~80 MB (xspec.load_S rebuilds it bit for bit). Only if the
+    # factor still reproduces the S in hand: whitening or a later re-solve would change S
+    # without changing it, and then the full array is all there is.
+    if s_fac is not None and not all(
+            np.array_equal(xspec.factor_to_S(s_fac[0][f:f + 1], s_fac[1])[0], S[f])
+            for f in (0, len(S) // 2, len(S) - 1)):
+        print("  S no longer matches the solve's factor; storing the full array")
+        s_fac = None
+    store = dict(S=S) if (s_fac is None or S.shape[1] <= 512) else {}
+    if s_fac is not None:
+        store.update(S_L=s_fac[0], S_tr=s_fac[1])
+    np.savez(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), **store, idx=idx, x=x,
              save=save, labels=labels, tags=np.array(tags, dtype=object),
              pad=a.pad, ref_frames=ref_frames,
              frame_s=(clock["frame_s"] if clock else np.nan),

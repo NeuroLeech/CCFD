@@ -57,7 +57,7 @@ def main():
     a = ap.parse_args()
 
     z = np.load(os.path.join(RESULTS, f'xspec_{a.tag}.npz'), allow_pickle=True)
-    S, idx, w = z['S'], np.asarray(z['idx'], np.int64), np.asarray(z['H_w'], float)
+    S, idx, w = xspec.load_S(z), np.asarray(z['idx'], np.int64), np.asarray(z['H_w'], float)
     pad, save, fs = int(z['pad']), int(z['save']), float(z['frame_s'])
     lo, hi = (float(v) for v in z['band'])
     P = np.asarray(z['profiles'], np.float32)

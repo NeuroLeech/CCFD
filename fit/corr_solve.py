@@ -98,7 +98,7 @@ def main():
 
     f = os.path.join(RESULTS, ('envfit_' if a.envelope else 'xspec_') + a.tag + '.npz')
     z = np.load(f, allow_pickle=True)
-    S_old = z['S']
+    S_old = xspec.load_S(z)
     w = np.asarray(z['w' if a.envelope else 'H_w'], float)
     Hall, respf, kern, c, t, g = build_H(a.tag, z, a.envelope, workers=a.workers)
     idx, sub, nV, K = g['idx'], g['sub'], g['nV'], g['K']
