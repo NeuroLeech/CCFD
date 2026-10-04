@@ -230,7 +230,11 @@ def main():
     rec[f"{int(round(a.seconds))}s_{a.draws}d"] = dict(
         sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
         gap=float(np.mean(gaps)), field_rank=float(np.mean(rks)),
-        frames=int(frames), draws=int(a.draws), seconds=float(a.seconds))
+        frames=int(frames), draws=int(a.draws), seconds=float(a.seconds),
+        # which scoring pipeline produced this. Realised scores before bandpass.apply's
+        # mirror padding (5be967f) are depressed by an edge artefact that grows with
+        # optimisation, so they are not comparable with later ones; runs.py marks them.
+        bandpass_pad="mirror", scored_at=time.strftime("%Y-%m-%d %H:%M"))
     json.dump(rec, open(sp, "w"), indent=2, sort_keys=True)
     print(f"  wrote {os.path.relpath(sp, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))}")
 

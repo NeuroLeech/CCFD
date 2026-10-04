@@ -24,6 +24,19 @@ maxfun 60 - and every curve levels off below its fit. Pooling removes only estim
 so its limit is the EXPECTED FC scored on all 9,310 vertices; the shortfall left at D=16
 (~0.03 at maxfun 60, ~0.19 converged) is the solve not transferring off its 400 vertices.
 
+MORE SOLVE VERTICES RAISES THE CEILING. Same settings, solves fitted on 1,000 and 2,000
+medoid vertices instead of 400:
+
+                          D=1     D=2     D=4     D=8     D=16    fit (own vertices)
+    1,000 v, maxfun 400  +0.7020 +0.7110 +0.7213 +0.7313 +0.7345    +0.7633
+    2,000 v, maxfun 150  +0.6941 +0.7126 +0.7211 +0.7289 +0.7289    +0.7454
+    2,000 v, maxfun 400  +0.7039 +0.7164 +0.7289 +0.7387 +0.7423    +0.7638
+
+At 2,000 vertices and 16 draws the pooled score sits 0.022 below the fit, where at 400 it
+sat 0.03-0.19 below. The 400-vertex solves' shortfall was transfer off the solve set, and
+fitting more of the sheet removes most of it; the solve's own decline with optimisation
+(maxfun 400 below 150 at 400 vertices) is gone at 1,000 and 2,000.
+
   python fit/pool_curve.py fixgrad_mf60 flat100_fac20_fix --draws 16 --workers 4
 """
 import _path  # noqa: F401
