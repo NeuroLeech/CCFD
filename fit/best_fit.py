@@ -405,6 +405,11 @@ def main():
                          "radial room: pieces are 2-4 rings deep at --split 40 and 2-6 "
                          "at --split 1, and a shell count past the ring count collapses "
                          "back to one-hot")
+    ap.add_argument("--decimate", default="snapshot", choices=("snapshot", "mean"),
+                    help="how steps become frames: 'snapshot' keeps the last step (the "
+                         "original; folds content above the frame Nyquist), 'mean' averages "
+                         "over the frame's steps. Applies to the impulse responses and to "
+                         "every realisation alike; see fluid.run")
     ap.add_argument("--map-clip", default="none", dest="map_clip",
                     choices=("none", "iqr", "tukey", "sd2"),
                     help="clip the z-scored cortical maps' tails before grading the "
@@ -581,6 +586,10 @@ def main():
         x[0] = np.log10(a.damp)
     p, save, _ = bo_step.unpack(x, c)
     p["map_clip"] = a.map_clip
+    p["decimate"] = a.decimate
+    if a.decimate != "snapshot":
+        print(f"  frames are the {a.decimate} of the field over each frame's {save} steps, "
+              f"not a snapshot (anti-alias; impulses and realisation alike)")
     if a.map_clip != "none":
         _cf, _sg = bo_step.fl.fields(c, p)
         _H = _cf ** 2
@@ -939,7 +948,7 @@ def main():
              maps=np.array(p.get("maps", ()), dtype=object),
              map_a=np.asarray(p.get("a", ()), float),
              map_b=np.asarray(p.get("b", ()), float),
-             map_clip=a.map_clip,
+             map_clip=a.map_clip, decimate=a.decimate,
              # The realised score, in the file that holds the solve. Without it the only
              # trace of what a run scored is stdout, and a tag whose log is gone cannot be
              # compared against anything without re-realising it - which is how +0.6930

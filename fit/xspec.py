@@ -155,6 +155,10 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
     ktag = "" if keep is None else keep_tag(keep)
     dtag = "" if dt is None else f"_dt{float(dt):.8g}"
     ctag = "" if coupling is None else "_" + coupling.key()
+    # averaged frames are a different observable of the same medium (fluid.run); absent or
+    # "snapshot" leaves every existing key unchanged
+    if p.get("decimate", "snapshot") == "mean":
+        ctag += "_dmean"
     key = (f"{cortex.mesh}_sig{p['sig0']:.6g}_c{p['c0']:.6g}_Ld{p['Ld']:.6g}"
            f"_spg{p.get('sponge_scale', 1.0):.4g}_a{np.round(p.get('a', 0), 3)}"
            f"_b{np.round(p.get('b', 0), 3)}{mtag}_{len(regions)}_{nsteps}_{save}"
@@ -183,10 +187,17 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
             h = profiles[k].astype(np.float32).copy()
             ue = np.zeros(s.nE, np.float32)
             fr = [(h if kv is None else h[kv]).copy()]
+            mean = p.get("decimate", "snapshot") == "mean"   # see fluid.run
+            acc = np.zeros_like(fr[0]) if mean else None
             for n in range(1, nsteps):
                 ue, h = s.step(ue, h, np.float32(dt), g, H)
+                if mean:
+                    acc += (h if kv is None else h[kv])
                 if n % save == 0:
-                    fr.append((h if kv is None else h[kv]).copy())
+                    if mean:
+                        fr.append(acc / save); acc = np.zeros_like(acc)
+                    else:
+                        fr.append((h if kv is None else h[kv]).copy())
             out.append(np.asarray(fr))
             if verbose:
                 print(f"  impulse {k:3d}: peak {np.abs(fr[0]).max():.3f} -> "
@@ -217,10 +228,17 @@ def _imp_one(args):
     h = _W_IMP["profiles"][k].astype(np.float32).copy()
     ue = np.zeros(s.nE, np.float32)
     fr = [(h if kv is None else h[kv]).copy()]
+    mean = _W_IMP["p"].get("decimate", "snapshot") == "mean"   # see fluid.run
+    acc = np.zeros_like(fr[0]) if mean else None
     for n in range(1, nsteps):
         ue, h = s.step(ue, h, np.float32(dt), g, H)
+        if mean:
+            acc += (h if kv is None else h[kv])
         if n % save == 0:
-            fr.append((h if kv is None else h[kv]).copy())
+            if mean:
+                fr.append(acc / save); acc = np.zeros_like(acc)
+            else:
+                fr.append((h if kv is None else h[kv]).copy())
     return np.asarray(fr)
 
 

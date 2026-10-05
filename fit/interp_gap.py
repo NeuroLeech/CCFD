@@ -191,6 +191,7 @@ def medium_context(z):
     t = fc_score.default_target(c, verbose=False)
     p, _, _ = bo_step.unpack(x, c)
     p['map_clip'] = mc
+    p['decimate'] = str(z['decimate']) if 'decimate' in z.files else 'snapshot'
     kern = units.smoothing_kernel(timescale.bold_fwhm_frames(frame_s, verbose=False),
                                   verbose=False)
     return kern, c, t, dict(idx=idx, sub=sub, pad=pad, frame_s=frame_s, lo=lo, hi=hi,

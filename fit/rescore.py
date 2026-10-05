@@ -144,6 +144,7 @@ def main():
 
     p, save, _ = bo_step.unpack(z["x"], c)
     p["map_clip"] = str(z["map_clip"]) if "map_clip" in z else "none"
+    p["decimate"] = str(z["decimate"]) if "decimate" in z else "snapshot"
     P = np.asarray(z["profiles"], np.float32)
     idx = z["idx"].astype(int)
     # above 512 channels realise takes the factored path; factor ONCE rather than per draw

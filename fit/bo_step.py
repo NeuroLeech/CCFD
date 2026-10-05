@@ -100,10 +100,17 @@ def _impulse(args):
         h = T[pos[int(region)]].astype(np.float32).copy()
     ue = np.zeros(s.nE, np.float32)
     fr = [h.copy()]
+    mean = p.get("decimate", "snapshot") == "mean"   # see fluid.run
+    acc = np.zeros_like(h) if mean else None
     for n in range(1, nsteps):
         ue, h = s.step(ue, h, np.float32(dt), g, H)
+        if mean:
+            acc += h
         if n % save == 0:
-            fr.append(h.copy())
+            if mean:
+                fr.append(acc / save); acc = np.zeros_like(acc)
+            else:
+                fr.append(h.copy())
     return np.asarray(fr)
 
 
