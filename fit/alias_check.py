@@ -55,7 +55,7 @@ rank transform over 9,374 vertices, at ~41 GB resident - and an earlier note her
 killed. That was wrong: `pgrep -c best_fit` matches process NAMES, which are all "Python", so it
 reported nothing running. Use `pgrep -f` for a command line.
 
-  python fit/alias_check.py
+  python fit/alias_check.py --tags nv2000_mf400 f10_nv2000_mf400
 """
 import _path  # noqa: F401
 import os, argparse, glob
@@ -68,30 +68,36 @@ SWEEP = [('1x  1.47 mm/s', 'flat100_nolag'), ('2x  2.95 mm/s', 'flat100_s3'),
          ('3x  4.42 mm/s', 'flat100_s4.5')]
 
 
-def cache_for(tag):
-    """The impulse cache the run used, found by its nsteps and save rather than rebuilt."""
+def responses_for(tag):
+    """The run's own impulse responses, by rebuilding exactly the call best_fit made - so the
+    cache key is CONSTRUCTED, not globbed. Globbing on nsteps and save matched a different
+    medium once (analysis/spatial_scale.py --from-run records that), since neither is unique.
+    A cached run loads in seconds; an uncached one is recomputed."""
+    import xspec
+    from interp_gap import medium_context
     z = np.load(os.path.join(RESULTS, f'xspec_{tag}.npz'), allow_pickle=True)
-    save, imp = int(z['save']), int(z['impulse_frames'])
-    pat = os.path.join(CACHE, f'impulse_*_100_{imp*save}_{save}_*keep1000*.npy')
-    hits = sorted(glob.glob(pat))
-    if not hits:
-        raise FileNotFoundError(pat)
-    return hits[-1], save, imp, float(z['frame_s'])
+    kern, c, t, g = medium_context(z)
+    keep = np.unique(np.asarray(t.cols)[g['sub']])
+    R = xspec.impulse_responses(c, list(range(xspec.solution_K(z))), g['p'],
+                                int(z['impulse_frames']) * g['save'], g['save'],
+                                profiles=g['P'], verbose=False, workers=8, keep=keep)
+    return R, g['save'], g['frame_s']
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--pieces', type=int, default=20)
     ap.add_argument('--vertices', type=int, default=200)
+    ap.add_argument('--tags', nargs='+', default=None,
+                    help='run tags to check; default the original 1x/2x/3x sweep')
     a = ap.parse_args()
     rng = np.random.default_rng(0)
 
     print(f'\n  mean response power spectrum, {a.pieces} pieces x {a.vertices} vertices')
     print(f'  {"medium":<16s} {"save":>5s} {"Nyq Hz":>7s} {"centroid":>9s} '
           f'{">1 Hz":>8s} {">2 Hz":>8s} {"at Nyq / peak":>14s}')
-    for label, tag in SWEEP:
-        path, save, imp, frame_s = cache_for(tag)
-        R = np.load(path, mmap_mode='r')
+    for label, tag in (SWEEP if a.tags is None else [(t_, t_) for t_ in a.tags]):
+        R, save, frame_s = responses_for(tag)
         pi = rng.choice(R.shape[0], min(a.pieces, R.shape[0]), replace=False)
         vi = rng.choice(R.shape[2], min(a.vertices, R.shape[2]), replace=False)
         X = np.asarray(R[np.ix_(pi, np.arange(R.shape[1]), vi)], np.float64)
