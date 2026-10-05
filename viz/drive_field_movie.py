@@ -10,7 +10,7 @@ One draw (577 s, seed 1000) from a one-hot solve is run through the medium. Then
                     observable over every vertex), and the field projected onto its own maps
 
 A static figure puts the input and field gradient maps next to each other. A movie shows the
-drive on its vertices, the raw field and the observable, each z-scored per vertex over the run,
+drive as its three leading patterns (gradient maps times their timecourses, summed), the raw field and the observable, each z-scored per vertex over the run,
 with the drive-pattern and field-pattern timecourses underneath and a cursor. The drive
 patterns are the BANDPASSED drive projected on the input gradients; each trace is z-scored.
 
@@ -58,6 +58,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=577.0)
     ap.add_argument("--step", type=int, default=2, help="model frames per video frame")
     ap.add_argument("--fps", type=int, default=25)
+    ap.add_argument("--bitrate", type=int, default=3000, help="kbit/s; 3000 keeps 72 s under 30 MB")
     a = ap.parse_args()
 
     import matplotlib
@@ -127,9 +128,17 @@ def main():
 
     # ---- movie
     sel = np.arange(0, nfr, a.step)
-    Dz = np.zeros((len(sel), c.nV), np.float32); Dz[:, vtx] = zs(drive_b)[sel]
+    # the drive as its leading patterns: each centred, unit-norm input gradient map times the
+    # bandpassed drive's coefficient on it, summed - the speckle the unfitted part of the
+    # in-band input leaves on individual vertices is outside these maps and drops out
+    Gc = Gin - np.median(Gin, axis=0, keepdims=True)
+    Gc = Gc / np.linalg.norm(Gc, axis=0, keepdims=True)
+    recon = (np.asarray(drive_b, np.float64) @ Gc) @ Gc.T
+    recon = recon / np.percentile(np.abs(recon), 99) * 2.5
+    kept = float((recon.var(0).sum()) / max(np.asarray(drive_b, np.float64).var(0).sum(), 1e-300))
+    Dz = np.zeros((len(sel), c.nV), np.float32); Dz[:, vtx] = recon[sel]
     Rz = zs(raw)[sel]; Oz = zs(obs)[sel]
-    rows = [("the drive, 0.01-0.08 Hz,\non its 1,880 vertices", Dz, driven),
+    rows = [("the drive's 3 leading patterns,\n0.01-0.08 Hz (shared colour scale)", Dz, driven),
             ("the field, raw", Rz, None), ("the observable:\nsmoothed + 0.01-0.08 Hz", Oz, None)]
     fig = plt.figure(figsize=(9.0, 13.0), facecolor="black")
     gsm = fig.add_gridspec(5, 2, height_ratios=[2.6, 2.6, 2.6, 1.3, 1.3], hspace=0.10,
@@ -182,7 +191,7 @@ def main():
     os.makedirs(VIDEOS, exist_ok=True)
     out = os.path.join(VIDEOS, f"drive_field_{a.tag}.mp4")
     ani = animation.FuncAnimation(fig, update, frames=len(sel), blit=False)
-    ani.save(out, writer=animation.FFMpegWriter(fps=a.fps, bitrate=5000),
+    ani.save(out, writer=animation.FFMpegWriter(fps=a.fps, bitrate=a.bitrate),
              savefig_kwargs=dict(facecolor="black"))
     plt.close(fig)
     print(f"  wrote {out}  ({len(sel)/a.fps:.0f} s at {a.fps} fps, {os.path.getsize(out)/2**20:.0f} MB)")
