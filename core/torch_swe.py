@@ -193,7 +193,8 @@ def _as(v, sw):
     return torch.as_tensor(np.asarray(v), dtype=sw.dtype, device=sw.device)
 
 
-def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
+def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None, adapt=None,
+        observe="h", decimate="snapshot"):
     """Integrate, returning saved frames. The drive is `A[n] @ P` added to h per step,
     exactly as in `fluid.run` - held as (nsteps, K) amplitudes and (K, nV) profiles rather
     than a dense (nsteps, nV) field, which at 57,000 steps would be 4 GB on its own.
@@ -204,7 +205,15 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
     does not fit; sqrt(nsteps) segments turn that into tens of MB for about 2x the forward
     cost. `keep` is a vertex index: only those columns are kept, which is what the loss
     needs and keeps the saved frames off the graph at full width.
-    -> (frames, ue, h), with the final state returned so windows can be chained."""
+    -> (frames, ue, h), with the final state returned so windows can be chained.
+
+    Three options, all off by default (and then the path below is the original, unchanged):
+      adapt=(k, tau_steps, a_ref)   adaptive damping, as run_adaptive: a slow per-vertex
+                                    running average of h^2 scales the damping by 1 + k a/a_ref
+      observe="energy"              frames are of h^2, the local energy BOLD is read from
+      decimate="mean"               a frame is the average over its steps, not a snapshot
+    With any of them set the integration carries (a, frame accumulator, count) across
+    checkpoint segments, and stays differentiable throughout."""
     nsteps = A.shape[0]
     ue, h = sw.zeros() if state is None else state
     A = _as(A, sw)
@@ -226,6 +235,9 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
         return ue, h, (torch.stack(out) if out else
                        torch.zeros(0, nc, dtype=sw.dtype, device=sw.device))
 
+    if adapt is not None or observe != "h" or decimate != "snapshot":
+        return _run_extended(sw, A, P, dt, g, H, save, chunk, ue, h, keep, adapt,
+                             observe, decimate)
     frames, k = [], chunk if chunk > 0 else nsteps
     for a0 in range(0, nsteps, k):
         blk = A[a0:a0 + k]
@@ -234,6 +246,50 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
                 seg, ue, h, blk, a0, use_reentrant=False)
         else:
             ue, h, fr = seg(ue, h, blk, a0)
+        if fr.shape[0]:
+            frames.append(fr)
+    return torch.cat(frames) if frames else None, ue, h
+
+
+def _run_extended(sw, A, P, dt, g, H, save, chunk, ue, h, keep, adapt, observe, decimate):
+    """run() with adaptive damping / energy frames / averaged frames - see run()."""
+    nsteps = A.shape[0]
+    kk, tau, aref = (0.0, 1.0, 1.0) if adapt is None else (float(adapt[0]), float(adapt[1]),
+                                                           float(adapt[2]))
+    mean = decimate == "mean"
+    a = torch.zeros_like(h)
+    acc = torch.zeros_like(h)
+    cnt = torch.zeros((), dtype=h.dtype, device=h.device)
+
+    def seg(ue, h, a, acc, cnt, blk, off):
+        out = []
+        dr = blk @ P
+        for n in range(dr.shape[0]):
+            gain = None if kk == 0.0 else 1.0 + kk * a / aref
+            ue, h = sw.step(ue, h + dr[n], dt, g, H, gain=gain)
+            h2 = h * h
+            if kk != 0.0:
+                a = a + (h2 - a) / tau
+            v = h2 if observe == "energy" else h
+            if mean:
+                acc = acc + v; cnt = cnt + 1
+            if (off + n) % save == 0:
+                fr = acc / cnt if mean else v
+                if mean:
+                    acc = torch.zeros_like(acc); cnt = torch.zeros_like(cnt)
+                out.append(fr if keep is None else fr[keep])
+        nc = sw.nV if keep is None else len(keep)
+        return ue, h, a, acc, cnt, (torch.stack(out) if out else
+                                    torch.zeros(0, nc, dtype=sw.dtype, device=sw.device))
+
+    frames, k = [], chunk if chunk > 0 else nsteps
+    for a0 in range(0, nsteps, k):
+        blk = A[a0:a0 + k]
+        if chunk > 0 and torch.is_grad_enabled():
+            ue, h, a, acc, cnt, fr = torch.utils.checkpoint.checkpoint(
+                seg, ue, h, a, acc, cnt, blk, a0, use_reentrant=False)
+        else:
+            ue, h, a, acc, cnt, fr = seg(ue, h, a, acc, cnt, blk, a0)
         if fr.shape[0]:
             frames.append(fr)
     return torch.cat(frames) if frames else None, ue, h
