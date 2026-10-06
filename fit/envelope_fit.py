@@ -72,6 +72,9 @@ def main():
     ap.add_argument("--seconds", type=float, default=577.0)
     ap.add_argument("--draws", type=int, default=2)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--decimate", default="snapshot", choices=("snapshot", "mean"),
+                    help="how steps become frames, impulses and realisation alike; 'mean' "
+                         "for any medium faster than 1x (see fluid.run)")
     ap.add_argument("--tag", default="env100")
     a = ap.parse_args()
     lo, hi = (float(v) for v in a.band.split(","))
@@ -87,6 +90,10 @@ def main():
         x[4:10] = x[4:10] * a.maps_scale
     p, save, _ = bo_step.unpack(x, c)
     p["map_clip"] = a.map_clip
+    # the envelope reads EVERY frequency of the field, so a fast medium's snapshot frames,
+    # which fold content above the frame Nyquist into lower bins, corrupt it even more than
+    # they corrupt the linear solve; "mean" averages each frame's steps (see fluid.run)
+    p["decimate"] = a.decimate
 
     z = np.load(a.hybrid_file, allow_pickle=True)
     labels = np.asarray(z["labels"], np.int64)
@@ -175,6 +182,7 @@ def main():
     np.savez(os.path.join(RESULTS, f"envfit_{a.tag}.npz"), S=S, idx=idx, x=x, w=w,
              lags=lags, rho=rho, pad=pad, save=save, frame_s=cl["frame_s"],
              band=np.array([lo, hi]), sub=sub, profiles=P, map_clip=a.map_clip,
+             decimate=a.decimate,
              objective=best[1], sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
              realise_seconds=a.seconds, draws=a.draws, **provenance.stamp(a))
     print(f"  wrote results/envfit_{a.tag}.npz")
