@@ -23,6 +23,13 @@ normal-scored target on the solve vertices. The authoritative number is measured
 full sheet: run_adaptive with fresh drive seeds, then units.smooth_frames and bandpass.apply,
 scored by the repo's Spearman scorer on all 9,310 vertices.
 
+FIRST RUN, 2026-10-06 (k 1, tau_a 10 s, one draw per gradient, lr 0.02): realised 0.184 ->
+0.188 over 30 iterations, the surrogate jumping +-0.03 per iteration. Two faults found after it,
+both fixed here: the authoritative score was taken at the DESCENT's 300 s (now --eval-seconds,
+577 s), and torch_fit's factor interpolation scrambled the out-of-band drive (now exact; see
+drive). At equal length the drive here and realise agree: +0.260 +- 0.017 against
++0.243 +- 0.017 over 6 seeds each.
+
   python fit/adaptive_fit.py --ref env_f10m_d0.87 --k 1 --tau 10 --seconds 300 --iters 30
 """
 import _path  # noqa: F401
@@ -53,6 +60,36 @@ class AdaptiveFit(tf.Fit):
         self.tau_steps = float(tau_s) / (ref["frame_s"] / self.save)
         self.burn = max(self.burn, int(np.ceil(3 * tau_s / ref["frame_s"])))
         self.a_ref = 1.0
+
+    # ---- the drive, with the cross-spectrum interpolated EXACTLY ----
+    # torch_fit.Fit.drive interpolates the FACTOR G between solved bins. Each bin's factor
+    # comes out of its own eigendecomposition with arbitrary phases, so a blend of two
+    # neighbours partly cancels their coherent structure. For a linear observable that was
+    # harmless - the solved bins sit densely in the passband, where almost every realisation
+    # bin has a solved one beside it. The energy observable reads EVERY frequency, and above
+    # the band the solved grid is sparse, so most of the drive there is interpolated across
+    # wide gaps. Measured on the envelope warm start at 10x: step-level energy +0.209 with
+    # the factor as-is, +0.225 with factors Procrustes-aligned across bins, against
+    # +0.259/+0.269 from realise. A blend of two cross-spectra (1-t) S1 + t S2 is EXACTLY the
+    # cross-spectrum of sqrt(1-t) G1 eta1 + sqrt(t) G2 eta2 with independent eta1, eta2 -
+    # xspec._realise_factored's identity - so each realisation bin draws from both
+    # neighbours with its own noise: no eigh in the graph, statistically what realise draws.
+    def eta(self, gen=None):
+        r = torch.randn(self.nb, 2, self.K, 2, dtype=self.dtype, device=self.cdev,
+                        generator=gen) / np.sqrt(2.0)
+        return torch.view_as_complex(r.contiguous())
+
+    def drive(self, G, eta):
+        wt = self.w[:, :, 0]                                      # (nb, 1), weight on hi
+        Z = (torch.sqrt(1.0 - wt) * torch.einsum("fab,fb->fa", G[self.lo], eta[:, 0])
+             + torch.sqrt(wt) * torch.einsum("fab,fb->fa", G[self.hi], eta[:, 1]))
+        Z = Z * self.inside
+        Z = torch.cat([torch.zeros_like(Z[:1]), Z[1:]], 0)        # no DC, as realise
+        A = torch.fft.irfft(Z, n=self.nframes, dim=0)
+        A = A / A.std().clamp_min(1e-30)
+        A = A.repeat_interleave(self.save, dim=0)[:self.nsteps] / self.save
+        A = A * (self.amp / A.pow(2).mean().sqrt().clamp_min(1e-30))
+        return A.to(self.dev)
 
     def adapt(self, k=None):
         k = self.k if k is None else k
@@ -108,8 +145,15 @@ def main():
     ap.add_argument("--k", type=float, default=1.0)
     ap.add_argument("--tau", type=float, default=10.0, help="tau_a, seconds")
     ap.add_argument("--seconds", type=float, default=300.0, help="realisation per gradient")
+    ap.add_argument("--eval-seconds", type=float, default=577.0, dest="eval_seconds",
+                    help="realisation length for the authoritative score - its own Fit, since a "
+                         "drive's length is fixed at construction; scoring at the descent's "
+                         "shorter length understates it against everything else at 577 s")
     ap.add_argument("--iters", type=int, default=30)
     ap.add_argument("--lr", type=float, default=0.02, help="Adam lr as a fraction of RMS(G)")
+    ap.add_argument("--grad-draws", type=int, default=2, dest="grad_draws",
+                    help="drive draws averaged per gradient. One fresh 300 s draw gave a "
+                         "surrogate that jumped +-0.03 between iterations, swamping the step")
     ap.add_argument("--eval-every", type=int, default=5, dest="eval_every")
     ap.add_argument("--eval-draws", type=int, default=2, dest="eval_draws")
     ap.add_argument("--device", default="mps")
@@ -123,13 +167,16 @@ def main():
     fit = AdaptiveFit(ref, c, t, a.seconds, a.k, a.tau, device=a.device)
     G = tf.warm_start(ref["S"], fit.dtype, fit.cdev)
     aref = fit.calibrate(G)
+    ev = AdaptiveFit(ref, c, t, a.eval_seconds, a.k, a.tau, device=a.device)
+    ev.a_ref = aref
     print(f"  {a.ref}: {fit.K} channels, {len(ref['sub'])} solve vertices, save {fit.save}, "
-          f"{fit.nsteps} steps per {a.seconds:.0f} s gradient, burn {fit.burn} frames; "
+          f"{fit.nsteps} steps per {a.seconds:.0f} s gradient, scored at {a.eval_seconds:.0f} s, "
+          f"burn {fit.burn} frames; "
           f"adaptation k {a.k:g}, tau_a {a.tau:g} s, a_ref {aref:.3g}", flush=True)
     print(f"  envelope solve's own realised score (linear medium, frame-level square): "
           f"{ref['env_sim']:+.4f}", flush=True)
-    m_lin, s_lin = fit.realised(G, seeds=tuple(range(a.eval_draws)), k=0.0)
-    m0, s0 = fit.realised(G, seeds=tuple(range(a.eval_draws)))
+    m_lin, s_lin = ev.realised(G, seeds=tuple(range(a.eval_draws)), k=0.0)
+    m0, s0 = ev.realised(G, seeds=tuple(range(a.eval_draws)))
     print(f"  iteration 0, step-level energy: adaptation off {m_lin:+.4f} +- {s_lin:.4f}, "
           f"on {m0:+.4f} +- {s0:.4f}", flush=True)
 
@@ -139,7 +186,7 @@ def main():
     for it in range(1, a.iters + 1):
         t0 = time.time()
         opt.zero_grad()
-        obj = fit.score(G, fit.eta())
+        obj = sum(fit.score(G, fit.eta()) for _ in range(a.grad_draws)) / a.grad_draws
         (-obj).backward()
         if (not torch.isfinite(obj)) or G.grad is None or not torch.isfinite(G.grad).all():
             nskip += 1; opt.zero_grad()
@@ -149,7 +196,7 @@ def main():
         hist.append(obj.detach().item())
         line = f"  {it:4d}  surrogate {hist[-1]:+.4f}  [{time.time()-t0:.0f}s]"
         if it % a.eval_every == 0 or it == a.iters:
-            m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
+            m, s = ev.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised {m:+.4f} +- {s:.4f}"
             if np.isfinite(m) and m > best[0]:
                 best = (m, G.detach().cpu().numpy().copy(), it); line += "  *"
