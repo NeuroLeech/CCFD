@@ -227,7 +227,10 @@ def main():
     if a.init_from:
         # a_ref stays the one calibrated from the envelope warm start: it defines k's scale,
         # and recalibrating from the continued G would change the medium being continued
-        G = torch.tensor(prev["G"], dtype=G.dtype, device=fit.cdev, requires_grad=True)
+        # a checkpoint (--init-from <tag>_ckpt) holds the CURRENT G and the best one; its k
+        # and tau_a are the best iteration's, so take the best G to match them
+        G0 = prev["best_G"] if "best_G" in prev.files else prev["G"]
+        G = torch.tensor(G0, dtype=G.dtype, device=fit.cdev, requires_grad=True)
         aref = fit.a_ref = float(prev["a_ref"])
         if a.seed == 0:
             raise SystemExit("  --init-from with --seed 0 replays the parent run's gradient "
