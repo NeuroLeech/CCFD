@@ -209,7 +209,8 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None, adapt=None,
 
     Three options, all off by default (and then the path below is the original, unchanged):
       adapt=(k, tau_steps, a_ref)   adaptive damping, as run_adaptive: a slow per-vertex
-                                    running average of h^2 scales the damping by 1 + k a/a_ref
+                                    running average of h^2 scales the damping by 1 + k a/a_ref;
+                                    k and tau_steps may be tensors, and are differentiated
       observe="energy"              frames are of h^2, the local energy BOLD is read from
       decimate="mean"               a frame is the average over its steps, not a snapshot
     With any of them set the integration carries (a, frame accumulator, count) across
@@ -254,21 +255,27 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None, adapt=None,
 def _run_extended(sw, A, P, dt, g, H, save, chunk, ue, h, keep, adapt, observe, decimate):
     """run() with adaptive damping / energy frames / averaged frames - see run()."""
     nsteps = A.shape[0]
-    kk, tau, aref = (0.0, 1.0, 1.0) if adapt is None else (float(adapt[0]), float(adapt[1]),
-                                                           float(adapt[2]))
+    # k and tau_steps may be tensors that require grad (adaptive_fit --learn-adapt): they are
+    # carried as 0-d tensors and passed into each checkpoint segment, so the gradient reaches
+    # them through every step. Floats give the same arithmetic.
+    on = adapt is not None and (torch.is_tensor(adapt[0]) or float(adapt[0]) != 0.0)
+    kk, tau, aref = ((0.0, 1.0, 1.0) if not on else
+                     (_as(adapt[0], sw), _as(adapt[1], sw), float(adapt[2])))
+    if not on:
+        kk = tau = torch.zeros((), dtype=sw.dtype, device=sw.device)
     mean = decimate == "mean"
     a = torch.zeros_like(h)
     acc = torch.zeros_like(h)
     cnt = torch.zeros((), dtype=h.dtype, device=h.device)
 
-    def seg(ue, h, a, acc, cnt, blk, off):
+    def seg(ue, h, a, acc, cnt, kk, tau, blk, off):
         out = []
         dr = blk @ P
         for n in range(dr.shape[0]):
-            gain = None if kk == 0.0 else 1.0 + kk * a / aref
+            gain = 1.0 + kk * a / aref if on else None
             ue, h = sw.step(ue, h + dr[n], dt, g, H, gain=gain)
             h2 = h * h
-            if kk != 0.0:
+            if on:
                 a = a + (h2 - a) / tau
             v = h2 if observe == "energy" else h
             if mean:
@@ -287,9 +294,9 @@ def _run_extended(sw, A, P, dt, g, H, save, chunk, ue, h, keep, adapt, observe, 
         blk = A[a0:a0 + k]
         if chunk > 0 and torch.is_grad_enabled():
             ue, h, a, acc, cnt, fr = torch.utils.checkpoint.checkpoint(
-                seg, ue, h, a, acc, cnt, blk, a0, use_reentrant=False)
+                seg, ue, h, a, acc, cnt, kk, tau, blk, a0, use_reentrant=False)
         else:
-            ue, h, a, acc, cnt, fr = seg(ue, h, a, acc, cnt, blk, a0)
+            ue, h, a, acc, cnt, fr = seg(ue, h, a, acc, cnt, kk, tau, blk, a0)
         if fr.shape[0]:
             frames.append(fr)
     return torch.cat(frames) if frames else None, ue, h

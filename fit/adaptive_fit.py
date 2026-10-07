@@ -31,6 +31,13 @@ drive). At equal length the drive here and realise agree: +0.260 +- 0.017 agains
 +0.243 +- 0.017 over 6 seeds each.
 
   python fit/adaptive_fit.py --ref env_f10m_d0.87 --k 1 --tau 10 --seconds 300 --iters 30
+
+LEARNED ADAPTATION (--learn-adapt): k and tau_a are descended with the drive, as log k and
+log tau_a with their own Adam lr (--lr-adapt, ~ the relative change per iteration). Their
+gradients through torch_swe.run match central differences to 2e-9 - 3e-8 (float64, 240
+steps, k 1 and 3, tau 20 and 5 steps), identical with checkpointing. tau_a is clamped at
+--tau-max, which fixes the burn-in at 3 tau_max. A continuation starts from its parent's k
+and tau_a.
 """
 import _path  # noqa: F401
 import os, time, argparse
@@ -54,12 +61,38 @@ def load_envfit(tag):
 
 
 class AdaptiveFit(tf.Fit):
-    def __init__(self, ref, cortex, target, seconds, k, tau_s, device="mps"):
+    def __init__(self, ref, cortex, target, seconds, k, tau_s, device="mps", tau_max=None):
         super().__init__(ref, cortex, target, seconds, device=device)
-        self.k = float(k)
-        self.tau_steps = float(tau_s) / (ref["frame_s"] / self.save)
-        self.burn = max(self.burn, int(np.ceil(3 * tau_s / ref["frame_s"])))
+        self.sps = ref["frame_s"] / self.save                     # seconds per step
+        self.k, self.tau_s = float(k), float(tau_s)
+        # k and tau_a as log-parameters, so they stay positive and Adam steps are relative.
+        # Fixed unless learn_adapt() turns on their gradient. tau_a is clamped to tau_max,
+        # because the burn-in (three tau_a, so the slow state has settled) is fixed when
+        # the drive's length is.
+        self.tau_max = float(tau_s if tau_max is None else tau_max)
+        self.lk = torch.tensor(np.log(max(self.k, 1e-12)), dtype=self.dtype, device=device)
+        self.lt = torch.tensor(np.log(self.tau_s), dtype=self.dtype, device=device)
+        self.burn = max(self.burn, int(np.ceil(3 * self.tau_max / ref["frame_s"])))
         self.a_ref = 1.0
+
+    def learn_adapt(self):
+        self.lk.requires_grad_(True); self.lt.requires_grad_(True)
+        return [self.lk, self.lt]
+
+    def set_adapt(self, k, tau_s):
+        with torch.no_grad():
+            self.lk.fill_(float(np.log(max(k, 1e-12)))); self.lt.fill_(float(np.log(tau_s)))
+        self.k, self.tau_s = float(k), float(tau_s)
+
+    def k_tau(self):
+        """Current (k, tau_a seconds) as floats."""
+        lt = float(self.lt.detach().clamp(max=float(np.log(self.tau_max))))
+        return (self.k if not self.lk.requires_grad else float(np.exp(float(self.lk.detach()))),
+                float(np.exp(lt)))
+
+    @property
+    def tau_steps(self):
+        return self.k_tau()[1] / self.sps
 
     # ---- the drive, with the cross-spectrum interpolated EXACTLY ----
     # torch_fit.Fit.drive interpolates the FACTOR G between solved bins. Each bin's factor
@@ -92,8 +125,12 @@ class AdaptiveFit(tf.Fit):
         return A.to(self.dev)
 
     def adapt(self, k=None):
-        k = self.k if k is None else k
-        return None if k == 0.0 else (k, self.tau_steps, self.a_ref)
+        if k is not None:
+            return None if k == 0.0 else (k, self.tau_steps, self.a_ref)
+        if self.lk.requires_grad:
+            lt = self.lt.clamp(max=float(np.log(self.tau_max)))
+            return (torch.exp(self.lk), torch.exp(lt) / self.sps, self.a_ref)
+        return None if self.k == 0.0 else (self.k, self.tau_steps, self.a_ref)
 
     def frames(self, G, eta, k=None):
         A = self.drive(G, eta)
@@ -121,7 +158,7 @@ class AdaptiveFit(tf.Fit):
     def realised(self, G, seeds=(0, 1), seconds=None, k=None):
         """Full sheet, fresh drive seeds, the repo's scorer: the authoritative number."""
         from fc_score import _rank_z
-        k = self.k if k is None else k
+        k = self.k_tau()[0] if k is None else k
         out = []
         for sd in seeds:
             gen = torch.Generator(device=self.cdev).manual_seed(10_000 + sd)
@@ -161,6 +198,13 @@ def main():
                     help="continue from results/adaptfit_<tag>.npz's G (its best) and a_ref")
     ap.add_argument("--seed", type=int, default=0,
                     help="seed of the gradient draws; give a continuation a new one")
+    ap.add_argument("--learn-adapt", action="store_true", dest="learn_adapt",
+                    help="descend k and tau_a with the drive (as log k, log tau_a)")
+    ap.add_argument("--lr-adapt", type=float, default=0.05, dest="lr_adapt",
+                    help="Adam lr for log k and log tau_a: ~ the relative change per iteration")
+    ap.add_argument("--tau-max", type=float, default=None, dest="tau_max",
+                    help="upper clamp on tau_a, seconds; sets the burn-in (3 tau_max). "
+                         "Default: --tau with --learn-adapt off, 3x --tau with it on")
     ap.add_argument("--tag", default="")
     a = ap.parse_args()
 
@@ -172,13 +216,17 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
     ref = load_envfit(a.ref)
-    fit = AdaptiveFit(ref, c, t, a.seconds, a.k, a.tau, device=a.device)
+    prev = None
+    if a.init_from:
+        prev = np.load(os.path.join(RESULTS, f"adaptfit_{a.init_from}.npz"), allow_pickle=True)
+        a.k, a.tau = float(prev["k"]), float(prev["tau"])      # the parent's (best) k, tau_a
+    tau_max = a.tau_max or (3 * a.tau if a.learn_adapt else a.tau)
+    fit = AdaptiveFit(ref, c, t, a.seconds, a.k, a.tau, device=a.device, tau_max=tau_max)
     G = tf.warm_start(ref["S"], fit.dtype, fit.cdev)
     aref = fit.calibrate(G)
     if a.init_from:
         # a_ref stays the one calibrated from the envelope warm start: it defines k's scale,
         # and recalibrating from the continued G would change the medium being continued
-        prev = np.load(os.path.join(RESULTS, f"adaptfit_{a.init_from}.npz"), allow_pickle=True)
         G = torch.tensor(prev["G"], dtype=G.dtype, device=fit.cdev, requires_grad=True)
         aref = fit.a_ref = float(prev["a_ref"])
         if a.seed == 0:
@@ -186,12 +234,14 @@ def main():
                              "draws, which the drive has memorised; pass a new --seed")
         print(f"  continuing {a.init_from}: its best realised {float(prev['best_sim']):+.4f} "
               f"at iteration {int(prev['best_iter'])}", flush=True)
-    ev = AdaptiveFit(ref, c, t, a.eval_seconds, a.k, a.tau, device=a.device)
+    ev = AdaptiveFit(ref, c, t, a.eval_seconds, a.k, a.tau, device=a.device, tau_max=tau_max)
     ev.a_ref = aref
     print(f"  {a.ref}: {fit.K} channels, {len(ref['sub'])} solve vertices, save {fit.save}, "
           f"{fit.nsteps} steps per {a.seconds:.0f} s gradient, scored at {a.eval_seconds:.0f} s, "
           f"burn {fit.burn} frames; "
-          f"adaptation k {a.k:g}, tau_a {a.tau:g} s, a_ref {aref:.3g}", flush=True)
+          f"adaptation k {a.k:g}, tau_a {a.tau:g} s, a_ref {aref:.3g}"
+          + (f"; k and tau_a LEARNED (lr {a.lr_adapt:g} in log, tau_a <= {tau_max:g} s)"
+             if a.learn_adapt else ""), flush=True)
     print(f"  envelope solve's own realised score (linear medium, frame-level square): "
           f"{ref['env_sim']:+.4f}", flush=True)
     m_lin, s_lin = ev.realised(G, seeds=tuple(range(a.eval_draws)), k=0.0)
@@ -200,38 +250,51 @@ def main():
           f"on {m0:+.4f} +- {s0:.4f}", flush=True)
 
     rms = float(G.detach().abs().pow(2).mean().sqrt())
-    opt = torch.optim.Adam([{"params": [G], "lr": a.lr * rms}])
-    hist, best, nskip = [], (m0, G.detach().cpu().numpy().copy(), 0), 0
+    groups = [{"params": [G], "lr": a.lr * rms}]
+    if a.learn_adapt:
+        groups.append({"params": fit.learn_adapt(), "lr": a.lr_adapt})
+    opt = torch.optim.Adam(groups)
+    hist, khist = [], []
+    best, nskip = (m0, G.detach().cpu().numpy().copy(), 0, a.k, a.tau), 0
     for it in range(1, a.iters + 1):
         t0 = time.time()
         opt.zero_grad()
         obj = sum(fit.score(G, fit.eta()) for _ in range(a.grad_draws)) / a.grad_draws
         (-obj).backward()
-        if (not torch.isfinite(obj)) or G.grad is None or not torch.isfinite(G.grad).all():
+        bad = [p for p in [G] + ([fit.lk, fit.lt] if a.learn_adapt else [])
+               if p.grad is None or not torch.isfinite(p.grad).all()]
+        if (not torch.isfinite(obj)) or bad:
             nskip += 1; opt.zero_grad()
             print(f"  {it:4d}  NON-FINITE, update skipped ({nskip} so far)", flush=True)
             continue
         opt.step()
         hist.append(obj.detach().item())
-        line = f"  {it:4d}  surrogate {hist[-1]:+.4f}  [{time.time()-t0:.0f}s]"
+        kt = fit.k_tau(); khist.append(kt)
+        line = f"  {it:4d}  surrogate {hist[-1]:+.4f}"
+        if a.learn_adapt:
+            line += f"  k {kt[0]:.3f} tau_a {kt[1]:.2f} s"
+        line += f"  [{time.time()-t0:.0f}s]"
         if it % a.eval_every == 0 or it == a.iters:
+            ev.set_adapt(*kt)
             m, s = ev.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised {m:+.4f} +- {s:.4f}"
             if np.isfinite(m) and m > best[0]:
-                best = (m, G.detach().cpu().numpy().copy(), it); line += "  *"
+                best = (m, G.detach().cpu().numpy().copy(), it) + kt; line += "  *"
             if a.tag:                       # checkpoint: a long run is not lost to a stop
                 np.savez(os.path.join(RESULTS, f"adaptfit_{a.tag}_ckpt.npz"),
                          G=G.detach().cpu().numpy(), best_G=best[1], best_sim=best[0],
                          best_iter=best[2], it=it, hist=np.asarray(hist), a_ref=aref,
-                         k=a.k, tau=a.tau, ref=a.ref)
+                         k=best[3], tau=best[4], khist=np.asarray(khist), ref=a.ref)
         print(line, flush=True)
 
-    print(f"\n  best realised {best[0]:+.4f} at iteration {best[2]}")
+    print(f"\n  best realised {best[0]:+.4f} at iteration {best[2]} "
+          f"(k {best[3]:.3f}, tau_a {best[4]:.2f} s)")
     if a.tag:
         Gb = best[1]
         np.savez(os.path.join(RESULTS, f"adaptfit_{a.tag}.npz"), G=Gb,
                  S=np.einsum("fab,fcb->fac", Gb, Gb.conj()), hist=np.asarray(hist),
-                 best_sim=best[0], best_iter=best[2], ref=a.ref, k=a.k, tau=a.tau,
+                 best_sim=best[0], best_iter=best[2], ref=a.ref, k=best[3], tau=best[4],
+                 khist=np.asarray(khist), k0=a.k, tau0=a.tau, learn_adapt=a.learn_adapt,
                  a_ref=aref, seconds=a.seconds, lin0=m_lin, ad0=m0, **provenance.stamp(a))
         print(f"  wrote results/adaptfit_{a.tag}.npz")
 
