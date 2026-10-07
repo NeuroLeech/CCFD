@@ -157,6 +157,8 @@ def main():
     ap.add_argument("--eval-every", type=int, default=5, dest="eval_every")
     ap.add_argument("--eval-draws", type=int, default=2, dest="eval_draws")
     ap.add_argument("--device", default="mps")
+    ap.add_argument("--init-from", default="", dest="init_from",
+                    help="continue from results/adaptfit_<tag>.npz's G (its best) and a_ref")
     ap.add_argument("--tag", default="")
     a = ap.parse_args()
 
@@ -167,6 +169,14 @@ def main():
     fit = AdaptiveFit(ref, c, t, a.seconds, a.k, a.tau, device=a.device)
     G = tf.warm_start(ref["S"], fit.dtype, fit.cdev)
     aref = fit.calibrate(G)
+    if a.init_from:
+        # a_ref stays the one calibrated from the envelope warm start: it defines k's scale,
+        # and recalibrating from the continued G would change the medium being continued
+        prev = np.load(os.path.join(RESULTS, f"adaptfit_{a.init_from}.npz"), allow_pickle=True)
+        G = torch.tensor(prev["G"], dtype=G.dtype, device=fit.cdev, requires_grad=True)
+        aref = fit.a_ref = float(prev["a_ref"])
+        print(f"  continuing {a.init_from}: its best realised {float(prev['best_sim']):+.4f} "
+              f"at iteration {int(prev['best_iter'])}", flush=True)
     ev = AdaptiveFit(ref, c, t, a.eval_seconds, a.k, a.tau, device=a.device)
     ev.a_ref = aref
     print(f"  {a.ref}: {fit.K} channels, {len(ref['sub'])} solve vertices, save {fit.save}, "
@@ -200,6 +210,11 @@ def main():
             line += f"   realised {m:+.4f} +- {s:.4f}"
             if np.isfinite(m) and m > best[0]:
                 best = (m, G.detach().cpu().numpy().copy(), it); line += "  *"
+            if a.tag:                       # checkpoint: a long run is not lost to a stop
+                np.savez(os.path.join(RESULTS, f"adaptfit_{a.tag}_ckpt.npz"),
+                         G=G.detach().cpu().numpy(), best_G=best[1], best_sim=best[0],
+                         best_iter=best[2], it=it, hist=np.asarray(hist), a_ref=aref,
+                         k=a.k, tau=a.tau, ref=a.ref)
         print(line, flush=True)
 
     print(f"\n  best realised {best[0]:+.4f} at iteration {best[2]}")
