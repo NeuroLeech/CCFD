@@ -159,10 +159,16 @@ def main():
     ap.add_argument("--device", default="mps")
     ap.add_argument("--init-from", default="", dest="init_from",
                     help="continue from results/adaptfit_<tag>.npz's G (its best) and a_ref")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seed of the gradient draws; give a continuation a new one")
     ap.add_argument("--tag", default="")
     a = ap.parse_args()
 
-    torch.manual_seed(0)
+    # the seed of the GRADIENT draws. The descent memorises its draws - G multiplies each
+    # eta directly, so a step on one realisation shapes the drive to suit that realisation:
+    # a continued run re-seeded at 0 replays the draws its parent trained on and scored
+    # +0.48-0.55 on them, against +0.27 on fresh ones. A continuation needs a new --seed.
+    torch.manual_seed(a.seed)
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
     ref = load_envfit(a.ref)
@@ -175,6 +181,9 @@ def main():
         prev = np.load(os.path.join(RESULTS, f"adaptfit_{a.init_from}.npz"), allow_pickle=True)
         G = torch.tensor(prev["G"], dtype=G.dtype, device=fit.cdev, requires_grad=True)
         aref = fit.a_ref = float(prev["a_ref"])
+        if a.seed == 0:
+            raise SystemExit("  --init-from with --seed 0 replays the parent run's gradient "
+                             "draws, which the drive has memorised; pass a new --seed")
         print(f"  continuing {a.init_from}: its best realised {float(prev['best_sim']):+.4f} "
               f"at iteration {int(prev['best_iter'])}", flush=True)
     ev = AdaptiveFit(ref, c, t, a.eval_seconds, a.k, a.tau, device=a.device)
