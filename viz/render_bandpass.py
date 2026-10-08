@@ -102,6 +102,9 @@ def main():
                          "--resimulate re-integrates through fluid.run, which has no "
                          "nl_flux, no nl_adv and no learned grading, so it would put the "
                          "wrong physics on the raw row")
+    ap.add_argument("--raw-label", default="the fluid", dest="raw_label",
+                    help="top-row label for --raw-npy, e.g. 'the energy h^2' when the raw "
+                         "frames are the squared field of an envelope solve")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -174,7 +177,7 @@ def main():
 
     proj = _proj(c.V, c.F)
     zs = ", z-scored per vertex" if a.zscore else ""
-    labels = [(f"the fluid{zs}\n{pb_raw:.0%} of power in band" if a.raw_npy else
+    labels = [(f"{a.raw_label}{zs}\n{pb_raw:.0%} of power in band" if a.raw_npy else
                f"raw field{zs}\n{pb_raw:.0%} of power in band"),
               (f"the observable: SQUARED, BOLD-smoothed + {lo}-{hi} Hz{zs}\n"
                f"{pb_filt:.0%} of power in band" if a.envelope else
