@@ -72,6 +72,33 @@ def smoothing_matrix(cortex, fwhm=6.0, mesh="fsaverage5", cache=True):
     return K
 
 
+def truncate(K, mass):
+    """Keep each row's largest weights holding `mass` of it, renormalised."""
+    rows, cols, data = [], [], []
+    for i in range(K.shape[0]):
+        a, b = K.indptr[i], K.indptr[i + 1]
+        j, w = K.indices[a:b], K.data[a:b]
+        o = np.argsort(-w); cw = np.cumsum(w[o])
+        n = int(np.searchsorted(cw, mass * cw[-1] - 1e-12)) + 1
+        rows.append(np.full(n, i)); cols.append(j[o[:n]]); data.append(w[o[:n]] / w[o[:n]].sum())
+    return csr_matrix((np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+                      shape=K.shape)
+
+
+def truncated_matrix(cortex, fwhm, mass, mesh="fsaverage5"):
+    """A truncated kernel whose EFFECTIVE FWHM is `fwhm`: truncating narrows it, so the
+    gaussian is widened until the truncated rows measure `fwhm`. Fewer vertices per row is
+    what lets a covariance-level objective afford smoothing. -> (K, nominal fwhm)."""
+    V, _ = midthickness(mesh)
+    Vc = V[np.asarray(cortex.old)]
+    nom = fwhm
+    for _ in range(3):
+        Kt = truncate(smoothing_matrix(cortex, nom, mesh), mass)
+        nom = round(nom * fwhm / effective_fwhm(Kt, Vc), 2)
+    Kt = truncate(smoothing_matrix(cortex, nom, mesh), mass)
+    return Kt, nom
+
+
 def effective_fwhm(K, Vc, n=500, seed=0):
     """Median over rows of the kernel's width from its second moment about the weighted
     centroid in straight-line distance: for a 2-D gaussian E[r^2] = 2 sigma^2."""

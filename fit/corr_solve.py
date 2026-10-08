@@ -93,6 +93,16 @@ def main():
                          'SHRINKS the spread to rho*sd(T); >0 pushes it back')
     ap.add_argument('--chunk', type=int, default=128)
     ap.add_argument('--workers', type=int, default=8)
+    ap.add_argument('--smooth-fwhm', type=float, default=0.0, dest='smooth_fwhm',
+                    help='spatially smooth the ENVELOPE observable (after the square) by this '
+                         'effective FWHM in mm, as the target is. The covariance is then needed '
+                         'at every vertex the kernels touch, so this also sets --nsub')
+    ap.add_argument('--smooth-mass', type=float, default=0.8, dest='smooth_mass',
+                    help='keep each kernel row\'s largest weights holding this much of its '
+                         'mass, widening the gaussian so the effective FWHM still matches')
+    ap.add_argument('--nsub', type=int, default=100,
+                    help='solve vertices when smoothing, drawn from the scored ones')
+    ap.add_argument('--sub-seed', type=int, default=0, dest='sub_seed')
     ap.add_argument('--out', default='')
     a = ap.parse_args()
 
@@ -100,7 +110,29 @@ def main():
     z = np.load(f, allow_pickle=True)
     S_old = xspec.load_S(z)
     w = np.asarray(z['w' if a.envelope else 'H_w'], float)
-    Hall, respf, kern, c, t, g = build_H(a.tag, z, a.envelope, workers=a.workers)
+    Ks = None
+    if a.smooth_fwhm > 0:
+        if not a.envelope:
+            raise SystemExit('  --smooth-fwhm is for the envelope; a linear observable can be '
+                             'smoothed inside H')
+        import surface_smooth as ss
+        from interp_gap import medium_context
+        _, c0, t0_, _ = medium_context(z)
+        Kt, nom = ss.truncated_matrix(c0, a.smooth_fwhm, a.smooth_mass)
+        cols = np.asarray(t0_.cols)
+        sub = np.sort(np.random.default_rng(a.sub_seed).choice(len(cols), a.nsub,
+                                                                replace=False))
+        Kr = Kt[cols[sub]]
+        big = np.unique(Kr.indices)
+        Ks = Kr[:, big].toarray()
+        print(f'  observable smoothed {a.smooth_fwhm:g} mm effective (gaussian {nom:.2f} mm, '
+              f'top {a.smooth_mass:.0%} of each row): {a.nsub} solve vertices touch '
+              f'{len(big)}', flush=True)
+        Hall, respf, kern, c, t, g = build_H(a.tag, z, a.envelope, workers=a.workers,
+                                             keep=big)
+        g['sub'], g['nV'] = sub, a.nsub
+    else:
+        Hall, respf, kern, c, t, g = build_H(a.tag, z, a.envelope, workers=a.workers)
     idx, sub, nV, K = g['idx'], g['sub'], g['nV'], g['K']
     # build_H returns every rfft bin because interp_gap compares quadratures; the SOLVE
     # lives on the recorded grid, so take those bins and let the rest go
@@ -112,6 +144,12 @@ def main():
         ph = _lg.phases(idx, g['pad'], lags)
         fwd, adj = cf.envelope_pair(H, w, ph, rho, chunk=a.chunk)
         print(f'  {len(lags)} lags carry the filter autocorrelation', flush=True)
+        if Ks is not None:
+            # smoothing is linear and comes after the square: E_s = Ks E Ks^T over the
+            # touched vertices, and its adjoint pulls the gradient back the same way
+            fwd0, adj0 = fwd, adj
+            fwd = lambda S: Ks @ fwd0(S) @ Ks.T
+            adj = lambda Y, S: adj0(Ks.T @ np.asarray(Y, float) @ Ks, S)
     else:
         fwd, adj = cf.linear_pair(H, w)
 
@@ -145,6 +183,7 @@ def main():
              J0=tr[0], spread=Rc[iu].std(), target_spread=T[iu].std(),
              old_objective=o1, spearman=s1, old_objective_before=o0, spearman_before=s0,
              pearson=pear, pearson_before=p0, lam=a.lam, envelope=a.envelope,
+             smooth_fwhm=a.smooth_fwhm, smooth_mass=a.smooth_mass,
              src=a.tag,
              **provenance.stamp(a))
     print(f'  wrote results/{out}.npz')

@@ -198,15 +198,21 @@ def medium_context(z):
                             p=p, P=P, save=save)
 
 
-def build_H(tag, z, envelope, workers=8):
+def build_H(tag, z, envelope, workers=8, keep=None):
     """-> (H at every rfft bin, respf, cortex, target, grid facts).
+
+    `keep` (cortex vertex indices) overrides the rows of H, which are otherwise the solve
+    vertices t.cols[sub] - corr_solve --smooth-fwhm needs every vertex the smoothing kernels
+    of its solve vertices touch.
 
     `envelope` decides whether the observable's filters are folded into H (linear) or left
     out of it entirely (envelope, where they belong in rho and nowhere else)."""
     kern, c, t, g = medium_context(z)
     idx, sub, pad, save, frame_s = g['idx'], g['sub'], g['pad'], g['save'], g['frame_s']
     lo, hi, P, p = g['lo'], g['hi'], g['P'], g['p']
-    K, nV = xspec.solution_K(z), len(sub)
+    K = xspec.solution_K(z)
+    keep = np.asarray(t.cols)[sub] if keep is None else np.asarray(keep)
+    nV = len(keep)
     if 'impulse_frames' in z.files:
         imp = int(z['impulse_frames'])
     else:                       # envelope_fit does not store it; rebuild its rule
@@ -219,7 +225,7 @@ def build_H(tag, z, envelope, workers=8):
     t0 = time.time()
     resp = xspec.impulse_responses(c, list(range(K)), p, imp * save, save, profiles=P,
                                   verbose=False, workers=workers,
-                                  keep=np.asarray(t.cols)[sub])
+                                  keep=keep)
     R = np.pad(resp, ((0, 0), (0, max(0, pad - resp.shape[1])), (0, 0))); del resp
     F = np.fft.rfft(R, axis=1).astype(np.complex64); del R
     nb = F.shape[1]
