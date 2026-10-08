@@ -49,6 +49,7 @@ from paths import RESULTS
 import fc_score, xspec, units, bandpass, provenance
 import torch_swe
 import torch_fit as tf
+import surface_smooth
 
 
 def load_envfit(tag):
@@ -72,8 +73,25 @@ class AdaptiveFit(tf.Fit):
         self.tau_max = float(tau_s if tau_max is None else tau_max)
         self.lk = torch.tensor(np.log(max(self.k, 1e-12)), dtype=self.dtype, device=device)
         self.lt = torch.tensor(np.log(self.tau_s), dtype=self.dtype, device=device)
-        self.burn = max(self.burn, int(np.ceil(3 * self.tau_max / ref["frame_s"])))
+        if self.k > 0:            # the slow state's settling; nothing to settle at k = 0
+            self.burn = max(self.burn, int(np.ceil(3 * self.tau_max / ref["frame_s"])))
         self.a_ref = 1.0
+        # "mean": step-level h^2 averaged over the frame (the adaptive runs); "snapshot": the
+        # frame's h squared, which is what envelope_fit / corr_solve fitted
+        self.decimate = "mean"
+        self.Ks = self.keep_s = self.Kfull = None
+
+    def set_smoothing(self, K):
+        """Spatially smooth the observable with K (surface_smooth.smoothing_matrix). The
+        surrogate keeps every vertex any solve vertex's kernel touches and maps them onto the
+        solve vertices with K's rows; the realisation smooths the whole sheet."""
+        rows = np.asarray(self.cols.cpu())
+        Ksub = K[rows]
+        keep = np.unique(Ksub.indices)
+        self.keep_s = torch.as_tensor(keep, dtype=torch.long, device=self.dev)
+        self.Ks = torch.as_tensor(Ksub[:, keep].toarray(), dtype=self.dtype, device=self.dev)
+        self.Kfull = K
+        return len(keep)
 
     def learn_adapt(self):
         self.lk.requires_grad_(True); self.lt.requires_grad_(True)
@@ -135,10 +153,11 @@ class AdaptiveFit(tf.Fit):
     def frames(self, G, eta, k=None):
         A = self.drive(G, eta)
         H = self.apply_medium()
+        keep = self.cols if self.Ks is None else self.keep_s
         F, _, _ = torch_swe.run(self.sw, A, self.Pt, self.dt, self.g, H, save=self.save,
-                                chunk=self.chunk, keep=self.cols, adapt=self.adapt(k),
-                                observe="energy", decimate="mean")
-        return F
+                                chunk=self.chunk, keep=keep, adapt=self.adapt(k),
+                                observe="energy", decimate=self.decimate)
+        return F if self.Ks is None else F @ self.Ks.T
 
     def calibrate(self, G):
         with torch.no_grad():
@@ -164,11 +183,23 @@ class AdaptiveFit(tf.Fit):
             gen = torch.Generator(device=self.cdev).manual_seed(10_000 + sd)
             with torch.no_grad():
                 A = self.drive(G, self.eta(gen)).detach().cpu().numpy()
-            o, _ = torch_swe.run_adaptive(self.sw, A, self.ref["P"], self.dt, self.g,
-                                          self.Hf, self.save, k=k, tau_steps=self.tau_steps,
-                                          a_ref=self.a_ref)
-            Y = bandpass.apply(units.smooth_frames(o["energy"], self.kern),
-                               self.ref["frame_s"], *self.ref["band"])[self.burn:]
+            if self.decimate == "mean":
+                o, _ = torch_swe.run_adaptive(self.sw, A, self.ref["P"], self.dt, self.g,
+                                              self.Hf, self.save, k=k,
+                                              tau_steps=self.tau_steps, a_ref=self.a_ref)
+                E = o["energy"]
+            else:
+                with torch.no_grad():
+                    E, _, _ = torch_swe.run(self.sw, A, self.Pt, self.dt, self.g,
+                                            self.apply_medium(), save=self.save,
+                                            adapt=self.adapt(k), observe="energy",
+                                            decimate=self.decimate)
+                E = E.cpu().numpy()
+            Y = bandpass.apply(units.smooth_frames(E, self.kern),
+                               self.ref["frame_s"], *self.ref["band"])
+            if self.Kfull is not None:
+                Y = surface_smooth.smooth(Y, self.Kfull)
+            Y = Y[self.burn:]
             cols = np.asarray(self.t.cols)
             Z, flat = _rank_z(np.ascontiguousarray(np.asarray(Y[:, cols], np.float64).T),
                               rank=True)
@@ -205,6 +236,16 @@ def main():
     ap.add_argument("--tau-max", type=float, default=None, dest="tau_max",
                     help="upper clamp on tau_a, seconds; sets the burn-in (3 tau_max). "
                          "Default: --tau with --learn-adapt off, 3x --tau with it on")
+    ap.add_argument("--S-from", default="", dest="S_from",
+                    help="warm-start from results/<this>.npz's S instead of the envfit's own "
+                         "(a corr_solve result on the same medium and bins)")
+    ap.add_argument("--frame-square", action="store_true", dest="frame_square",
+                    help="square the frame's h (snapshot), as envelope_fit/corr_solve do, "
+                         "instead of averaging step-level h^2 over the frame")
+    ap.add_argument("--smooth-fwhm", type=float, default=0.0, dest="smooth_fwhm",
+                    help="spatially smooth the observable by this FWHM (mm, geodesic on the "
+                         "midthickness) in the surrogate and the realised score, as the "
+                         "target's 6 mm")
     ap.add_argument("--tag", default="")
     a = ap.parse_args()
 
@@ -216,12 +257,25 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     t = fc_score.default_target(c, verbose=False)
     ref = load_envfit(a.ref)
+    if a.S_from:
+        zs = np.load(os.path.join(RESULTS, f"{a.S_from}.npz"), allow_pickle=True)
+        if not np.array_equal(zs["idx"].astype(int), ref["idx"]):
+            raise SystemExit(f"  {a.S_from} was solved on different bins from envfit_{a.ref}")
+        ref["S"] = zs["S"]
+        print(f"  warm start S from {a.S_from}", flush=True)
     prev = None
     if a.init_from:
         prev = np.load(os.path.join(RESULTS, f"adaptfit_{a.init_from}.npz"), allow_pickle=True)
         a.k, a.tau = float(prev["k"]), float(prev["tau"])      # the parent's (best) k, tau_a
     tau_max = a.tau_max or (3 * a.tau if a.learn_adapt else a.tau)
     fit = AdaptiveFit(ref, c, t, a.seconds, a.k, a.tau, device=a.device, tau_max=tau_max)
+    if a.frame_square:
+        fit.decimate = "snapshot"
+    K = surface_smooth.smoothing_matrix(c, a.smooth_fwhm) if a.smooth_fwhm > 0 else None
+    if K is not None:
+        nk = fit.set_smoothing(K)
+        print(f"  observable smoothed {a.smooth_fwhm:g} mm FWHM: the surrogate integrates "
+              f"{nk} vertices onto {len(ref['sub'])}", flush=True)
     G = tf.warm_start(ref["S"], fit.dtype, fit.cdev)
     aref = fit.calibrate(G)
     if a.init_from:
@@ -238,6 +292,9 @@ def main():
         print(f"  continuing {a.init_from}: its best realised {float(prev['best_sim']):+.4f} "
               f"at iteration {int(prev['best_iter'])}", flush=True)
     ev = AdaptiveFit(ref, c, t, a.eval_seconds, a.k, a.tau, device=a.device, tau_max=tau_max)
+    ev.decimate = fit.decimate
+    if K is not None:
+        ev.set_smoothing(K)
     ev.a_ref = aref
     print(f"  {a.ref}: {fit.K} channels, {len(ref['sub'])} solve vertices, save {fit.save}, "
           f"{fit.nsteps} steps per {a.seconds:.0f} s gradient, scored at {a.eval_seconds:.0f} s, "
@@ -247,10 +304,23 @@ def main():
              if a.learn_adapt else ""), flush=True)
     print(f"  envelope solve's own realised score (linear medium, frame-level square): "
           f"{ref['env_sim']:+.4f}", flush=True)
-    m_lin, s_lin = ev.realised(G, seeds=tuple(range(a.eval_draws)), k=0.0)
-    m0, s0 = ev.realised(G, seeds=tuple(range(a.eval_draws)))
-    print(f"  iteration 0, step-level energy: adaptation off {m_lin:+.4f} +- {s_lin:.4f}, "
-          f"on {m0:+.4f} +- {s0:.4f}", flush=True)
+    seeds0 = tuple(range(a.eval_draws))
+    obs = "frame-squared" if fit.decimate == "snapshot" else "step-level"
+    if a.k == 0 and not a.learn_adapt:
+        m0, s0 = ev.realised(G, seeds=seeds0)
+        m_lin, s_lin = m0, s0
+        line = f"  iteration 0, {obs} energy: {m0:+.4f} +- {s0:.4f}"
+        if K is not None:
+            ev.Kfull = None                        # the same draws, scored unsmoothed
+            mu, su = ev.realised(G, seeds=seeds0)
+            ev.Kfull = K
+            line += f" smoothed ({mu:+.4f} +- {su:.4f} unsmoothed)"
+        print(line, flush=True)
+    else:
+        m_lin, s_lin = ev.realised(G, seeds=seeds0, k=0.0)
+        m0, s0 = ev.realised(G, seeds=seeds0)
+        print(f"  iteration 0, {obs} energy: adaptation off {m_lin:+.4f} +- {s_lin:.4f}, "
+              f"on {m0:+.4f} +- {s0:.4f}", flush=True)
 
     rms = float(G.detach().abs().pow(2).mean().sqrt())
     groups = [{"params": [G], "lr": a.lr * rms}]
