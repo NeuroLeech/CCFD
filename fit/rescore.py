@@ -63,7 +63,8 @@ def rescore_torch(tag, ref_tag, seconds, draws, device="mps"):
     t = fc_score.default_target(c, verbose=True)
     fit = Fit(ref, c, t, seconds, device=device, amp=float(z["amp"]),
               nl_flux=float(z["nl_flux"]), nl_adv=float(z["nl_adv"]),
-              Ld=float(z["Ld"]), maps_scale=float(z["maps_scale"]))
+              Ld=float(z["Ld"]), maps_scale=float(z["maps_scale"]),
+              speed=int(z["speed"]) if "speed" in z.files else 1)
     learned = restore_medium(fit, z)
     with torch.no_grad():
         H = fit.medium()[0] if learned else fit.Hf
