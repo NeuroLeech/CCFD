@@ -17,7 +17,7 @@ from mesh_cache import load_cortex
 import fc_score
 from fc_moran import MoranMatch
 from paths import RESULTS
-import xspec, bo_step, subparcels, regimes, units
+import xspec, bo_step, subparcels, regimes, units, surface_smooth
 
 # the bo_step winner, in per-step units: damping, rotation, boundary absorption, cadence,
 # then the six speed/damping map coefficients
@@ -341,6 +341,12 @@ def main():
                          "driven AREA matches the taper version and only the shape "
                          "differs. Without it a wide kernel drives far more cortex and "
                          "coverage is confounded with profile shape")
+    ap.add_argument("--smooth-fwhm", type=float, default=0.0, dest="smooth_fwhm",
+                    help="spatially smooth the observable by this FWHM, mm, geodesic on the "
+                         "midthickness (surface_smooth), as the target's preprocessing did - "
+                         "6 for any RBC/XCP-D target. Linear, so it is folded into H: each "
+                         "solve vertex's row becomes the kernel-weighted sum of the rows it "
+                         "touches. Applied to the realised frames the same way")
     ap.add_argument("--fc-path", default="", dest="fc_path",
                     help="pin the target FC matrix instead of taking the newest one "
                          "matching fc_score's glob. Needed for anything in results/fc/"
@@ -697,9 +703,19 @@ def main():
         # makes the response ring for ten times as many frames.
         cols_need = t.cols[sub] if val is None else np.concatenate([t.cols[sub],
                                                                     t.cols[val]])
-        keep, inv = np.unique(np.asarray(cols_need, np.int64), return_inverse=True)
-        sub_k = inv[:len(sub)]                       # the same vertices, re-indexed
-        val_k = None if val is None else inv[len(sub):]
+        Ksm = None
+        if a.smooth_fwhm > 0:
+            # smoothing needs every vertex the kernels of the read vertices touch
+            Kfull = surface_smooth.smoothing_matrix(c, a.smooth_fwhm)
+            Kr = Kfull[np.asarray(cols_need, np.int64)]
+            keep = np.unique(np.concatenate([np.asarray(cols_need, np.int64), Kr.indices]))
+            Ksm = Kr[:, keep].tocsr()                 # (n read, n keep)
+            sub_k = np.arange(len(sub))
+            val_k = None if val is None else np.arange(len(sub), len(cols_need))
+        else:
+            keep, inv = np.unique(np.asarray(cols_need, np.int64), return_inverse=True)
+            sub_k = inv[:len(sub)]                   # the same vertices, re-indexed
+            val_k = None if val is None else inv[len(sub):]
         resp = xspec.impulse_responses(c, list(range(len(P))), p, a.impulse_frames * save, save,
                                        profiles=P, verbose=False, coupling=cpl,
                                        workers=a.workers, keep=keep)
@@ -709,9 +725,20 @@ def main():
         print(f"  impulse responses over {len(keep)} of {c.nV} vertices "
               f"({resp.nbytes/2**30:.2f} GiB, {9374/max(len(keep),1):.1f}x smaller "
               f"than full width)")
-        H, w, idx = xspec.transfer(resp, sub_k, a.nfreq, kernel=kern, n=npad)
-        Hv = (xspec.transfer(resp, val_k, a.nfreq, kernel=kern, n=npad)[0]
-              if val is not None else None)
+        if Ksm is not None:
+            Hk, w, idx = xspec.transfer(resp, np.arange(len(keep)), a.nfreq, kernel=kern,
+                                        n=npad)
+            Hs = np.stack([np.asarray(Ksm @ Hk[f]) for f in range(len(idx))]).astype(Hk.dtype)
+            del Hk
+            H = np.ascontiguousarray(Hs[:, sub_k])
+            Hv = np.ascontiguousarray(Hs[:, val_k]) if val is not None else None
+            del Hs
+            print(f"  smoothed {a.smooth_fwhm:g} mm: H read from {len(keep)} vertices onto "
+                  f"{len(cols_need)}", flush=True)
+        else:
+            H, w, idx = xspec.transfer(resp, sub_k, a.nfreq, kernel=kern, n=npad)
+            Hv = (xspec.transfer(resp, val_k, a.nfreq, kernel=kern, n=npad)[0]
+                  if val is not None else None)
         ref_frames, ps, dt = npad, None, None
         del resp                 # H and Hv are all that is wanted from it
         if bp is not None:
@@ -886,11 +913,14 @@ def main():
     # medium, or coupling - keeps every draw here: the callback is a closure, so it does
     # not pickle.
     pool = res = None
+    Kscore = (surface_smooth.smoothing_matrix(c, a.smooth_fwhm) if a.smooth_fwhm > 0
+              else None)
     if a.workers > 1 and a.draws > 1 and nb == 1 and cpl is None:
         rest = [xspec.realise(S, idx, a.frames, ref_frames=ref_frames, seed=1000 + d)
                 for d in range(1, a.draws)]
         pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
-                                          band=bp, frame_s=fs_bp, segment=seg_fr)
+                                          band=bp, frame_s=fs_bp, segment=seg_fr,
+                                          smooth=Kscore)
         print(f"  draws 2-{a.draws} scored over {min(a.workers, len(rest))} workers",
               flush=True)
     for d in range(1 if pool is not None else a.draws):
@@ -908,7 +938,7 @@ def main():
                 c, dr, p, nsteps, sv, coupling=cpl))
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P,
                                     run_fn=run_fn, kernel=kern, band=bp, frame_s=fs_bp,
-                                    segment=seg_fr)
+                                    segment=seg_fr, smooth=Kscore)
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
         if "sim_aff" in r:
             affs.append(r["sim_aff"])
@@ -948,7 +978,7 @@ def main():
              maps=np.array(p.get("maps", ()), dtype=object),
              map_a=np.asarray(p.get("a", ()), float),
              map_b=np.asarray(p.get("b", ()), float),
-             map_clip=a.map_clip, decimate=a.decimate,
+             map_clip=a.map_clip, decimate=a.decimate, smooth_fwhm=a.smooth_fwhm,
              # The realised score, in the file that holds the solve. Without it the only
              # trace of what a run scored is stdout, and a tag whose log is gone cannot be
              # compared against anything without re-realising it - which is how +0.6930

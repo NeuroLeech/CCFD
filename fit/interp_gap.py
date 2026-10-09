@@ -185,17 +185,26 @@ def medium_context(z):
     vertices H alone is 8 GB per process."""
     idx, x, sub = z['idx'], z['x'], z['sub']
     pad, save, frame_s = int(z['pad']), int(z['save']), float(z['frame_s'])
-    lo, hi = (float(v) for v in z['band'])
+    lo, hi = (float(v) for v in z['band'])          # nan, nan: no bandpass
     P, mc = np.asarray(z['profiles'], np.float32), str(z['map_clip'])
     c = load_cortex('fsaverage5', verbose=False)
-    t = fc_score.default_target(c, verbose=False)
+    # a solve pinned to its own target (--fc-path) is scored against THAT target, not the
+    # newest file under results/fc/
+    fcp = str(z['fc_path']) if 'fc_path' in z.files else ''
+    if fcp:
+        if not os.path.isabs(fcp):
+            fcp = os.path.join(os.path.dirname(RESULTS), fcp)
+        t = fc_score.FCTarget(c, fc_path=fcp, centre='double', verbose=False)
+    else:
+        t = fc_score.default_target(c, verbose=False)
+    sm = float(z['smooth_fwhm']) if 'smooth_fwhm' in z.files else 0.0
     p, _, _ = bo_step.unpack(x, c)
     p['map_clip'] = mc
     p['decimate'] = str(z['decimate']) if 'decimate' in z.files else 'snapshot'
     kern = units.smoothing_kernel(timescale.bold_fwhm_frames(frame_s, verbose=False),
                                   verbose=False)
     return kern, c, t, dict(idx=idx, sub=sub, pad=pad, frame_s=frame_s, lo=lo, hi=hi,
-                            p=p, P=P, save=save)
+                            p=p, P=P, save=save, smooth_fwhm=sm)
 
 
 def build_H(tag, z, envelope, workers=8, keep=None):

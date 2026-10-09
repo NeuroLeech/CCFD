@@ -88,8 +88,13 @@ def _one(seed):
     Aser = np.repeat(A, g['save'], axis=0)[:nf * g['save']] / g['save']
     fr, _ = fl.run(c, xspec.ProfileDrive(c, g['P'], Aser, 2e-4), g['p'], nf * g['save'],
                    g['save'])
-    X = bandpass.apply(units.smooth_frames(fr, _W['kern']), g['frame_s'], g['lo'], g['hi'])
+    X = units.smooth_frames(fr, _W['kern'])
     del fr
+    if np.isfinite(g['lo']):
+        X = bandpass.apply(X, g['frame_s'], g['lo'], g['hi'])
+    if g.get('smooth_fwhm', 0.0) > 0:
+        import surface_smooth
+        X = surface_smooth.smooth(X, surface_smooth.smoothing_matrix(c, g['smooth_fwhm']))
     Z, flat = _rank_z(np.ascontiguousarray(X[t.burn:, t.cols].T), rank=(t.metric == 'spearman'))
     e = t.model_edges(Z=Z, flat=flat)[0]
     return np.asarray(e, np.float32), float(t._prep(e) @ t.y)
@@ -105,12 +110,13 @@ def main():
     a = ap.parse_args()
 
     import multiprocessing as mp
-    from mesh_cache import load_cortex
-    import fc_score
-    t = fc_score.default_target(load_cortex('fsaverage5', verbose=False), verbose=False)
+    from interp_gap import medium_context
     marks = [d for d in (1, 2, 4, 8, 16, 32, 64) if d <= a.draws]
     for tag in a.tags:
         t0 = time.time()
+        # the solve's own target (its --fc-path, if pinned), as the workers score against
+        t = medium_context(np.load(os.path.join(RESULTS, f"xspec_{tag}.npz"),
+                                   allow_pickle=True))[2]
         ctx = mp.get_context('spawn')
         with ctx.Pool(a.workers, initializer=_init, initargs=(tag, a.seconds)) as pool:
             esum, singles, out = None, [], []

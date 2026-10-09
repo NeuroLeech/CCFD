@@ -264,10 +264,10 @@ _W_SCORE = {}
 
 
 def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s, segment,
-                trim_edge=False):
+                trim_edge=False, smooth=None):
     _W_SCORE.update(cortex=cortex, target=target, p=p, profiles=profiles, save=save,
                     kernel=kernel, band=band, frame_s=frame_s, segment=segment,
-                    trim_edge=trim_edge)
+                    trim_edge=trim_edge, smooth=smooth)
 
 
 def _score_one(A):
@@ -278,12 +278,12 @@ def _score_one(A):
                           save=_W_SCORE["save"], profiles=_W_SCORE["profiles"],
                           kernel=_W_SCORE["kernel"], band=_W_SCORE["band"],
                           frame_s=_W_SCORE["frame_s"], segment=_W_SCORE["segment"],
-                          trim_edge=_W_SCORE["trim_edge"])
+                          trim_edge=_W_SCORE["trim_edge"], smooth=_W_SCORE.get("smooth"))
     return r["sim"], r["gap"], r["rank"], r.get("sim_aff", float("nan"))
 
 
 def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
-                    band=None, frame_s=None, segment=None, trim_edge=False):
+                    band=None, frame_s=None, segment=None, trim_edge=False, smooth=None):
     """Score several drawn realisations at once. -> [(sim, gap, rank), ...]
 
     Draws are independent runs of the same medium under different samples of the same
@@ -318,7 +318,7 @@ def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
     try:
         pool = ctx.Pool(n, initializer=_score_init,
                         initargs=(cortex, target, p, profiles, save, kernel, band,
-                                  frame_s, segment, trim_edge))
+                                  frame_s, segment, trim_edge, smooth))
     finally:
         for k, v in env.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
@@ -1590,7 +1590,7 @@ class ProfileDrive:
 
 def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=False,
                       seed=0, profiles=None, run_fn=None, kernel=None, band=None,
-                      frame_s=None, segment=None, diagnostics=True, trim_edge=False):
+                      frame_s=None, segment=None, diagnostics=True, trim_edge=False, smooth=None):
     """Hold each drawn sample over its block of steps, run, and score for real.
 
     `run_fn(drive, nsteps, save) -> (frames, dt)` replaces the plain integration, which is
@@ -1632,6 +1632,12 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
         frames = bandpass.apply(frames, frame_s, band[0], band[1])
         if trim_edge:
             frames = bandpass.trim_edges(frames, frame_s, band[0])
+    if smooth is not None:
+        # spatial smoothing to the target's (surface_smooth.smoothing_matrix); linear and
+        # spatial, so it commutes with the temporal filters and its solve-side counterpart
+        # is the same matrix applied to H's rows
+        import surface_smooth
+        frames = surface_smooth.smooth(frames, smooth)
     if segment:
         # The target was estimated from short demeaned blocks; the model's covariance has
         # to be estimated the same way, or the identity the solve rests on - that the
