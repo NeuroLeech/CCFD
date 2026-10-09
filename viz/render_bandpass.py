@@ -105,10 +105,16 @@ def main():
     ap.add_argument("--raw-label", default="the fluid", dest="raw_label",
                     help="top-row label for --raw-npy, e.g. 'the energy h^2' when the raw "
                          "frames are the squared field of an envelope solve")
+    ap.add_argument("--smooth-fwhm", type=float, default=0.0, dest="smooth_fwhm",
+                    help="the observable is also spatially smoothed by this FWHM, mm "
+                         "(best_fit --smooth-fwhm); the top row stays unsmoothed")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
-    lo, hi = (float(v) for v in a.band.split(","))
+    # --band none: the observable has no passband (best_fit without --bandpass); 0.01-0.08
+    # is then only the range the power fractions are reported over
+    nob = a.band == "none"
+    lo, hi = (0.01, 0.08) if nob else (float(v) for v in a.band.split(","))
     frame_s = timescale.TR / 4.0
     c = load_cortex("fsaverage5", verbose=False)
     saved = np.asarray(np.load(os.path.join(RESULTS, f"frames_{a.tag}.npy")), np.float32)
@@ -125,7 +131,11 @@ def main():
                 G = np.asarray(env.observable(F, kern, frame_s, (lo, hi), burn=0),
                                np.float32)
             else:
-                G = bandpass.apply(units.smooth_frames(F, kern), frame_s, lo, hi)
+                G = units.smooth_frames(F, kern)
+                G = G if nob else bandpass.apply(G, frame_s, lo, hi)
+            if a.smooth_fwhm > 0:
+                import surface_smooth
+                G = surface_smooth.smooth(G, surface_smooth.smoothing_matrix(c, a.smooth_fwhm))
             print(f"  bare field from {os.path.basename(a.raw_npy)} {F.shape}; "
                   f"observable = {'SQUARE then ' if a.envelope else ''}BOLD kernel "
                   f"(FWHM {len(kern)} taps) then {lo}-{hi} Hz")
@@ -179,7 +189,11 @@ def main():
     zs = ", z-scored per vertex" if a.zscore else ""
     labels = [(f"{a.raw_label}{zs}\n{pb_raw:.0%} of power in band" if a.raw_npy else
                f"raw field{zs}\n{pb_raw:.0%} of power in band"),
-              (f"the observable: SQUARED, BOLD-smoothed + {lo}-{hi} Hz{zs}\n"
+              (f"the observable: Nyquist low-pass"
+               f"{'' if nob else f' + {lo}-{hi} Hz'}"
+               f"{f' + {a.smooth_fwhm:g} mm' if a.smooth_fwhm else ''}{zs}\n"
+               f"{pb_filt:.0%} of power in {lo}-{hi} Hz" if (nob or a.smooth_fwhm) and not a.envelope
+               else f"the observable: SQUARED, BOLD-smoothed + {lo}-{hi} Hz{zs}\n"
                f"{pb_filt:.0%} of power in band" if a.envelope else
                f"the observable: BOLD-smoothed + {lo}-{hi} Hz\n{pb_filt:.0%} of power "
                f"in band" if a.raw_npy else
