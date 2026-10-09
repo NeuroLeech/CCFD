@@ -112,11 +112,20 @@ def main():
                 print(f"    {lab:>13s}  " + "".join(f"{float(ta.y @ tb.y):+12.4f}"
                                                    for _, tb in cols), flush=True)
         esum = None
+        marks = [m for m in (1, 2, 4, 8, 16, 32, 64) if m <= a.draws]
+        curve = []
         ctx = mp.get_context("spawn")
         with ctx.Pool(a.workers, initializer=_init, initargs=(tag, a.seconds)) as pool:
             for d, es in enumerate(pool.imap(_one, range(1000, 1000 + a.draws))):
                 esum = [e.astype(np.float64) for e in es] if esum is None else \
                     [s + e for s, e in zip(esum, es)]
+                if d + 1 in marks:
+                    # the like-for-like diagonal so far: how each band's score grows with
+                    # pooling, which is what says how much of it is estimation noise
+                    curve.append([float(tb._prep(esum[r] / (d + 1)) @ tb.y)
+                                  for r, (_, tb) in enumerate(cols)])
+                    print(f"    pooled {d+1:3d}: " + "".join(f"{v:+9.4f}" for v in curve[-1]),
+                          flush=True)
         print(f"\n  {tag}: {a.draws} draws pooled, {a.seconds:.0f} s  [{time.time()-t0:.0f}s]")
         print("    model \\ data   " + "".join(f"{lab:>12s}" for lab, _ in cols))
         M = np.zeros((len(rows), len(cols)))
@@ -125,6 +134,7 @@ def main():
                 M[r, k] = float(tb._prep(e / a.draws) @ tb.y)
             print(f"    {rows[r]:>13s}  " + "".join(f"{v:+12.4f}" for v in M[r]), flush=True)
         np.savez(os.path.join(RESULTS, f"bandfc_{tag}.npz"), M=M, rows=rows,
+                 curve=np.asarray(curve), marks=marks[:len(curve)],
                  cols=[lab for lab, _ in cols], draws=a.draws, seconds=a.seconds)
 
 

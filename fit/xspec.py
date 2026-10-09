@@ -1078,9 +1078,42 @@ def factor_objective(H, w, Ct, rank, reg=None, mu=0.0, nfev=None, log_every=0,
     return fg, Ctn, _cov
 
 
+def band_objective(H, w, bands, rank, nfev=None, log_every=0, trace=None):
+    """-> fg for sum_b lam_b rho_b: FC matched within each frequency band at once.
+
+    `bands` is [(r_b, Ct_b, lam_b, label)]: r_b the band filter's response on the solved bins
+    (bandpass.transfer_response - filtfilt's amplitude response, which like the passband in
+    best_fit simply multiplies H), Ct_b that band's target. Each term is factor_objective's
+    own fg on H * r_b, so every term carries that function's finite-difference-checked
+    gradient, and the sum's gradient is the weighted sum of theirs. Costs one forward per
+    band."""
+    fgs = [factor_objective(H * np.asarray(rb)[:, None, None], w, Ct, rank)[0]
+           for rb, Ct, lam, lab in bands]
+    lams = [float(lam) for _, _, lam, _ in bands]
+    nfev = [0] if nfev is None else nfev
+
+    def fg(Lv):
+        nfev[0] += 1
+        f, g, rhos = 0.0, None, []
+        for fb, lam in zip(fgs, lams):
+            fb_, gb = fb(Lv)
+            rhos.append(-fb_)
+            f += lam * fb_
+            g = lam * gb if g is None else g + lam * gb
+        if log_every and nfev[0] % log_every == 0:
+            if trace is not None:
+                trace.append(float(-f))
+            print(f"      nfev {nfev[0]:>6d}  sum {-f:+.6f}  bands "
+                  + " ".join(f"{lab} {r:+.4f}" for (_, _, _, lab), r in zip(bands, rhos)),
+                  flush=True)
+        return f, g
+
+    return fg
+
+
 def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
                  ftol=1e-18, gtol=1e-16, maxcor=40, log_every=0, trace=None,
-                 reg=None, mu=0.0, return_factor=False):
+                 reg=None, mu=0.0, return_factor=False, bands=None):
     """The same objective as `solve`, maximised over S = L L^H with L the free variable.
 
     `solve` walks the PSD cone by projected gradient and stops on an iteration count, with
@@ -1124,6 +1157,10 @@ def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
     nfev = [0]
     fg, Ctn, _cov = factor_objective(H, w, Ct, r, reg=reg, mu=mu, nfev=nfev,
                                      log_every=log_every, trace=trace)
+    if bands:
+        # the per-band objective replaces the whole-spectrum one; _cov and Ctn stay the
+        # unfiltered ones, so the returned C and its printed corr are the unfiltered FC
+        fg = band_objective(H, w, bands, r, nfev=nfev, log_every=log_every, trace=trace)
 
     rng = np.random.default_rng(seed)
     L0 = rng.standard_normal(2 * half) * (1.0 / np.sqrt(K * r))

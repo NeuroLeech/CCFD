@@ -347,6 +347,12 @@ def main():
                          "6 for any RBC/XCP-D target. Linear, so it is folded into H: each "
                          "solve vertex's row becomes the kernel-weighted sum of the rows it "
                          "touches. Applied to the realised frames the same way")
+    ap.add_argument("--fit-bands", default="", dest="fit_bands",
+                    help="fit FC WITHIN frequency bands instead of the whole spectrum: "
+                         "comma-separated LO-HI in Hz, each matched to its own band FC from "
+                         "--band-dir (targets/rbc_nobp.py --build-bands), equally weighted. "
+                         "Factor solver only")
+    ap.add_argument("--band-dir", default="results/fc/nobp/bands", dest="band_dir")
     ap.add_argument("--fc-path", default="", dest="fc_path",
                     help="pin the target FC matrix instead of taking the newest one "
                          "matching fc_score's glob. Needed for anything in results/fc/"
@@ -858,10 +864,31 @@ def main():
         S, (C, _Ca) = xspec.solve_lagged(H, w, Tgt, E, ph0, iters=a.iters, verbose=True,
                                          wa=a.wa, trace=tr, freq_keep=keep_f)
     elif a.solver == "factor":
+        bands = None
+        if a.fit_bands:
+            import glob, bandpass
+            bands = []
+            for spec_b in a.fit_bands.split(","):
+                lo_b, hi_b = (float(v) for v in spec_b.split("-"))
+                hits = glob.glob(os.path.join(a.band_dir,
+                                              f"*_band-{lo_b:g}-{hi_b:g}Hz_spearmanfc.npy"))
+                if len(hits) != 1:
+                    raise SystemExit(f"  no single band FC for {spec_b} in {a.band_dir}")
+                tb = fc_score.FCTarget(c, fc_path=hits[0], centre=a.centre, verbose=False)
+                if not np.array_equal(tb.vertices, t.vertices):
+                    raise SystemExit(f"  {hits[0]} is on different vertices from the target")
+                raw_b = np.asarray(tb.target_fc()[np.ix_(sub, sub)], np.float64)
+                raw_b = (raw_b - raw_b.mean(0, keepdims=True) - raw_b.mean(1, keepdims=True)
+                         + raw_b.mean())          # as `raw` is
+                rb = bandpass.transfer_response(idx, ref_frames, clock["frame_s"], lo_b, hi_b)
+                bands.append((rb, normal_scores(raw_b, iu), 1.0 / len(a.fit_bands.split(",")),
+                              f"{lo_b:g}-{hi_b:g}"))
+            print(f"  fitting FC within {len(bands)} bands: {a.fit_bands} Hz, equal weights",
+                  flush=True)
         S, C, s_fac = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
                                          trace=tr, log_every=max(1, a.maxfun // 10),
                                          reg=(xspec.prank_ratio(w) if a.prank_mu else None),
-                                         mu=a.prank_mu, return_factor=True)
+                                         mu=a.prank_mu, return_factor=True, bands=bands)
     else:
         S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
                            share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
@@ -979,6 +1006,7 @@ def main():
              map_a=np.asarray(p.get("a", ()), float),
              map_b=np.asarray(p.get("b", ()), float),
              map_clip=a.map_clip, decimate=a.decimate, smooth_fwhm=a.smooth_fwhm,
+             fit_bands=a.fit_bands,
              # The realised score, in the file that holds the solve. Without it the only
              # trace of what a run scored is stdout, and a tag whose log is gone cannot be
              # compared against anything without re-realising it - which is how +0.6930
