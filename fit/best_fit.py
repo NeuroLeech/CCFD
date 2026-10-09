@@ -349,7 +349,8 @@ def main():
                          "touches. Applied to the realised frames the same way")
     ap.add_argument("--fit-bands", default="", dest="fit_bands",
                     help="fit FC WITHIN frequency bands instead of the whole spectrum: "
-                         "comma-separated LO-HI in Hz, each matched to its own band FC from "
+                         "comma-separated LO-HI in Hz (or 'all' for the unfiltered FC as a "
+                         "term of its own), each matched to its own band FC from "
                          "--band-dir (targets/rbc_nobp.py --build-bands), equally weighted. "
                          "Factor solver only")
     ap.add_argument("--band-dir", default="results/fc/nobp/bands", dest="band_dir")
@@ -869,6 +870,12 @@ def main():
             import glob, bandpass
             bands = []
             for spec_b in a.fit_bands.split(","):
+                if spec_b.strip() == "all":
+                    # the unfiltered FC itself as one of the terms: band shapes alone leave
+                    # the power mix across bands - which sets the unfiltered FC - free
+                    bands.append((np.ones(len(idx)), Tgt, 1.0 / len(a.fit_bands.split(",")),
+                                  "all"))
+                    continue
                 lo_b, hi_b = (float(v) for v in spec_b.split("-"))
                 hits = glob.glob(os.path.join(a.band_dir,
                                               f"*_band-{lo_b:g}-{hi_b:g}Hz_spearmanfc.npy"))
