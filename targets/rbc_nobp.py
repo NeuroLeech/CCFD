@@ -21,6 +21,12 @@ The group FC is written under results/fc/nobp/, NOT results/fc/: fc_score.defaul
 raw_fc take the NEWEST file matching results/fc/*fc.npy as the target, so writing it beside
 the current target would silently replace it for every script in the repo.
 
+BUILT 2026-10-09, all 100 runs (0-3 dummy volumes dropped per run, as XCP-D did), 9,305
+vertices. Against the bandpassed target on the 9,303 both cover: edge spearman +0.966 raw,
++0.972 double-centred; per-vertex FC-row correlation median 0.979 (5% 0.913, min 0.781). The
+unfiltered FC is weaker - double-centred sd 0.094 against 0.130 (0.72x) - but ranks its edges
+almost the same way.
+
   python targets/rbc_nobp.py --validate
   python targets/rbc_nobp.py --process
   python targets/rbc_nobp.py --build
@@ -136,14 +142,19 @@ def process(run, band=False, fetch=True, drop=True, verbose=True, order=2,
         for k in ("design", "bold", "confounds"):
             _get(f[k])
     X, valid, tr = rbc.cifti_left_cortex(f["bold"])               # (32492, T)
-    nd = n_dummy(f["confounds"])
     _, D = read_tsv(f["design"])
-    if D.shape[0] != X.shape[1]:
+    # XCP-D's design covers only the volumes it kept, so its dummy count is the difference;
+    # fMRIPrep's non-steady-state flags are the cross-check
+    nd = X.shape[1] - D.shape[0]
+    nd_f = n_dummy(f["confounds"])
+    if nd < 0 or (nd != nd_f and verbose):
+        print(f"    note: {run.sub} XCP-D dropped {nd} volumes, fMRIPrep flags {nd_f}", flush=True)
+    if nd < 0:
         raise RuntimeError(f"design {D.shape[0]} rows, bold {X.shape[1]} frames")
     Y = X[:, nd:].T.astype(np.float64)                            # (T, 32492)
     m = valid
     R = np.zeros_like(Y)
-    Dn = np.nan_to_num(D[nd:])
+    Dn = np.nan_to_num(D)
     if band and filter_first:
         Yf, Df = bandpass(detrend(Y[:, m]), tr, order=order), bandpass(detrend(Dn), tr, order=order)
         R[:, m] = Yf - Df @ np.linalg.lstsq(Df, Yf, rcond=None)[0]
