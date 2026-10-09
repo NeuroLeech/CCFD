@@ -264,12 +264,57 @@ def build(metric="spearman", mask_kind="glasser"):
     print(f"  wrote {FCDIR}/{tag}_{metric}fc.npy  ({nV} vertices)")
 
 
+BANDS = ((0.002, 0.01), (0.01, 0.03), (0.03, 0.08), (0.08, 0.2), (0.2, 0.775))
+
+
+def band_tag(lo, hi):
+    return f"{lo:g}-{hi:g}Hz"
+
+
+def build_bands(bands=BANDS, metric="spearman", mask_kind="glasser"):
+    """Group FC within each frequency band, from the same unfiltered runs and vertices as
+    build(): each run filtered by bandpass.apply (the filter the model side gets), then
+    ranked, correlated and Fisher-z averaged. Written to results/fc/nobp/bands/."""
+    from scipy.stats import rankdata
+    import bandpass
+    import fc_group_rbc as fg
+    runs, pinned = cohort()
+    tag0 = f"group-RBCNKI{len(runs)}nobp_hemi-L_space-{fg.SPACE}_mask-{mask_kind}"
+    idx = np.load(os.path.join(FCDIR, f"{tag0}_vertices.npy"))
+    nV = len(idx)
+    acc = {b: np.zeros((nV, nV), np.float32) for b in bands}
+    t0 = time.time()
+    for k, r in enumerate(runs, 1):
+        z = np.load(cache_path(r))
+        X, tr = z["X"][idx].astype(np.float64), float(z["tr"])
+        for b in bands:
+            Y = bandpass.apply(X.T, tr, b[0], b[1]).T
+            Z = rankdata(Y, axis=1).astype(np.float32) if metric == "spearman" \
+                else Y.astype(np.float32)
+            Z -= Z.mean(1, keepdims=True)
+            Z /= np.maximum(Z.std(1, keepdims=True), 1e-30)
+            S = (Z @ Z.T) / Z.shape[1]
+            np.clip(S, -0.9999, 0.9999, out=S)
+            acc[b] += np.arctanh(S)
+        if k % 10 == 0:
+            print(f"  {k}/{len(runs)}  [{(time.time()-t0)/60:.0f} min]", flush=True)
+    out = os.path.join(FCDIR, "bands")
+    os.makedirs(out, exist_ok=True)
+    for b in bands:
+        FC = np.tanh(acc[b] / len(runs)); np.fill_diagonal(FC, 1.0)
+        stem = f"{tag0}_band-{band_tag(*b)}"
+        np.save(os.path.join(out, f"{stem}_{metric}fc.npy"), FC.astype(np.float32))
+        np.save(os.path.join(out, f"{stem}_vertices.npy"), idx)
+        print(f"  wrote bands/{stem}_{metric}fc.npy", flush=True)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--validate", action="store_true")
     ap.add_argument("--process", action="store_true")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--build", action="store_true")
+    ap.add_argument("--build-bands", action="store_true", dest="build_bands")
     a = ap.parse_args()
     if a.validate:
         validate()
@@ -277,3 +322,5 @@ if __name__ == "__main__":
         process_all(a.limit)
     if a.build:
         build()
+    if a.build_bands:
+        build_bands()
