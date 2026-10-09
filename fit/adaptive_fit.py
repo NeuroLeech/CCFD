@@ -174,11 +174,14 @@ class AdaptiveFit(tf.Fit):
         z0 = (e / e.norm().clamp_min(1e-20)) @ self.y
         return (z0, z0, None) if parts else z0
 
-    def realised(self, G, seeds=(0, 1), seconds=None, k=None):
-        """Full sheet, fresh drive seeds, the repo's scorer: the authoritative number."""
+    def realised(self, G, seeds=(0, 1), seconds=None, k=None, pool=False):
+        """Full sheet, fresh drive seeds, the repo's scorer: the authoritative number.
+        pool=True also averages the draws' edge vectors (the all-vertex equivalent of
+        pooling covariances, as corr_score does) and prints the pooled score after each
+        draw; it returns (mean, sd, pooled)."""
         from fc_score import _rank_z
         k = self.k_tau()[0] if k is None else k
-        out = []
+        out, esum = [], None
         for sd in seeds:
             gen = torch.Generator(device=self.cdev).manual_seed(10_000 + sd)
             with torch.no_grad():
@@ -203,7 +206,15 @@ class AdaptiveFit(tf.Fit):
             cols = np.asarray(self.t.cols)
             Z, flat = _rank_z(np.ascontiguousarray(np.asarray(Y[:, cols], np.float64).T),
                               rank=True)
-            out.append(float(self.t._prep(self.t.model_edges(Z=Z, flat=flat)[0]) @ self.t.y))
+            ev = self.t.model_edges(Z=Z, flat=flat)[0]
+            out.append(float(self.t._prep(ev) @ self.t.y))
+            if pool:
+                esum = np.asarray(ev, np.float64) if esum is None else esum + ev
+                pooled = float(self.t._prep(esum / len(out)) @ self.t.y)
+                print(f"    draw {sd}: {out[-1]:+.4f}   pooled over {len(out)} {pooled:+.4f}",
+                      flush=True)
+        if pool:
+            return float(np.mean(out)), float(np.std(out)), pooled
         return float(np.mean(out)), float(np.std(out))
 
 
@@ -246,6 +257,8 @@ def main():
                     help="spatially smooth the observable by this FWHM (mm, geodesic on the "
                          "midthickness) in the surrogate and the realised score, as the "
                          "target's 6 mm")
+    ap.add_argument("--pool", action="store_true",
+                    help="with --iters 0: score the starting drive over --eval-draws, pooled")
     ap.add_argument("--tag", default="")
     a = ap.parse_args()
 
@@ -305,6 +318,11 @@ def main():
     print(f"  envelope solve's own realised score (linear medium, frame-level square): "
           f"{ref['env_sim']:+.4f}", flush=True)
     seeds0 = tuple(range(a.eval_draws))
+    if a.pool:
+        m, s_, p = ev.realised(G, seeds=seeds0, pool=True)
+        print(f"  {a.S_from or a.ref}: per draw {m:+.4f} +- {s_:.4f}, pooled over "
+              f"{len(seeds0)} {p:+.4f}", flush=True)
+        return
     obs = "frame-squared" if fit.decimate == "snapshot" else "step-level"
     if a.k == 0 and not a.learn_adapt:
         m0, s0 = ev.realised(G, seeds=seeds0)
