@@ -423,6 +423,10 @@ def main():
                          "original; folds content above the frame Nyquist), 'mean' averages "
                          "over the frame's steps. Applies to the impulse responses and to "
                          "every realisation alike; see fluid.run")
+    ap.add_argument("--maps-median-match", action="store_true", dest="maps_median_match",
+                    help="rescale steps per frame and base damping so the map-graded medium's "
+                         "MEDIAN speed and decay equal the flat medium's at the same "
+                         "--spread-mm-s/--decay-s, leaving only the regional grading")
     ap.add_argument("--map-clip", default="none", dest="map_clip",
                     choices=("none", "iqr", "tukey", "sd2"),
                     help="clip the z-scored cortical maps' tails before grading the "
@@ -597,6 +601,29 @@ def main():
               f"(COEF_LIM {_fl.COEF_LIM})")
     if a.damp is not None:
         x[0] = np.log10(a.damp)
+    if a.maps_median_match and a.maps_scale != 0:
+        # The maps change the OVERALL medium as well as grading it: dt is CFL-locked to the
+        # fastest vertex, so a graded medium travels less per step at its median than the flat
+        # one does, and exp(b.M) moves the median damping. Rescale the clock - steps per frame
+        # and the base per-step damping - so the MEDIAN vertex travels and decays per second
+        # as the flat medium of the same --spread-mm-s/--decay-s would. Then the regional
+        # grading is the only difference from that flat medium.
+        import fluid as _fl
+        xf = np.array(x, float); xf[4:10] = 0.0
+        pf, save_f, _ = bo_step.unpack(xf, c)
+        pm, _, _ = bo_step.unpack(x, c); pm["map_clip"] = a.map_clip
+        dt_f = _fl.build(c, pf)[1]
+        cm, sgm = _fl.fields(c, pm)
+        dt_m = _fl.build(c, pm)[1]
+        r_c = float(np.median(cm) * dt_m / dt_f)            # median distance per step, ratio
+        m_s = float(np.median(sgm) * dt_m / 10 ** x[0])     # median damping multiplier
+        save_m = int(round(save_f / r_c))
+        d_m = 10 ** x[0] * save_f / (save_m * m_s)
+        print(f"  maps median-matched: median speed per step x{r_c:.3f} and damping x{m_s:.3f} "
+              f"of the flat medium's; save {save_f} -> {save_m} steps/frame, base damping "
+              f"{10**x[0]:.3e} -> {d_m:.3e} per step (median speed off by "
+              f"{save_m * r_c / save_f - 1:+.1%} from rounding)", flush=True)
+        x[3], x[0] = np.log10(save_m), np.log10(d_m)
     p, save, _ = bo_step.unpack(x, c)
     p["map_clip"] = a.map_clip
     p["decimate"] = a.decimate
