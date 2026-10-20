@@ -112,6 +112,48 @@ def keep_tag(keep):
     return f"_keep{k.size}h{hashlib.sha1(k.tobytes()).hexdigest()[:10]}"
 
 
+def impulse_series(s, dt, g, H, profile, nsteps, save, mean=False, keep=None):
+    """One piece's response to ONE FRAME of drive, read out frame by frame. (nframes, nV).
+
+    The impulse is injected exactly as every realisation injects a frame of drive -
+    1/save of the profile on each of the frame's `save` steps (score_realisation repeats
+    each frame's amplitude over its steps) - and read exactly as fluid.run reads the field:
+    after each step that opens a frame, as a snapshot or, under decimate="mean", the
+    average over the steps since the last one. A frame-constant drive convolved with this
+    is then what the integrator produces, at every frequency up to the frame Nyquist.
+
+    It used to set the whole profile down as initial depth in one step. A piece-sized bump
+    released at once sloshes faster than a frame, and at a coarse clock that ringing lands
+    in every band: at save 12 (the 3x medium) under decimate="mean" the old response
+    correlated r = 0.80-0.88 with a directly driven run across 0.01-0.085 Hz with 15-27%
+    too much amplitude, and r = 0.22 at 3 Hz; this one gives r >= 0.995 from 0.01 to 3 Hz.
+    At save 4 the two agreed to r >= 0.998 below 0.08 Hz, so older slow-clock solves were
+    not materially affected."""
+    prof = np.asarray(profile, np.float32) / np.float32(save)
+    h = np.zeros(prof.shape, np.float32)
+    ue = np.zeros(s.nE, np.float32)
+    kv = keep
+    acc = np.zeros(prof.shape if kv is None else (len(kv),), np.float32) if mean else None
+    fr = []
+    for n in range(nsteps):
+        if n < save:
+            h += prof
+        ue, h = s.step(ue, h, np.float32(dt), g, H)
+        if mean:
+            acc += (h if kv is None else h[kv])
+        if n % save == 0:
+            if mean:
+                # every frame divides by save, frame 0 included. fluid.run divides its
+                # FIRST frame by 1, but that is the run's own start-up, not part of the
+                # response: a drive frame m >= 1 is first seen by a frame averaging save
+                # steps of which only the last carries its injection, and it is that
+                # shift-invariant reading the response has to give
+                fr.append(acc / save); acc = np.zeros_like(acc)
+            else:
+                fr.append((h if kv is None else h[kv]).copy())
+    return np.asarray(fr)
+
+
 def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=None,
                       verbose=True, dt=None, coupling=None, workers=0, cache=True,
                       keep=None):
@@ -163,7 +205,9 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
            f"_spg{p.get('sponge_scale', 1.0):.4g}_a{np.round(p.get('a', 0), 3)}"
            f"_b{np.round(p.get('b', 0), 3)}{mtag}_{len(regions)}_{nsteps}_{save}"
            f"{ptag}{dtag}{ctag}{ktag}")
-    cache_f = os.path.join(CACHE, "impulse_" + key.replace(" ", "") + ".npy")
+    # "_box": responses to one frame of drive (impulse_series). The old all-at-once
+    # responses on disk carry no tag, so none of them can be read back as one of these.
+    cache_f = os.path.join(CACHE, "impulse_" + key.replace(" ", "") + "_box.npy")
     # `cache=False` for medium SEARCHES. The key carries a and b, so every candidate is a
     # miss, and one 47-piece set is 1.79 GB - a few dozen candidates fill the disk.
     if cache and os.path.exists(cache_f):
@@ -184,23 +228,11 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
             # term would carry piece k's tail into piece k+1
             if s.coupling is not None:
                 s.coupling.reset()
-            h = profiles[k].astype(np.float32).copy()
-            ue = np.zeros(s.nE, np.float32)
-            fr = [(h if kv is None else h[kv]).copy()]
-            mean = p.get("decimate", "snapshot") == "mean"   # see fluid.run
-            acc = np.zeros_like(fr[0]) if mean else None
-            for n in range(1, nsteps):
-                ue, h = s.step(ue, h, np.float32(dt), g, H)
-                if mean:
-                    acc += (h if kv is None else h[kv])
-                if n % save == 0:
-                    if mean:
-                        fr.append(acc / save); acc = np.zeros_like(acc)
-                    else:
-                        fr.append((h if kv is None else h[kv]).copy())
-            out.append(np.asarray(fr))
+            fr = impulse_series(s, dt, g, H, profiles[k], nsteps, save,
+                                p.get("decimate", "snapshot") == "mean", kv)
+            out.append(fr)
             if verbose:
-                print(f"  impulse {k:3d}: peak {np.abs(fr[0]).max():.3f} -> "
+                print(f"  impulse {k:3d}: peak {np.abs(fr).max():.3f} -> "
                       f"end {np.abs(fr[-1]).max():.2e}", flush=True)
         out = np.asarray(out)
     if cache:
@@ -224,22 +256,9 @@ def _imp_one(args):
     # this is the same hazard as the serial loop, not merely defensive
     if s.coupling is not None:
         s.coupling.reset()
-    kv = _W_IMP.get("keep")
-    h = _W_IMP["profiles"][k].astype(np.float32).copy()
-    ue = np.zeros(s.nE, np.float32)
-    fr = [(h if kv is None else h[kv]).copy()]
-    mean = _W_IMP["p"].get("decimate", "snapshot") == "mean"   # see fluid.run
-    acc = np.zeros_like(fr[0]) if mean else None
-    for n in range(1, nsteps):
-        ue, h = s.step(ue, h, np.float32(dt), g, H)
-        if mean:
-            acc += (h if kv is None else h[kv])
-        if n % save == 0:
-            if mean:
-                fr.append(acc / save); acc = np.zeros_like(acc)
-            else:
-                fr.append((h if kv is None else h[kv]).copy())
-    return np.asarray(fr)
+    return impulse_series(s, dt, g, H, _W_IMP["profiles"][k], nsteps, save,
+                          _W_IMP["p"].get("decimate", "snapshot") == "mean",
+                          _W_IMP.get("keep"))
 
 
 def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers, verbose,
