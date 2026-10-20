@@ -968,6 +968,93 @@ def cmd_steer(a, c, S, run):
     _plot_steer(path.replace(".npz", ".png"), res, pred, c, run, cen, patches)
 
 
+# ============================================================ F: steering by pathway
+
+# the validated sequential blue ramp (dataviz reference palette), light -> dark
+BLUES = ("#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+         "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b")
+STEER = {"direction": ("along+", "along-", "across+", "across-"),
+         "radiate / converge": ("expand+", "expand-")}
+
+
+def pathway_shares(M, groups, names):
+    """Share of each steering mode's power carried by each pathway's pieces.
+    -> dict mode -> (len(names),) shares summing to 1."""
+    out = {}
+    G = np.stack([np.asarray([g == nm for g in groups], float) for nm in names])
+    for nm in READOUTS:
+        ev, X = np.linalg.eigh(np.asarray(M[nm], complex))
+        for sgn, j in (("+", -1), ("-", 0)):
+            w = np.abs(X[:, j]) ** 2
+            out[nm + sgn] = G @ w / w.sum()
+    return out
+
+
+def cross_sweep(M, groups, cen, P):
+    """For the along+ mode: the share of its pairwise sweep weight that comes from pairs
+    of pieces in DIFFERENT pathways - how much steering needs timing across pathways."""
+    ev, X = np.linalg.eigh(np.asarray(M["along"], complex))
+    x = X[:, -1]
+    w = np.abs(x) ** 2
+    top = np.argsort(w)[::-1][:12]
+    s = (cen - P["centre"]) @ P["e1"]
+    tot = cross = 0.0
+    for a_ in range(len(top)):
+        for b_ in range(a_ + 1, len(top)):
+            k, l = top[a_], top[b_]
+            if abs(s[l] - s[k]) < 3:
+                continue
+            ww = w[k] * w[l] * abs(np.sin(np.angle(x[k]) - np.angle(x[l])))
+            tot += ww
+            cross += ww * (groups[k] != groups[l])
+    return cross / tot if tot else np.nan
+
+
+def cmd_steermap(a, c, S, run):
+    K = len(run["tags"])
+    z = np.load(os.path.join(RESULTS, f"interplay_steer_{run['name']}.npz"),
+                allow_pickle=True)
+    q = next(r for r in z["res"] if "M" in r["rows"][0])
+    rows, hz = q["rows"], q["hz"]
+    D, cen, pairs = geometry(c, S, run["labels"], K)
+    patches = make_patches(c, S, run, D, cen, pairs, a.radius, a.grid, a.reach)
+    groups = waves.pathway_groups(c, run["labels"], K)
+    names = sorted(set(groups) - {"?"})
+    # each patch's home: the pathway of the nearest driven piece to its centre
+    home = []
+    for P in patches:
+        v = int(np.argmin(np.linalg.norm(S.V - P["centre"], axis=1)))
+        home.append(groups[int(np.argmin(D[:, v]))])
+    shares = [pathway_shares(r["M"], groups, names) for r in rows]
+    xs = np.array([cross_sweep(r["M"], groups, cen, P) for r, P in zip(rows, patches)])
+    print(f"\n  {len(patches)} patches, steering modes at {hz:.4f} Hz, {len(names)} pathways")
+    print(f"  along+ sweeps: share of their timing weight between DIFFERENT pathways, "
+          f"median {np.nanmedian(xs):.2f} (IQR {np.nanpercentile(xs, 25):.2f}-"
+          f"{np.nanpercentile(xs, 75):.2f})")
+    mats = {}
+    for title, modes in STEER.items():
+        Mx = np.zeros((len(names), len(names)))
+        for hi, h in enumerate(names):
+            idx = [n for n, hh in enumerate(home) if hh == h]
+            if idx:
+                Mx[hi] = np.mean([np.mean([shares[n][m] for m in modes], 0) for n in idx], 0)
+        mats[title] = Mx
+        print(f"\n  {title}: share of the steering modes by pathway (rows: where the patch "
+              f"is; columns: whose inputs steer it)")
+        print("  " + " " * 15 + " ".join(f"{nm[:9]:>9s}" for nm in names) + "   own")
+        for hi, h in enumerate(names):
+            n = sum(hh == h for hh in home)
+            print(f"  {h[:13]:>13s} " + " ".join(f"{v:9.2f}" for v in Mx[hi])
+                  + f"   {Mx[hi, hi]:.2f}  ({n} patches)")
+    path = os.path.join(RESULTS, f"interplay_steermap_{run['name']}.npz")
+    np.savez(path, shares=np.array(shares, object), home=np.array(home, object),
+             names=np.array(names, object), mats=np.array([mats], object),
+             cross_sweep=xs, centres=np.array([P["centre"] for P in patches]), hz=hz)
+    print(f"\n  wrote {path}")
+    _plot_steermap(path.replace(".npz", ".png"), c, run, patches, shares, names, groups,
+                   mats, hz)
+
+
 # ============================================================ pictures
 
 def _plot_pairs(path, res, lags, hz):
@@ -1192,9 +1279,87 @@ def _plot_steer(path, res, pred, c, run, cen, patches):
     print(f"  wrote {path}")
 
 
+def _plot_steermap(path, c, run, patches, shares, names, groups, mats, hz):
+    """Small multiples, one row per pathway: where on cortex its inputs carry the
+    steering. One sequential hue, so no two of eight categorical colours ever have to be
+    told apart on a map - which the validated palette cannot guarantee past three."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.tri import Triangulation
+    from render_regimes import _proj
+    cmap = LinearSegmentedColormap.from_list("blues", BLUES)
+    ink, muted, surf, terr = "#1a1a19", "#6b6a64", "#f4f3ef", "#d8d6cf"
+    views = _proj(c.V, c.F, views=((8, 180, "lateral"), (8, 0, "medial"),
+                                   (-90, 180, "ventral")))
+    lab = np.asarray(run["labels"])
+    cv = [int(np.argmin(np.linalg.norm(c.V - P["centre"], axis=1))) for P in patches]
+    cols = list(STEER)
+    fig = plt.figure(figsize=(3.1 * len(views) * len(cols) + 1, 1.9 * len(names) + 1.2),
+                     facecolor="white")
+    gs = fig.add_gridspec(len(names), len(views) * len(cols), wspace=0.02, hspace=0.08)
+    for gi, g in enumerate(names):
+        own = np.isin(lab, [k for k, gg in enumerate(groups) if gg == g])
+        for ci, title in enumerate(cols):
+            v = np.array([np.mean([sh[m][gi] for m in STEER[title]]) for sh in shares])
+            for vi, (xy, vis, vname) in enumerate(views):
+                ax = fig.add_subplot(gs[gi, ci * len(views) + vi])
+                keep = vis[c.F].all(1)
+                tri = Triangulation(xy[:, 0], xy[:, 1], c.F[keep])
+                ax.tripcolor(tri, own.astype(float), cmap=LinearSegmentedColormap.from_list(
+                    "t", (surf, terr)), vmin=0, vmax=1, shading="flat", rasterized=True)
+                m = np.array([vis[q] for q in cv])
+                o = np.argsort(v[m])
+                ax.scatter(xy[np.array(cv)[m][o], 0], xy[np.array(cv)[m][o], 1],
+                           c=v[m][o], cmap=cmap, vmin=0, vmax=1, s=14,
+                           edgecolors="white", linewidths=0.6)
+                ax.set_xlim(xy[:, 0].min(), xy[:, 0].max())
+                ax.set_ylim(xy[:, 1].min(), xy[:, 1].max())
+                ax.set_aspect("equal"); ax.axis("off")
+                if gi == 0:
+                    ax.set_title(f"{title}\n{vname}" if vi == 1 else vname, fontsize=8,
+                                 color=ink)
+                if ci == 0 and vi == 0:
+                    ax.text(-0.04, 0.5, g, transform=ax.transAxes, ha="right",
+                            va="center", fontsize=8, color=ink)
+    cax = fig.add_axes([0.35, 0.03, 0.3, 0.008])
+    sm = matplotlib.cm.ScalarMappable(cmap=cmap, norm=matplotlib.colors.Normalize(0, 1))
+    cb = fig.colorbar(sm, cax=cax, orientation="horizontal")
+    cb.set_label("share of the patch's steering-mode power carried by this pathway "
+                 "(grey: its own territory)", fontsize=8, color=muted)
+    cb.ax.tick_params(labelsize=7, colors=muted)
+    fig.suptitle(f"who steers where, {hz:.3f} Hz", fontsize=10, color=ink)
+    fig.savefig(path, dpi=130, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {path}")
+    # the matrix, annotated: rows where the patch is, columns whose inputs steer it
+    fig, axs = plt.subplots(1, len(mats), figsize=(5.6 * len(mats), 5.0), facecolor="white")
+    for ax, (title, Mx) in zip(np.atleast_1d(axs), mats.items()):
+        ax.imshow(Mx, cmap=cmap, vmin=0, vmax=max(0.5, Mx.max()))
+        for i in range(len(names)):
+            for j in range(len(names)):
+                ax.text(j, i, f"{Mx[i, j]:.2f}", ha="center", va="center", fontsize=7,
+                        color="white" if Mx[i, j] > 0.3 else ink)
+        ax.set_xticks(range(len(names))); ax.set_yticks(range(len(names)))
+        ax.set_xticklabels(names, rotation=45, ha="right", fontsize=7, color=ink)
+        ax.set_yticklabels(names, fontsize=7, color=ink)
+        ax.set_xlabel("whose inputs carry the steering", fontsize=8, color=muted)
+        ax.set_ylabel("where the patch is (nearest pathway)", fontsize=8, color=muted)
+        ax.set_title(title, fontsize=9, color=ink)
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+    fig.tight_layout()
+    p2 = path.replace(".png", "_matrix.png")
+    fig.savefig(p2, dpi=130, facecolor="white")
+    plt.close(fig)
+    print(f"  wrote {p2}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types", "steer"))
+    ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types", "steer",
+                                    "steermap"))
     ap.add_argument("--tag", default="nobp_sm6_s3_box")
     ap.add_argument("--hz", default="",
                     help="analysis frequencies; snapped to the nearest solved bins. Default: "
@@ -1229,9 +1394,10 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     run = waves.load_run(c, a.tag)
     S = waves.Surface(c)
-    if a.cmd in ("frames", "types", "steer"):
+    if a.cmd in ("frames", "types", "steer", "steermap"):
         print(f"  {run['name']}: {len(run['tags'])} pieces")
-        dict(frames=cmd_frames, types=cmd_types, steer=cmd_steer)[a.cmd](a, c, S, run)
+        dict(frames=cmd_frames, types=cmd_types, steer=cmd_steer,
+             steermap=cmd_steermap)[a.cmd](a, c, S, run)
         return
     hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
     want = ([float(v) for v in a.hz.split(",")] if a.hz else np.geomspace(0.005, 0.5, 14))
