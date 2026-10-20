@@ -38,3 +38,7 @@ data/*.fib.gz
 
 # Scratch notebook: 1.7 MB of stored cell output, and nothing else reads it.
 *.ipynb
+
+# The data bundle for remote runs (results/fc/nobp, the input profiles, small caches),
+# hosted on Dropbox rather than in git: ~1.9 GB.
+ccfd_remote_data.zip

@@ -63,7 +63,8 @@ def rescore_torch(tag, ref_tag, seconds, draws, device="mps"):
     t = fc_score.default_target(c, verbose=True)
     fit = Fit(ref, c, t, seconds, device=device, amp=float(z["amp"]),
               nl_flux=float(z["nl_flux"]), nl_adv=float(z["nl_adv"]),
-              Ld=float(z["Ld"]), maps_scale=float(z["maps_scale"]))
+              Ld=float(z["Ld"]), maps_scale=float(z["maps_scale"]),
+              speed=int(z["speed"]) if "speed" in z.files else 1)
     learned = restore_medium(fit, z)
     with torch.no_grad():
         H = fit.medium()[0] if learned else fit.Hf
@@ -144,8 +145,14 @@ def main():
 
     p, save, _ = bo_step.unpack(z["x"], c)
     p["map_clip"] = str(z["map_clip"]) if "map_clip" in z else "none"
+    p["decimate"] = str(z["decimate"]) if "decimate" in z else "snapshot"
     P = np.asarray(z["profiles"], np.float32)
-    S, idx = z["S"], z["idx"].astype(int)
+    idx = z["idx"].astype(int)
+    # above 512 channels realise takes the factored path; factor ONCE rather than per draw
+    # (135 eigendecompositions of a 1,880-square matrix each time), and never hold the full S
+    big = xspec.solution_K(z) > 512
+    fac = xspec.load_factors(z) if big else None
+    S = None if big else xspec.load_S(z)
     ref_frames = int(z["ref_frames"])
     frame_s = float(z["frame_s"])
     band = tuple(z["band"]) if "band" in z and np.isfinite(z["band"]).all() else None
@@ -178,14 +185,16 @@ def main():
     sims, gaps, rks = [], [], []
     pool = res = None
     if a.workers > 1 and a.draws > 1:
-        rest = [xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d)
+        rest = [xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d,
+                              factors=fac)
                 for d in range(1, a.draws)]
         pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
                                           band=band, frame_s=frame_s if band else None,
                                           segment=seg)
         print(f"  draws 2-{a.draws} over {min(a.workers, len(rest))} workers", flush=True)
     for d in range(1 if pool is not None else a.draws):
-        A = xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d)
+        A = xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d,
+                              factors=fac)
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, kernel=kern,
                                     band=band, frame_s=frame_s if band else None,
                                     segment=seg)
@@ -230,7 +239,11 @@ def main():
     rec[f"{int(round(a.seconds))}s_{a.draws}d"] = dict(
         sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
         gap=float(np.mean(gaps)), field_rank=float(np.mean(rks)),
-        frames=int(frames), draws=int(a.draws), seconds=float(a.seconds))
+        frames=int(frames), draws=int(a.draws), seconds=float(a.seconds),
+        # which scoring pipeline produced this. Realised scores before bandpass.apply's
+        # mirror padding (5be967f) are depressed by an edge artefact that grows with
+        # optimisation, so they are not comparable with later ones; runs.py marks them.
+        bandpass_pad="mirror", scored_at=time.strftime("%Y-%m-%d %H:%M"))
     json.dump(rec, open(sp, "w"), indent=2, sort_keys=True)
     print(f"  wrote {os.path.relpath(sp, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))}")
 

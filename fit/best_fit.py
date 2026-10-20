@@ -17,7 +17,7 @@ from mesh_cache import load_cortex
 import fc_score
 from fc_moran import MoranMatch
 from paths import RESULTS
-import xspec, bo_step, subparcels, regimes, units
+import xspec, bo_step, subparcels, regimes, units, surface_smooth
 
 # the bo_step winner, in per-step units: damping, rotation, boundary absorption, cadence,
 # then the six speed/damping map coefficients
@@ -341,6 +341,19 @@ def main():
                          "driven AREA matches the taper version and only the shape "
                          "differs. Without it a wide kernel drives far more cortex and "
                          "coverage is confounded with profile shape")
+    ap.add_argument("--smooth-fwhm", type=float, default=0.0, dest="smooth_fwhm",
+                    help="spatially smooth the observable by this FWHM, mm, geodesic on the "
+                         "midthickness (surface_smooth), as the target's preprocessing did - "
+                         "6 for any RBC/XCP-D target. Linear, so it is folded into H: each "
+                         "solve vertex's row becomes the kernel-weighted sum of the rows it "
+                         "touches. Applied to the realised frames the same way")
+    ap.add_argument("--fit-bands", default="", dest="fit_bands",
+                    help="fit FC WITHIN frequency bands instead of the whole spectrum: "
+                         "comma-separated LO-HI in Hz (or 'all' for the unfiltered FC as a "
+                         "term of its own), each matched to its own band FC from "
+                         "--band-dir (targets/rbc_nobp.py --build-bands), equally weighted. "
+                         "Factor solver only")
+    ap.add_argument("--band-dir", default="results/fc/nobp/bands", dest="band_dir")
     ap.add_argument("--fc-path", default="", dest="fc_path",
                     help="pin the target FC matrix instead of taking the newest one "
                          "matching fc_score's glob. Needed for anything in results/fc/"
@@ -390,6 +403,14 @@ def main():
                     help="rank of L for --solver factor")
     ap.add_argument("--maxfun", type=int, default=20000,
                     help="evaluation budget for --solver factor")
+    ap.add_argument("--prank-mu", type=float, default=0.0, dest="prank_mu",
+                    help="weight on xspec.prank_ratio DURING the --solver factor solve, in "
+                         "the same units as the fit it is added to: the objective becomes "
+                         "rho + mu * PR(sum_f w_f S_f)/K, so mu is what one unit of "
+                         "normalised participation ratio is worth in Spearman. The "
+                         "realisability term --maxfun has been standing in for; unlike "
+                         "prank_reg through family_member it shapes the whole path rather "
+                         "than walking back from the argmax")
     ap.add_argument("--shells", type=int, default=1,
                     help="split each piece into this many concentric shells by erosion "
                          "depth, so the solve chooses the drive's RADIAL shape instead of "
@@ -397,6 +418,15 @@ def main():
                          "radial room: pieces are 2-4 rings deep at --split 40 and 2-6 "
                          "at --split 1, and a shell count past the ring count collapses "
                          "back to one-hot")
+    ap.add_argument("--decimate", default="snapshot", choices=("snapshot", "mean"),
+                    help="how steps become frames: 'snapshot' keeps the last step (the "
+                         "original; folds content above the frame Nyquist), 'mean' averages "
+                         "over the frame's steps. Applies to the impulse responses and to "
+                         "every realisation alike; see fluid.run")
+    ap.add_argument("--maps-median-match", action="store_true", dest="maps_median_match",
+                    help="rescale steps per frame and base damping so the map-graded medium's "
+                         "MEDIAN speed and decay equal the flat medium's at the same "
+                         "--spread-mm-s/--decay-s, leaving only the regional grading")
     ap.add_argument("--map-clip", default="none", dest="map_clip",
                     choices=("none", "iqr", "tukey", "sd2"),
                     help="clip the z-scored cortical maps' tails before grading the "
@@ -571,8 +601,35 @@ def main():
               f"(COEF_LIM {_fl.COEF_LIM})")
     if a.damp is not None:
         x[0] = np.log10(a.damp)
+    if a.maps_median_match and a.maps_scale != 0:
+        # The maps change the OVERALL medium as well as grading it: dt is CFL-locked to the
+        # fastest vertex, so a graded medium travels less per step at its median than the flat
+        # one does, and exp(b.M) moves the median damping. Rescale the clock - steps per frame
+        # and the base per-step damping - so the MEDIAN vertex travels and decays per second
+        # as the flat medium of the same --spread-mm-s/--decay-s would. Then the regional
+        # grading is the only difference from that flat medium.
+        import fluid as _fl
+        xf = np.array(x, float); xf[4:10] = 0.0
+        pf, save_f, _ = bo_step.unpack(xf, c)
+        pm, _, _ = bo_step.unpack(x, c); pm["map_clip"] = a.map_clip
+        dt_f = _fl.build(c, pf)[1]
+        cm, sgm = _fl.fields(c, pm)
+        dt_m = _fl.build(c, pm)[1]
+        r_c = float(np.median(cm) * dt_m / dt_f)            # median distance per step, ratio
+        m_s = float(np.median(sgm) * dt_m / 10 ** x[0])     # median damping multiplier
+        save_m = int(round(save_f / r_c))
+        d_m = 10 ** x[0] * save_f / (save_m * m_s)
+        print(f"  maps median-matched: median speed per step x{r_c:.3f} and damping x{m_s:.3f} "
+              f"of the flat medium's; save {save_f} -> {save_m} steps/frame, base damping "
+              f"{10**x[0]:.3e} -> {d_m:.3e} per step (median speed off by "
+              f"{save_m * r_c / save_f - 1:+.1%} from rounding)", flush=True)
+        x[3], x[0] = np.log10(save_m), np.log10(d_m)
     p, save, _ = bo_step.unpack(x, c)
     p["map_clip"] = a.map_clip
+    p["decimate"] = a.decimate
+    if a.decimate != "snapshot":
+        print(f"  frames are the {a.decimate} of the field over each frame's {save} steps, "
+              f"not a snapshot (anti-alias; impulses and realisation alike)")
     if a.map_clip != "none":
         _cf, _sg = bo_step.fl.fields(c, p)
         _H = _cf ** 2
@@ -680,22 +737,44 @@ def main():
         # makes the response ring for ten times as many frames.
         cols_need = t.cols[sub] if val is None else np.concatenate([t.cols[sub],
                                                                     t.cols[val]])
-        keep, inv = np.unique(np.asarray(cols_need, np.int64), return_inverse=True)
-        sub_k = inv[:len(sub)]                       # the same vertices, re-indexed
-        val_k = None if val is None else inv[len(sub):]
+        Ksm = None
+        if a.smooth_fwhm > 0:
+            # smoothing needs every vertex the kernels of the read vertices touch
+            Kfull = surface_smooth.smoothing_matrix(c, a.smooth_fwhm)
+            Kr = Kfull[np.asarray(cols_need, np.int64)]
+            keep = np.unique(np.concatenate([np.asarray(cols_need, np.int64), Kr.indices]))
+            Ksm = Kr[:, keep].tocsr()                 # (n read, n keep)
+            sub_k = np.arange(len(sub))
+            val_k = None if val is None else np.arange(len(sub), len(cols_need))
+        else:
+            keep, inv = np.unique(np.asarray(cols_need, np.int64), return_inverse=True)
+            sub_k = inv[:len(sub)]                   # the same vertices, re-indexed
+            val_k = None if val is None else inv[len(sub):]
         resp = xspec.impulse_responses(c, list(range(len(P))), p, a.impulse_frames * save, save,
                                        profiles=P, verbose=False, coupling=cpl,
                                        workers=a.workers, keep=keep)
-        R = np.pad(resp, ((0, 0), (0, max(0, a.pad - resp.shape[1])), (0, 0)))
-        del resp                                     # the pad already copied it
+        # transfer zero-pads to a.pad inside its FFT, in blocks of channels, so the padded
+        # copy is never formed - at 1,880 channels x 2,000 vertices it would be ~62 GB.
+        npad = max(a.pad, resp.shape[1])
         print(f"  impulse responses over {len(keep)} of {c.nV} vertices "
-              f"({R.nbytes/2**30:.2f} GiB padded, {9374/max(len(keep),1):.1f}x smaller "
+              f"({resp.nbytes/2**30:.2f} GiB, {9374/max(len(keep),1):.1f}x smaller "
               f"than full width)")
-        H, w, idx = xspec.transfer(R, sub_k, a.nfreq, kernel=kern)
-        Hv = (xspec.transfer(R, val_k, a.nfreq, kernel=kern)[0]
-              if val is not None else None)
-        ref_frames, ps, dt = R.shape[1], None, None
-        del R                    # H and Hv are all that is wanted from it
+        if Ksm is not None:
+            Hk, w, idx = xspec.transfer(resp, np.arange(len(keep)), a.nfreq, kernel=kern,
+                                        n=npad)
+            Hs = np.stack([np.asarray(Ksm @ Hk[f]) for f in range(len(idx))]).astype(Hk.dtype)
+            del Hk
+            H = np.ascontiguousarray(Hs[:, sub_k])
+            Hv = np.ascontiguousarray(Hs[:, val_k]) if val is not None else None
+            del Hs
+            print(f"  smoothed {a.smooth_fwhm:g} mm: H read from {len(keep)} vertices onto "
+                  f"{len(cols_need)}", flush=True)
+        else:
+            H, w, idx = xspec.transfer(resp, sub_k, a.nfreq, kernel=kern, n=npad)
+            Hv = (xspec.transfer(resp, val_k, a.nfreq, kernel=kern, n=npad)[0]
+                  if val is not None else None)
+        ref_frames, ps, dt = npad, None, None
+        del resp                 # H and Hv are all that is wanted from it
         if bp is not None:
             # the filter is linear, so like the smoothing kernel it simply multiplies the
             # transfer function - the solve is unchanged and costs nothing extra
@@ -790,6 +869,7 @@ def main():
                                Lw, keep_f, spec, band=bp, frame_s=fs_bp,
                                segment=seg_fr)
     tr = []
+    s_fac = None                 # (factor, trace) when the solve is factored; see the save
     if a.lag_taus:
         import lagged as _lg
         taus = [int(v) for v in a.lag_taus.split(",") if v.strip()]
@@ -812,8 +892,37 @@ def main():
         S, (C, _Ca) = xspec.solve_lagged(H, w, Tgt, E, ph0, iters=a.iters, verbose=True,
                                          wa=a.wa, trace=tr, freq_keep=keep_f)
     elif a.solver == "factor":
-        S, C = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
-                                  trace=tr, log_every=max(1, a.maxfun // 10))
+        bands = None
+        if a.fit_bands:
+            import glob, bandpass
+            bands = []
+            for spec_b in a.fit_bands.split(","):
+                if spec_b.strip() == "all":
+                    # the unfiltered FC itself as one of the terms: band shapes alone leave
+                    # the power mix across bands - which sets the unfiltered FC - free
+                    bands.append((np.ones(len(idx)), Tgt, 1.0 / len(a.fit_bands.split(",")),
+                                  "all"))
+                    continue
+                lo_b, hi_b = (float(v) for v in spec_b.split("-"))
+                hits = glob.glob(os.path.join(a.band_dir,
+                                              f"*_band-{lo_b:g}-{hi_b:g}Hz_spearmanfc.npy"))
+                if len(hits) != 1:
+                    raise SystemExit(f"  no single band FC for {spec_b} in {a.band_dir}")
+                tb = fc_score.FCTarget(c, fc_path=hits[0], centre=a.centre, verbose=False)
+                if not np.array_equal(tb.vertices, t.vertices):
+                    raise SystemExit(f"  {hits[0]} is on different vertices from the target")
+                raw_b = np.asarray(tb.target_fc()[np.ix_(sub, sub)], np.float64)
+                raw_b = (raw_b - raw_b.mean(0, keepdims=True) - raw_b.mean(1, keepdims=True)
+                         + raw_b.mean())          # as `raw` is
+                rb = bandpass.transfer_response(idx, ref_frames, clock["frame_s"], lo_b, hi_b)
+                bands.append((rb, normal_scores(raw_b, iu), 1.0 / len(a.fit_bands.split(",")),
+                              f"{lo_b:g}-{hi_b:g}"))
+            print(f"  fitting FC within {len(bands)} bands: {a.fit_bands} Hz, equal weights",
+                  flush=True)
+        S, C, s_fac = xspec.solve_factor(H, w, Tgt, rank=a.rank, maxfun=a.maxfun,
+                                         trace=tr, log_every=max(1, a.maxfun // 10),
+                                         reg=(xspec.prank_ratio(w) if a.prank_mu else None),
+                                         mu=a.prank_mu, return_factor=True, bands=bands)
     else:
         S, C = xspec.solve(H, w, Tgt, iters=a.iters, verbose=False, nblock=nb,
                            share=a.share_input, trace=tr, freq_keep=keep_f, spec=spec,
@@ -865,11 +974,14 @@ def main():
     # medium, or coupling - keeps every draw here: the callback is a closure, so it does
     # not pickle.
     pool = res = None
+    Kscore = (surface_smooth.smoothing_matrix(c, a.smooth_fwhm) if a.smooth_fwhm > 0
+              else None)
     if a.workers > 1 and a.draws > 1 and nb == 1 and cpl is None:
         rest = [xspec.realise(S, idx, a.frames, ref_frames=ref_frames, seed=1000 + d)
                 for d in range(1, a.draws)]
         pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
-                                          band=bp, frame_s=fs_bp, segment=seg_fr)
+                                          band=bp, frame_s=fs_bp, segment=seg_fr,
+                                          smooth=Kscore)
         print(f"  draws 2-{a.draws} scored over {min(a.workers, len(rest))} workers",
               flush=True)
     for d in range(1 if pool is not None else a.draws):
@@ -887,7 +999,7 @@ def main():
                 c, dr, p, nsteps, sv, coupling=cpl))
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P,
                                     run_fn=run_fn, kernel=kern, band=bp, frame_s=fs_bp,
-                                    segment=seg_fr)
+                                    segment=seg_fr, smooth=Kscore)
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
         if "sim_aff" in r:
             affs.append(r["sim_aff"])
@@ -904,7 +1016,19 @@ def main():
         pool.close(); pool.join()
     # pad, ref_frames and the clock go in the file. Without them a reader has to guess
     # what frequency a solved bin is, and piece_power's answer depends on that guess.
-    np.savez(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), S=S, idx=idx, x=x,
+    # A factored solve stores its factor, and drops the full cross-spectrum once K > 512,
+    # where it is 7.6 GB against ~80 MB (xspec.load_S rebuilds it bit for bit). Only if the
+    # factor still reproduces the S in hand: whitening or a later re-solve would change S
+    # without changing it, and then the full array is all there is.
+    if s_fac is not None and not all(
+            np.array_equal(xspec.factor_to_S(s_fac[0][f:f + 1], s_fac[1])[0], S[f])
+            for f in (0, len(S) // 2, len(S) - 1)):
+        print("  S no longer matches the solve's factor; storing the full array")
+        s_fac = None
+    store = dict(S=S) if (s_fac is None or S.shape[1] <= 512) else {}
+    if s_fac is not None:
+        store.update(S_L=s_fac[0], S_tr=s_fac[1])
+    np.savez(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), **store, idx=idx, x=x,
              save=save, labels=labels, tags=np.array(tags, dtype=object),
              pad=a.pad, ref_frames=ref_frames,
              frame_s=(clock["frame_s"] if clock else np.nan),
@@ -915,7 +1039,8 @@ def main():
              maps=np.array(p.get("maps", ()), dtype=object),
              map_a=np.asarray(p.get("a", ()), float),
              map_b=np.asarray(p.get("b", ()), float),
-             map_clip=a.map_clip,
+             map_clip=a.map_clip, decimate=a.decimate, smooth_fwhm=a.smooth_fwhm,
+             fit_bands=a.fit_bands,
              # The realised score, in the file that holds the solve. Without it the only
              # trace of what a run scored is stdout, and a tag whose log is gone cannot be
              # compared against anything without re-realising it - which is how +0.6930

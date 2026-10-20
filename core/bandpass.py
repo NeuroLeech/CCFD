@@ -58,12 +58,50 @@ def response(freqs_hz, frame_s, lo=LO_HZ, hi=HI_HZ, order=ORDER):
     return np.abs(h) ** 2
 
 
-def apply(frames, frame_s, lo=LO_HZ, hi=HI_HZ, order=ORDER):
-    """Filter (T, V) frames along time, zero-phase, the way XCP-D filtered the data."""
+def apply(frames, frame_s, lo=LO_HZ, hi=HI_HZ, order=ORDER, pad="mirror"):
+    """Filter (T, V) frames along time, zero-phase, the way XCP-D filtered the data.
+
+    `pad` is how the record is extended past its ends before filtering, and it is not a
+    detail. sosfiltfilt's own default is ODD padding over ~15 frames: the record is
+    point-reflected about its end value, which continues whatever slope the signal had,
+    and the filter's initial state assumes it sat at that value beforehand. This filter's
+    memory is ~one period of its lowest edge, 620 frames at a TR/4 clock, so 15 frames of
+    padding leaves the transient inside the record. A simulated field starts from rest -
+    zero, flat - so at the START that assumption holds and the padding is harmless; at the
+    END the field is caught mid-swing and is extended as a large excursion that never
+    happened. Measured on one realisation of each solve, scored over the whole 577 s
+    (variance of the last 50 s relative to the middle in brackets):
+
+        filter                     converged      maxfun 400     maxfun 60
+        odd, default (~15)       +0.2659 (2.2x)  +0.3935 (4.2x)  +0.6448 (1.7x)
+        odd, 1240                +0.2568 (4.9x)  +0.3508 (12x)   +0.6207 (3.0x)
+        mirror, 1240             +0.5367 (1.0x)  +0.6325 (1.0x)  +0.6643 (1.3x)
+        multiply by response     +0.5653 (1.0x)  +0.6419 (0.7x)  +0.6640 (1.2x)
+
+    Longer odd padding is WORSE, which is what pins the mechanism: it carries the end slope
+    further. The damage scales with how hard and slowly the field swings, so it bit the
+    converged, frequency-concentrated solves and barely touched early-stopped ones - which
+    is most of what had been read as "converging destroys realisability".
+
+    "mirror" (the default) reflects the record about its ends for two filter memories and
+    filters that, so the extension has the signal's own statistics and no invented slope.
+    It agrees with the frequency-domain multiply on the whole record, and it keeps the
+    filter itself - the XCP-D object - unchanged. "odd" reproduces every number recorded
+    before 2026-10-04."""
     from scipy.signal import sosfiltfilt
     sos = _sos(frame_s, lo, hi, order)
     X = np.asarray(frames, np.float64)
-    return np.ascontiguousarray(sosfiltfilt(sos, X, axis=0), dtype=np.float32)
+    if pad == "odd":
+        Y = sosfiltfilt(sos, X, axis=0)
+    elif pad == "mirror":
+        n = X.shape[0]
+        P = min(2 * edge_frames(frame_s, lo), n)
+        widths = [(P, P)] + [(0, 0)] * (X.ndim - 1)
+        Y = sosfiltfilt(sos, np.pad(X, widths, mode="symmetric"), axis=0,
+                        padtype=None)[P:P + n]
+    else:
+        raise ValueError(f"pad must be 'mirror' or 'odd', not {pad!r}")
+    return np.ascontiguousarray(Y, dtype=np.float32)
 
 
 def transfer_response(idx, ref_frames, frame_s, lo=LO_HZ, hi=HI_HZ, order=ORDER):
@@ -154,6 +192,31 @@ def _segment_selfcheck(frame_s=0.645, seg=28, ntrial=4000, seed=0):
     return ok
 
 
+def edge_frames(frame_s, lo=LO_HZ):
+    """One period of the slowest component the passband keeps, in frames: 620 at TR/4.
+
+    Roughly the filter's memory. _selfcheck discards this many frames at each end before
+    comparing its two filter paths, and `apply` mirror-pads by twice this.
+
+    It was briefly also used to CUT that many frames from both ends of every scored
+    realisation (03d77df), on the reading that sosfiltfilt corrupts both ends. The cut
+    recovered the scores, but the reading was wrong: a one-sided cut showed the damage was
+    at the END only, and the cause was the odd padding described in `apply`. With mirror
+    padding the whole record scores as well as the cut one or better, so the cut is off by
+    default and `trim_edges` remains only to reproduce those numbers."""
+    return int(round(1.0 / (lo * frame_s)))
+
+
+def trim_edges(frames, frame_s, lo=LO_HZ):
+    """Drop `edge_frames` from both ends. Superseded by mirror padding in `apply`; kept to
+    reproduce the numbers scored between 03d77df and the padding fix."""
+    e = edge_frames(frame_s, lo)
+    if 2 * e >= len(frames):
+        raise ValueError(f"record of {len(frames)} frames is shorter than the {2*e} frames "
+                         f"the {lo} Hz edge costs; realise longer or raise the low cutoff")
+    return frames[e:len(frames) - e]
+
+
 def _selfcheck(frame_s=0.16125, n=16384, seed=0):
     """The two paths have to agree, or the solved system is not the scored one."""
     rng = np.random.default_rng(seed)
@@ -166,7 +229,7 @@ def _selfcheck(frame_s=0.16125, n=16384, seed=0):
     # while the frequency-domain multiply wraps them, so the two can only be compared
     # where neither edge treatment reaches - and the trim must leave a series behind,
     # which at 3 periods and a 3,578-frame run it does not.
-    edge = int(round(1.0 / (LO_HZ * frame_s)))
+    edge = edge_frames(frame_s)
     a, b = td[edge:-edge], fd[edge:-edge]
     r = float(np.corrcoef(a.ravel(), b.ravel())[0, 1])
     rel = float(np.abs(a - b).mean() / np.abs(b).std())

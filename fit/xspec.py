@@ -155,6 +155,10 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
     ktag = "" if keep is None else keep_tag(keep)
     dtag = "" if dt is None else f"_dt{float(dt):.8g}"
     ctag = "" if coupling is None else "_" + coupling.key()
+    # averaged frames are a different observable of the same medium (fluid.run); absent or
+    # "snapshot" leaves every existing key unchanged
+    if p.get("decimate", "snapshot") == "mean":
+        ctag += "_dmean"
     key = (f"{cortex.mesh}_sig{p['sig0']:.6g}_c{p['c0']:.6g}_Ld{p['Ld']:.6g}"
            f"_spg{p.get('sponge_scale', 1.0):.4g}_a{np.round(p.get('a', 0), 3)}"
            f"_b{np.round(p.get('b', 0), 3)}{mtag}_{len(regions)}_{nsteps}_{save}"
@@ -183,10 +187,17 @@ def impulse_responses(cortex, regions, p, nsteps=NSTEPS, save=SAVE, profiles=Non
             h = profiles[k].astype(np.float32).copy()
             ue = np.zeros(s.nE, np.float32)
             fr = [(h if kv is None else h[kv]).copy()]
+            mean = p.get("decimate", "snapshot") == "mean"   # see fluid.run
+            acc = np.zeros_like(fr[0]) if mean else None
             for n in range(1, nsteps):
                 ue, h = s.step(ue, h, np.float32(dt), g, H)
+                if mean:
+                    acc += (h if kv is None else h[kv])
                 if n % save == 0:
-                    fr.append((h if kv is None else h[kv]).copy())
+                    if mean:
+                        fr.append(acc / save); acc = np.zeros_like(acc)
+                    else:
+                        fr.append((h if kv is None else h[kv]).copy())
             out.append(np.asarray(fr))
             if verbose:
                 print(f"  impulse {k:3d}: peak {np.abs(fr[0]).max():.3f} -> "
@@ -217,10 +228,17 @@ def _imp_one(args):
     h = _W_IMP["profiles"][k].astype(np.float32).copy()
     ue = np.zeros(s.nE, np.float32)
     fr = [(h if kv is None else h[kv]).copy()]
+    mean = _W_IMP["p"].get("decimate", "snapshot") == "mean"   # see fluid.run
+    acc = np.zeros_like(fr[0]) if mean else None
     for n in range(1, nsteps):
         ue, h = s.step(ue, h, np.float32(dt), g, H)
+        if mean:
+            acc += (h if kv is None else h[kv])
         if n % save == 0:
-            fr.append((h if kv is None else h[kv]).copy())
+            if mean:
+                fr.append(acc / save); acc = np.zeros_like(acc)
+            else:
+                fr.append((h if kv is None else h[kv]).copy())
     return np.asarray(fr)
 
 
@@ -245,9 +263,11 @@ def _parallel_impulses(cortex, p, profiles, nsteps, save, dt, coupling, workers,
 _W_SCORE = {}
 
 
-def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s, segment):
+def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s, segment,
+                trim_edge=False, smooth=None):
     _W_SCORE.update(cortex=cortex, target=target, p=p, profiles=profiles, save=save,
-                    kernel=kernel, band=band, frame_s=frame_s, segment=segment)
+                    kernel=kernel, band=band, frame_s=frame_s, segment=segment,
+                    trim_edge=trim_edge, smooth=smooth)
 
 
 def _score_one(A):
@@ -257,12 +277,13 @@ def _score_one(A):
     r = score_realisation(_W_SCORE["cortex"], _W_SCORE["target"], _W_SCORE["p"], A,
                           save=_W_SCORE["save"], profiles=_W_SCORE["profiles"],
                           kernel=_W_SCORE["kernel"], band=_W_SCORE["band"],
-                          frame_s=_W_SCORE["frame_s"], segment=_W_SCORE["segment"])
+                          frame_s=_W_SCORE["frame_s"], segment=_W_SCORE["segment"],
+                          trim_edge=_W_SCORE["trim_edge"], smooth=_W_SCORE.get("smooth"))
     return r["sim"], r["gap"], r["rank"], r.get("sim_aff", float("nan"))
 
 
 def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
-                    band=None, frame_s=None, segment=None):
+                    band=None, frame_s=None, segment=None, trim_edge=False, smooth=None):
     """Score several drawn realisations at once. -> [(sim, gap, rank), ...]
 
     Draws are independent runs of the same medium under different samples of the same
@@ -297,14 +318,14 @@ def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
     try:
         pool = ctx.Pool(n, initializer=_score_init,
                         initargs=(cortex, target, p, profiles, save, kernel, band,
-                                  frame_s, segment))
+                                  frame_s, segment, trim_edge, smooth))
     finally:
         for k, v in env.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
     return pool, pool.map_async(_score_one, list(draws_A))
 
 
-def transfer(resp, cols, nfreq, kernel=None, idx=None):
+def transfer(resp, cols, nfreq, kernel=None, idx=None, n=None):
     """FFT the impulse responses -> H (nfreq, nVsub, K) and the bin weights.
 
     `kernel` is a temporal filter standing between the field and the observable - the
@@ -320,19 +341,37 @@ def transfer(resp, cols, nfreq, kernel=None, idx=None):
     of the power in 0.01-0.03 Hz, which the geometric grid covers with three samples,
     while spending a hundred on the decade above 0.1 Hz that holds 0.2%. See
     timescale.band_grid."""
-    G = resp[:, :, cols]                                  # (K, nframes, nVsub)
-    F = np.fft.rfft(G, axis=1)                            # (K, nbins, nVsub)
-    nb = F.shape[1]
-    if kernel is not None:
-        import units
-        F = F * units.kernel_response(kernel, nb, G.shape[1])[None, :, None]
+    # In blocks of channels, keeping only the solved bins as it goes. The whole-array form
+    # held the padded responses, a reindexed copy of them and the FFT of every bin at once,
+    # and only then kept ~135 of 2,049 bins: at 1,880 channels x 2,000 vertices that is
+    # ~185 GB for an H of 8 GB. Each block is exactly the arithmetic the whole array did,
+    # so H is bit-identical. `n` zero-pads inside the FFT, so callers need not pad first.
+    cols = np.asarray(cols)
+    K, nfr = resp.shape[0], resp.shape[1]
+    n = nfr if n is None else max(int(n), nfr)
+    nb = n // 2 + 1
     if idx is None:
         idx = np.unique(np.round(np.geomspace(1, nb - 1, nfreq)).astype(int))
     else:
         idx = np.unique(np.asarray(idx, int))
         idx = idx[(idx >= 1) & (idx <= nb - 1)]
+    kr = None
+    if kernel is not None:
+        import units
+        kr = units.kernel_response(kernel, nb, n)
+    out = None
+    kb = max(1, int(2e9 // max(nb * len(cols) * 16, 1)))
+    for k0 in range(0, K, kb):
+        F = np.fft.rfft(resp[k0:k0 + kb][:, :, cols], n=n, axis=1)
+        if kr is not None:
+            F = F * kr[None, :, None]
+        F = F[:, idx]                                     # (kb, nidx, nVsub)
+        if out is None:
+            out = np.empty((len(idx), len(cols), K), F.dtype)
+        out[:, :, k0:k0 + kb] = F.transpose(1, 2, 0)
+        del F
     w = np.gradient(idx).astype(float)                    # each sample stands for a band
-    return np.ascontiguousarray(F[:, idx].transpose(1, 2, 0)), w, idx
+    return out, w, idx
 
 
 # ------------------------------------------------------- the admissible family
@@ -489,6 +528,78 @@ def prank_reg():
         z = float(nf * S.shape[1] ** 2)
         val = -sum(float((np.abs(S[f]) ** 2).sum()) for f in range(nf))
         return val / z, (-2.0 * S) / z
+    return R
+
+
+def prank_ratio(w):
+    """The participation RATIO itself, as a penalty that survives trace normalisation.
+
+    prank_reg returns -||S||_F^2, whose gradient -2S is entirely radial. Under a solve that
+    renormalises S to unit trace every step that is a no-op, and inside solve_factor - where
+    rho is scale invariant so ||L|| drifts freely and is only normalised on return - it is
+    worse than a no-op: shrinking L lowers ||S||_F^2 without changing rho at all, so the
+    penalty is minimised by driving the solution to zero and the fit pays nothing. That is
+    why prank_reg is only ever used through family_member, which projects onto the tangent
+    space of the trace sphere and throws the radial part away.
+
+    This is the quantity family_member was recovering, written so no projection is needed.
+    With A = sum_f w_f S_f, the aggregate the participation diagnostic is computed from,
+
+        PR(A) = tr(A)^2 / ||A||_F^2,   in [1, K],   reported here as PR/K in [1/K, 1]
+
+    PR is homogeneous of degree ZERO, so by Euler's theorem Re tr(grad . A) = 0 exactly: the
+    gradient has no radial component to begin with. It can therefore go straight into a
+    smooth objective with a weight, which is the one form of the realisability idea
+    family_member could not test - it walks from a given point, and the finding that early
+    stopping beats it at matched fit says the point it walks from is the wrong region.
+
+        d PR / dA = (2 tr(A) / ||A||_F^2) I - (2 tr(A)^2 / ||A||_F^4) A
+        d PR / dS_f = w_f * d PR / dA
+
+    A is Hermitian PSD, so ||A||_F^2 = tr(A^2) = sum of squared eigenvalues and PR/K here is
+    exactly family_prank.participation(S, w) / K.
+
+    AGGREGATE, NOT PER FREQUENCY. A sums over frequency, so a drive that is rank one at every
+    bin but uses a DIFFERENT mode at each bin scores a high PR here. Whether that counts as
+    spread is not obvious and is not settled; this form is chosen because it is the statistic
+    the iteration sweep reported (participation 8.5 of 100 at convergence, 54.2 at fit
+    +0.7162), so a penalty on it is directly comparable with that ladder. A power-weighted
+    mean of per-bin PR_f = tr(S_f)^2/||S_f||_F^2 is the obvious alternative and is not
+    implemented.
+
+    IT WORKS AND IT HURTS. Swept as --prank-mu on the incumbent config (rank 20, maxfun 1500,
+    K=100, 400 solve vertices, 577 s, 2 draws), against mu = 0 at participation 8.3 of 100,
+    fit +0.8165 and realised +0.2621 +- 0.0038:
+
+        mu     participation    fit       realised          Moran gap
+        0.1        99.8       +0.8184   +0.1989 +- 0.0078     0.414
+        0.5       100.0       +0.8184   +0.2015 +- 0.0030     0.420
+        2.0       100.0       +0.8184   +0.1981 +- 0.0097     0.414
+
+    mu = 0.1 already saturates the ratio at its ceiling, so the term is not underpowered. The
+    realised score FALLS by 0.06 while the fit rises by 0.002 and the gap worsens. The same
+    conclusion arrives independently from this file's adjoint fix, which moved the realised
+    score +0.1661 -> +0.2621 while leaving the participation ratio at 8.5 -> 8.3. One
+    measurement holds participation fixed and moves realisation; the other drives participation
+    to its maximum and moves realisation the wrong way. The participation ratio is not the
+    mediator of realisability, so this is kept as the measurement that says so rather than as a
+    knob to turn. The field's effective rank FELL as the realised score rose (4.6 -> 2.9 across
+    the fix, 3.3-3.4 under the penalty), which points at the output side, not the input side.
+
+    -> R(S) -> (value, gradient), the signature solve_factor and family_member both take."""
+    w = np.asarray(w, float)
+
+    def R(S):
+        K = S.shape[1]
+        A = np.einsum('f,fij->ij', w, S, optimize=True)
+        A = 0.5 * (A + A.conj().T)
+        tr = float(np.trace(A).real)
+        fr = float((np.abs(A) ** 2).sum())
+        if fr <= 0.0:
+            return 0.0, np.zeros_like(S)
+        val = tr * tr / fr
+        GA = (2.0 * tr / fr) * np.eye(K) - (2.0 * val / fr) * A
+        return val / K, (w[:, None, None] * GA[None]) / K
     return R
 
 
@@ -897,8 +1008,112 @@ def solve(H, w, Ct, iters=300, verbose=True, nblock=1, share=False, trace=None,
     return S, model(S, SL)
 
 
+def factor_objective(H, w, Ct, rank, reg=None, mu=0.0, nfev=None, log_every=0,
+                     trace=None):
+    """-> (fg, Ctn, cov), the objective solve_factor hands to L-BFGS.
+
+    Lifted out of solve_factor so the gradient can be finite-differenced directly;
+    tests/test_prank_mu.py does that, and a penalty whose adjoint is wrong still runs and
+    still returns a plausible S, so there is no other way to catch one. solve_factor is the
+    only caller that matters - it is kept byte-for-byte what it was, so a recorded solve is
+    unchanged by the extraction.
+
+    `fg(Lv) -> (-objective, gradient)` on the real packing [L.real.ravel(), L.imag.ravel()].
+    `cov(L) -> (C, X)` is the double-centred, zero-diagonal model covariance."""
+    nf, nV, K = H.shape
+    r = int(rank)
+    Ctn = Ct.copy()
+    np.fill_diagonal(Ctn, 0.0)
+    Ctn /= np.linalg.norm(Ctn)
+    Hs = H * np.sqrt(2.0 * np.asarray(w, float))[:, None, None]
+    Hsc = np.ascontiguousarray(Hs.conj().transpose(0, 2, 1))
+    half = nf * K * r
+    nfev = [0] if nfev is None else nfev
+
+    def _dc(M):
+        return M - M.mean(0, keepdims=True) - M.mean(1, keepdims=True) + M.mean()
+
+    def _dcz(M):
+        M = _dc(M).copy()
+        np.fill_diagonal(M, 0.0)
+        return M
+
+    def _cov(L):
+        X = (Hs @ L).transpose(1, 0, 2).reshape(nV, nf * r)
+        return _dcz(X.real @ X.real.T + X.imag @ X.imag.T), X
+
+    def fg(Lv):
+        nfev[0] += 1
+        L = Lv[:half].reshape(nf, K, r) + 1j * Lv[half:].reshape(nf, K, r)
+        C, X = _cov(L)
+        n = np.linalg.norm(C)
+        if n <= 0:
+            return 1e3, np.zeros_like(Lv)
+        rho = float((C * Ctn).sum() / n)
+        # DOUBLE-CENTRE ONLY. The forward map is C = Z(P(X X^H)) with P double-centring and
+        # Z zeroing the diagonal, so the adjoint is P o Z, not Z o P - and dcz applies them
+        # in the forward order. Both C and Ctn already have zero diagonals, so Z acts as the
+        # identity here and the adjoint is P alone. Applying _dcz instead zeroes a diagonal
+        # that double-centring has just made nonzero, which leaves a gradient that
+        # correlates 0.88 with the true one and carries a RADIAL component of -0.38 where
+        # rho, being degree-zero in L, has exactly none. `solve`'s adjoint never had this -
+        # it double-centres and stops - which is the difference between the two solvers.
+        M = _dc(Ctn / n - rho * C / (n * n))
+        Y = (M @ X).reshape(nV, nf, r).transpose(1, 0, 2)
+        G = 2.0 * (Hsc @ Y)
+        obj, pen = rho, 0.0
+        if reg is not None and mu != 0.0:
+            pen, Gs = reg(L @ np.conj(L).transpose(0, 2, 1))
+            obj = rho + mu * pen
+            G = G + mu * 2.0 * (Gs @ L)
+        g = -np.concatenate([G.real.ravel(), G.imag.ravel()])
+        if log_every and nfev[0] % log_every == 0:
+            if trace is not None:
+                trace.append(float(rho))
+            print(f"      nfev {nfev[0]:>6d}  rho {rho:+.8f}"
+                  + (f"  reg {pen:.6f}" if reg is not None and mu != 0.0 else "")
+                  + f"  |grad|*|L| {np.linalg.norm(g) * np.linalg.norm(Lv):.4e}", flush=True)
+        return -obj, g
+
+    return fg, Ctn, _cov
+
+
+def band_objective(H, w, bands, rank, nfev=None, log_every=0, trace=None):
+    """-> fg for sum_b lam_b rho_b: FC matched within each frequency band at once.
+
+    `bands` is [(r_b, Ct_b, lam_b, label)]: r_b the band filter's response on the solved bins
+    (bandpass.transfer_response - filtfilt's amplitude response, which like the passband in
+    best_fit simply multiplies H), Ct_b that band's target. Each term is factor_objective's
+    own fg on H * r_b, so every term carries that function's finite-difference-checked
+    gradient, and the sum's gradient is the weighted sum of theirs. Costs one forward per
+    band."""
+    fgs = [factor_objective(H * np.asarray(rb)[:, None, None], w, Ct, rank)[0]
+           for rb, Ct, lam, lab in bands]
+    lams = [float(lam) for _, _, lam, _ in bands]
+    nfev = [0] if nfev is None else nfev
+
+    def fg(Lv):
+        nfev[0] += 1
+        f, g, rhos = 0.0, None, []
+        for fb, lam in zip(fgs, lams):
+            fb_, gb = fb(Lv)
+            rhos.append(-fb_)
+            f += lam * fb_
+            g = lam * gb if g is None else g + lam * gb
+        if log_every and nfev[0] % log_every == 0:
+            if trace is not None:
+                trace.append(float(-f))
+            print(f"      nfev {nfev[0]:>6d}  sum {-f:+.6f}  bands "
+                  + " ".join(f"{lab} {r:+.4f}" for (_, _, _, lab), r in zip(bands, rhos)),
+                  flush=True)
+        return f, g
+
+    return fg
+
+
 def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
-                 ftol=1e-18, gtol=1e-16, maxcor=40, log_every=0, trace=None):
+                 ftol=1e-18, gtol=1e-16, maxcor=40, log_every=0, trace=None,
+                 reg=None, mu=0.0, return_factor=False, bands=None):
     """The same objective as `solve`, maximised over S = L L^H with L the free variable.
 
     `solve` walks the PSD cone by projected gradient and stops on an iteration count, with
@@ -922,45 +1137,30 @@ def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
     Hessian singular, and together they are why termination comes on the function
     tolerance rather than on a vanishing gradient.
 
+    `reg` with `mu` > 0 adds mu * R(S) to the MAXIMISED objective, R being the usual
+    regulariser signature S -> (value, gradient). It must be SCALE INVARIANT: rho is, so
+    ||L|| is a free direction the search wanders along, and a penalty with any degree of
+    homogeneity other than zero is optimised by moving along it for free - prank_reg's
+    -||S||_F^2 is maximised by L -> 0 at no cost in rho. prank_ratio is the degree-zero form
+    of the same quantity and is what this is for. The chain rule through S = L L^H is
+
+        dR = Re tr(G_f dS_f) = 2 Re tr((G_f L_f)^H dL_f)   =>   d/dL_f = 2 G_f L_f
+
+    for Hermitian G_f, the same shape as the fit's own gradient 2 A_f L_f, so the two add
+    directly. tests/test_prank_mu.py finite-differences the sum.
+
     -> (S, C), the pair `solve` returns, S normalised to unit total trace."""
     from scipy.optimize import minimize
     nf, nV, K = H.shape
     r = int(rank)
-    Ctn = Ct.copy()
-    np.fill_diagonal(Ctn, 0.0)
-    Ctn /= np.linalg.norm(Ctn)
-    Hs = H * np.sqrt(2.0 * np.asarray(w, float))[:, None, None]
-    Hsc = np.ascontiguousarray(Hs.conj().transpose(0, 2, 1))
     half = nf * K * r
     nfev = [0]
-
-    def _dcz(M):
-        M = M - M.mean(0, keepdims=True) - M.mean(1, keepdims=True) + M.mean()
-        np.fill_diagonal(M, 0.0)
-        return M
-
-    def _cov(L):
-        X = (Hs @ L).transpose(1, 0, 2).reshape(nV, nf * r)
-        return _dcz(X.real @ X.real.T + X.imag @ X.imag.T), X
-
-    def fg(Lv):
-        nfev[0] += 1
-        L = Lv[:half].reshape(nf, K, r) + 1j * Lv[half:].reshape(nf, K, r)
-        C, X = _cov(L)
-        n = np.linalg.norm(C)
-        if n <= 0:
-            return 1e3, np.zeros_like(Lv)
-        rho = float((C * Ctn).sum() / n)
-        M = _dcz(Ctn / n - rho * C / (n * n))
-        Y = (M @ X).reshape(nV, nf, r).transpose(1, 0, 2)
-        G = 2.0 * (Hsc @ Y)
-        g = -np.concatenate([G.real.ravel(), G.imag.ravel()])
-        if log_every and nfev[0] % log_every == 0:
-            if trace is not None:
-                trace.append(float(rho))
-            print(f"      nfev {nfev[0]:>6d}  rho {rho:+.8f}  "
-                  f"|grad|*|L| {np.linalg.norm(g) * np.linalg.norm(Lv):.4e}", flush=True)
-        return -rho, g
+    fg, Ctn, _cov = factor_objective(H, w, Ct, r, reg=reg, mu=mu, nfev=nfev,
+                                     log_every=log_every, trace=trace)
+    if bands:
+        # the per-band objective replaces the whole-spectrum one; _cov and Ctn stay the
+        # unfiltered ones, so the returned C and its printed corr are the unfiltered FC
+        fg = band_objective(H, w, bands, r, nfev=nfev, log_every=log_every, trace=trace)
 
     rng = np.random.default_rng(seed)
     L0 = rng.standard_normal(2 * half) * (1.0 / np.sqrt(K * r))
@@ -970,6 +1170,7 @@ def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
     L = res.x[:half].reshape(nf, K, r) + 1j * res.x[half:].reshape(nf, K, r)
     S = L @ np.conj(L).transpose(0, 2, 1)
     tr = sum(np.trace(S[f]).real for f in range(nf))
+    L_raw = L
     if tr > 0:
         S, L = S / tr, L / np.sqrt(tr)
     C, _ = _cov(L)
@@ -986,6 +1187,10 @@ def solve_factor(H, w, Ct, rank=8, maxfun=20000, seed=0, verbose=True,
         print(f"    factored solve: rank {r}, corr = "
               f"{float((C * Ctn).sum() / np.linalg.norm(C)):+.6f}, "
               f"{res.nfev} evaluations ({msg})")
+    if return_factor:
+        # (L before normalisation, its trace): factor_to_S rebuilds S from these with the
+        # same two operations, so the rebuilt S is the returned one bit for bit.
+        return S, C, (L_raw, float(tr))
     return S, C
 
 
@@ -1277,7 +1482,8 @@ def draw_eta(rng, K, law="gaussian"):
     raise ValueError(f"unknown law {law!r}")
 
 
-def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian"):
+def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian",
+            factor_draw=None, factors=None):
     """Draw a drive whose cross-spectrum is S: at each bin, z = L eta with S = L L^H.
 
     S is solved on a coarse grid, so it is interpolated first - in FREQUENCY, not in bin
@@ -1285,22 +1491,125 @@ def realise(S, idx, nframes, ref_frames=None, seed=0, law="gaussian"):
     would move the whole spectrum whenever the run length changed; `ref_frames` is the
     length S was solved at. Linear interpolation of PSD matrices stays PSD, so every bin
     remains a valid covariance, and power is not extrapolated beyond the solved band."""
-    K = S.shape[1]
+    K = S.shape[1] if S is not None else factors[0].shape[0]
     nb = nframes // 2 + 1
     ref = ref_frames or 280
     f_src = np.asarray(idx, float) / ref                  # cycles per frame
     f_dst = np.arange(nb) / float(nframes)
+    rng = np.random.default_rng(seed)
+    if factor_draw is None:
+        factor_draw = K > 512
+    if factor_draw or factors is not None:
+        return _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law, factors)
     Sf = np.empty((nb, K, K), complex)
     for a in range(K):
         for b in range(K):
             Sf[:, a, b] = np.interp(f_dst, f_src, S[:, a, b].real, left=0.0, right=0.0) \
                 + 1j * np.interp(f_dst, f_src, S[:, a, b].imag, left=0.0, right=0.0)
-    rng = np.random.default_rng(seed)
     Z = np.zeros((nb, K), complex)
     for f in range(1, nb):
         ev, U = np.linalg.eigh(0.5 * (Sf[f] + Sf[f].conj().T))
         L = U * np.sqrt(np.clip(ev, 0, None))
         Z[f] = L @ draw_eta(rng, K, law)
+    A = np.fft.irfft(Z, n=nframes, axis=0)
+    return A / max(A.std(), 1e-30)
+
+
+def factor_to_S(L, tr):
+    """S from the stored factor: exactly solve_factor's own two operations, so the result is
+    bit-identical to the S it returned."""
+    S = L @ np.conj(L).transpose(0, 2, 1)
+    return S / tr if tr > 0 else S
+
+
+def load_S(z):
+    """The solved cross-spectrum from a results npz, however it was stored.
+
+    Factored solves store `S_L` (nf, K, rank) and `S_tr` - the cross-spectrum before
+    normalisation is L L^H and the solve only ever produces rank 20 or so - and drop the full
+    (nf, K, K) array once K > 512, where it is 7.6 GB against ~80 MB at K = 1,880. Below that
+    the full array is kept as well, so scripts reading z['S'] on ordinary runs still work."""
+    if "S" in z.files:
+        return z["S"]
+    if "S_L" in z.files:
+        return factor_to_S(z["S_L"], float(z["S_tr"]))
+    raise KeyError("no S or S_L in this file" +
+                   (": " + str(z["S_stripped"]) if "S_stripped" in z.files else ""))
+
+
+def solution_K(z):
+    """Number of input channels, without loading the cross-spectrum."""
+    for k in ("S", "S_L"):
+        if k in z.files:
+            return int(z[k].shape[1])
+    return int(np.asarray(z["profiles"]).shape[0])
+
+
+def load_factors(z):
+    """realise(..., factors=) input for a recorded solve, built one bin at a time so a
+    1,880-channel S is never held whole. The same factors solved_factors(load_S(z)) gives."""
+    if "S" in z.files:
+        return solved_factors(z["S"])
+    L, tr = z["S_L"], float(z["S_tr"])
+    K = L.shape[1]
+    As = []
+    for f in range(L.shape[0]):
+        Sf = factor_to_S(L[f:f + 1], tr)[0]
+        M = 0.5 * (Sf + Sf.conj().T)
+        ev, U = np.linalg.eigh(M)
+        k = ev > max(float(ev.max()), 0.0) * 1e-12
+        As.append((U[:, k] * np.sqrt(ev[k])) if k.any() else np.zeros((K, 0), complex))
+    return As
+
+
+def solved_factors(S):
+    """One factor per solved bin, A_f with A_f A_f^H = S_f - what _realise_factored builds
+    before drawing. Pass it to `realise(..., factors=)` to draw many realisations of one S
+    without repeating 135 eigendecompositions per draw; the draws are bit-identical to
+    letting realise factor S itself."""
+    K = S.shape[1]
+    As = []
+    for f in range(S.shape[0]):
+        M = 0.5 * (S[f] + S[f].conj().T)
+        ev, U = np.linalg.eigh(M)
+        k = ev > max(float(ev.max()), 0.0) * 1e-12
+        As.append((U[:, k] * np.sqrt(ev[k])) if k.any() else np.zeros((K, 0), complex))
+    return As
+
+
+def _realise_factored(S, f_src, f_dst, nframes, nb, K, rng, law, factors=None):
+    """The same draw without ever forming the interpolated S.
+
+    The default path allocates (nb, K, K) and eigendecomposes one K x K matrix per
+    REALISATION bin. At K = 1,880 and a 577 s run that array is 101 GiB and the eigh bill is
+    1,790 decompositions of a 1,880-square matrix, so the realisation costs more than the
+    solve it is realising.
+
+    Neither is necessary. A linear interpolant of two PSD matrices has an exact factor built
+    from the two factors:
+
+        (1-t) A A^H + t B B^H  =  [sqrt(1-t) A, sqrt(t) B] [sqrt(1-t) A, sqrt(t) B]^H
+
+    so ONE eigendecomposition per SOLVED bin - 135, not 1,790 - gives everything, each
+    realisation bin is a concatenation, and eta has the rank's dimension rather than K's.
+    Solved S is often low rank (rank 20 from solve_factor), which makes that dimension small.
+
+    The draw is statistically identical, NOT bit-identical: eta has a different dimension so
+    the random stream differs. Seeds therefore do not correspond between the two paths, which
+    is why K <= 512 keeps the original - every recorded realisation came through it."""
+    As = solved_factors(S) if factors is None else factors
+    Z = np.zeros((nb, K), complex)
+    j = np.clip(np.searchsorted(f_src, f_dst, side="right") - 1, 0, len(f_src) - 1)
+    for b in range(1, nb):
+        # outside the solved range S is zero, exactly as left=0/right=0 gives
+        if f_dst[b] < f_src[0] or f_dst[b] > f_src[-1]:
+            continue
+        lo = min(int(j[b]), len(f_src) - 2)
+        span = f_src[lo + 1] - f_src[lo]
+        t = 0.0 if span <= 0 else float(np.clip((f_dst[b] - f_src[lo]) / span, 0.0, 1.0))
+        Lb = np.concatenate([np.sqrt(1.0 - t) * As[lo], np.sqrt(t) * As[lo + 1]], axis=1)
+        if Lb.shape[1]:
+            Z[b] = Lb @ draw_eta(rng, Lb.shape[1], law)
     A = np.fft.irfft(Z, n=nframes, axis=0)
     return A / max(A.std(), 1e-30)
 
@@ -1318,12 +1627,17 @@ class ProfileDrive:
 
 def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=False,
                       seed=0, profiles=None, run_fn=None, kernel=None, band=None,
-                      frame_s=None, segment=None, diagnostics=True):
+                      frame_s=None, segment=None, diagnostics=True, trim_edge=False, smooth=None):
     """Hold each drawn sample over its block of steps, run, and score for real.
 
     `run_fn(drive, nsteps, save) -> (frames, dt)` replaces the plain integration, which is
     how a switching medium is scored without this module having to know about regimes.py
     (which imports this one). p is then unused.
+
+    `trim_edge` cuts bandpass.edge_frames from both ends after filtering. It is OFF: the
+    damage it was added for came from the filter's odd edge padding at the END of the record,
+    and bandpass.apply now mirror-pads instead, which scores the whole record as well as the
+    cut one or better. True reproduces the numbers scored between 03d77df and that fix.
 
     `band` is the passband the TARGET was filtered to, as (lo_hz, hi_hz). The data XCP-D
     produced is bandpassed, so the observable has to be too or the model is scored on
@@ -1353,6 +1667,14 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
         if frame_s is None:
             raise ValueError("band needs frame_s; the filter is defined in Hz")
         frames = bandpass.apply(frames, frame_s, band[0], band[1])
+        if trim_edge:
+            frames = bandpass.trim_edges(frames, frame_s, band[0])
+    if smooth is not None:
+        # spatial smoothing to the target's (surface_smooth.smoothing_matrix); linear and
+        # spatial, so it commutes with the temporal filters and its solve-side counterpart
+        # is the same matrix applied to H's rows
+        import surface_smooth
+        frames = surface_smooth.smooth(frames, smooth)
     if segment:
         # The target was estimated from short demeaned blocks; the model's covariance has
         # to be estimated the same way, or the identity the solve rests on - that the

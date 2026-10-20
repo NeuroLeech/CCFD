@@ -23,7 +23,13 @@ from paths import RESULTS
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def scores_for(tag, z):
+# Realised scores before this used sosfiltfilt's odd edge padding (5be967f), which depresses
+# them by an amount that grows with optimisation budget - 0.01 for an early-stopped solve, 0.3
+# for a converged one. A score from before it is not comparable with one after.
+MIRROR_PAD_FROM = datetime.datetime(2026, 10, 4, 11, 16)
+
+
+def scores_for(tag, z, path=None):
     """Every realised score known for a tag: the one in the npz, plus any length the
     rescore sidecar holds. -> {label: dict}, oldest measurement first is not meaningful
     here so they are sorted by length."""
@@ -34,11 +40,15 @@ def scores_for(tag, z):
         out[lab] = dict(sim=float(z["sim"]), sim_sd=float(_scalar(z, "sim_sd", 0.0)),
                         gap=float(_scalar(z, "gap", float("nan"))),
                         field_rank=float(_scalar(z, "field_rank", float("nan"))),
-                        draws=int(_scalar(z, "draws", 0)))
+                        draws=int(_scalar(z, "draws", 0)),
+                        current=bool(path) and datetime.datetime.fromtimestamp(
+                            os.path.getmtime(path)) >= MIRROR_PAD_FROM)
     sp = os.path.join(RESULTS, f"scores_{tag}.json")
     if os.path.exists(sp):
         try:
-            out.update(json.load(open(sp)))
+            for k, v in json.load(open(sp)).items():
+                v["current"] = v.get("bandpass_pad") == "mirror"
+                out[k] = v
         except (ValueError, OSError):
             pass
     def _sec(k):
@@ -118,6 +128,13 @@ def render():
          "gitignored - the paths below are local. Re-run it after a fit.",
          "",
          f"Last generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+         "",
+         "**† marks a realised score from before 2026-10-04 (commit `5be967f`).** Those used",
+         "the bandpass's odd edge padding, which depresses the score by an amount that grows",
+         "with optimisation - about 0.01 for an early-stopped solve and 0.3 for a converged",
+         "one - so they are not comparable with unmarked scores. Fits are unaffected. Separately,",
+         "`--solver factor` runs before `574fd43` used a wrong gradient. Re-score a marked tag",
+         "with `fit/rescore.py` to get a current number.",
          ""]
 
     tf = torchfits()
@@ -177,7 +194,8 @@ def render():
             "-" if fs != fs else f"{fs:.5g}",
             _scalar(z, "impulse_frames", "-"), _scalar(z, "nfreq", "-"),
             " / ".join(f"{v['sim']:+.4f}±{v['sim_sd']:.4f} @{k}"
-                       for k, v in scores_for(tag, z).items()) or "-",
+                       + ("" if v.get("current") else " †")
+                       for k, v in scores_for(tag, z, f).items()) or "-",
             _when(f), "yes" if pr else "–"))
     L.append("")
     if stamped:

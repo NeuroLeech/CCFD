@@ -52,7 +52,8 @@ def load_all(tag, ref_tag="torchref"):
     t = fc_score.default_target(c, verbose=False)
     fit = Fit(ref, c, t, float(z["seconds"]), device="mps", amp=float(z["amp"]),
               nl_adv=float(z["nl_adv"]), nl_flux=float(z["nl_flux"]), Ld=float(z["Ld"]),
-              maps_scale=float(z["maps_scale"]))
+              maps_scale=float(z["maps_scale"]),
+              speed=int(z["speed"]) if "speed" in z.files else 1)
     restore_medium(fit, z)      # the checkpoint's own parameterisation, whichever it used
     rz = np.load(os.path.join(RESULTS, f"xspec_{ref_tag}.npz"), allow_pickle=True)
     return z, ref, c, t, fit, rz
