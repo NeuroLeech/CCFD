@@ -568,6 +568,251 @@ def cmd_frames(a, c, S, run):
     _plot_frames(path.replace(".npz", ".png"), res, run, fs, edge)
 
 
+# ============================================================ D: pattern types
+
+TYPES = ("+axis", "+side", "-axis", "-side", "radiate", "converge", "mixed")
+
+
+def band_fields(Rh, Ru, A, fs, band, block=160, verbose=True):
+    """Total depth and velocity in `band` at every kept vertex, for drive A, without
+    integrating anything: per frequency the field is sum_k H_k(v, f) A_k(f), and a drive
+    from xspec.realise is periodic by construction (an irfft), so multiplying spectra is
+    the steady state exactly, with no ends to trim.
+
+    -> X (T, nk, 4) float32 [h, u_x, u_y, u_z], E (nk, K) each piece's in-band depth
+    power at each vertex under this drive, and the analytic in-band drive Z (T, K).
+    The band is the zero-phase filter's own gain, bandpass.response, so this equals
+    bandpass.apply on the simulated run away from its ends."""
+    import bandpass
+    T, K = A.shape
+    nimp, nk = Rh.shape[0], Rh.shape[1]
+    f = np.fft.rfftfreq(T, d=fs)
+    g = bandpass.response(f, fs, *band)
+    sel = np.flatnonzero(g > 1e-4)
+    Ah = (np.fft.rfft(A, axis=0)[sel] * g[sel, None]).astype(np.complex64)   # (nb, K)
+    Ef = np.exp(-2j * np.pi * np.outer(f[sel] * fs, np.arange(nimp))).astype(np.complex64)
+    X = np.empty((T, nk, 4), np.float32)
+    En = np.empty((nk, K), np.float32)
+    for b0 in range(0, nk, block):
+        b1 = min(nk, b0 + block)
+        R = np.concatenate([Rh[:, b0:b1, None, :], Ru[:, b0:b1]], 2)          # (nimp, nb, 4, K)
+        Hf = (Ef @ R.reshape(nimp, -1)).reshape(len(sel), b1 - b0, 4, K)
+        HA = Hf * Ah[:, None, None, :]
+        En[b0:b1] = (np.abs(HA[:, :, 0]) ** 2).sum(0)
+        spec = np.zeros((len(f), b1 - b0, 4), np.complex64)
+        spec[sel] = HA.sum(-1)
+        X[:, b0:b1] = np.fft.irfft(spec, n=T, axis=0)
+        if verbose and (b0 // block) % 8 == 0:
+            print(f"    band fields: vertex {b0}/{nk}", flush=True)
+    full = np.zeros((T, K), np.complex64)
+    full[sel] = 2 * Ah                                                # one-sided: analytic
+    Z = np.fft.ifft(full, axis=0)
+    return X, En, Z
+
+
+def patch_state(P, loc, X, depth, area, nrm, V, smooth_n, every):
+    """Directedness, direction, expansion and intensity of a patch's flux, per frame.
+
+    Directedness is |net flux| over the total flux magnitude: 1 when every vertex carries
+    energy the same way, ~0 when it radiates or converges or is disordered. Expansion is
+    the flux along the direction away from the patch centre over the same total: +1 all
+    leaving, -1 all arriving. Smoothed over one period of the band's centre so the
+    twice-per-cycle ripple of a product of two oscillations does not set the state."""
+    pv = loc[P["pv"]]
+    wd = (area[P["pv"]] * depth[P["pv"]]).astype(np.float32)
+    h, u = X[:, pv, 0], X[:, pv, 1:]
+    n_v = nrm[P["pv"]]
+    od = V[P["pv"]] - P["centre"]
+    od = od - (od * n_v).sum(1, keepdims=True) * n_v
+    od /= np.maximum(np.linalg.norm(od, axis=1, keepdims=True), 1e-9)
+    Fv = (h * wd)[..., None] * u                                      # (T, nv, 3)
+    F1, F2 = Fv @ P["e1"], Fv @ P["e2"]
+    Fo = np.einsum("tvc,vc->tv", Fv, od)
+    mag = np.linalg.norm(Fv, axis=-1).sum(1)
+    S = [_smooth(x, smooth_n) for x in (F1.sum(1), F2.sum(1), Fo.sum(1), mag,
+                                         (h ** 2 * area[P["pv"]]).sum(1))]
+    F1, F2, Fo, mag, I = (x[::every] for x in S)
+    m = np.maximum(mag, 1e-30)
+    return dict(dirn=np.hypot(F1, F2) / m, theta=np.arctan2(F2, F1), expand=Fo / m,
+                power=I)
+
+
+def wave_types(st, floor=0.3):
+    """One label per frame. Provisional thresholds: below `floor` on both directedness and
+    |expansion| the patch is 'mixed'; otherwise whichever is larger names it, translating
+    states by the quarter of the compass their direction falls in, relative to the patch
+    axis (the pair axis, or anterior for a grid patch)."""
+    d, x, th = st["dirn"], st["expand"], np.degrees(st["theta"])
+    lab = np.full(len(d), "mixed", dtype=object)
+    tr = (d >= floor) & (d >= np.abs(x))
+    rad = (np.abs(x) >= floor) & (np.abs(x) > d)
+    sector = np.where(np.abs(th) <= 45, "+axis", np.where(th > 135, "-axis",
+                      np.where(th < -135, "-axis", np.where(th > 0, "+side", "-side"))))
+    lab[tr] = sector[tr]
+    lab[rad & (x > 0)] = "radiate"
+    lab[rad & (x < 0)] = "converge"
+    return lab
+
+
+def input_features(Z, ks):
+    """What a patch's pieces are doing, as the flux actually depends on it.
+
+    In a narrow band the flux is a Hermitian form in the pieces' complex amplitudes z,
+    Re(z^H M z): a sum over PAIRS of |z_k| |z_l| cos(phase_k - phase_l + c_kl). A linear
+    model in each piece's own phase and amplitude cannot form those products - that was
+    the first version, and on 40 patches it reached median R2 0.26 for the along-axis
+    direction where these reach 0.46. So the features are pairwise:
+
+      timing  cos and sin of every pairwise phase difference, amplitudes ignored
+      loud    each piece's share of the patch's input power, phases ignored
+      both    the normalised cross-products z_k conj(z_l) / sum |z|^2 and the shares:
+              timing weighted by loudness, which is the form the flux takes
+
+    Also returns each piece's phase against the first, for pattern-triggered averages."""
+    z = Z[:, ks]
+    m = len(ks)
+    iu = np.triu_indices(m, 1)
+    tot = np.maximum((np.abs(z) ** 2).sum(1, keepdims=True), 1e-30)
+    cr = z[:, iu[0]] * np.conj(z[:, iu[1]])
+    dph = np.angle(cr)
+    share = np.abs(z) ** 2 / tot
+    timing = np.c_[np.cos(dph), np.sin(dph)]
+    both = np.c_[share, cr.real / tot, cr.imag / tot]
+    ph = np.angle(z[:, 1:] * np.conj(z[:, :1]))
+    return timing, share, both, ph
+
+
+def classify(Xf, y, folds=5):
+    """Blocked cross-validated balanced accuracy of a multinomial logistic fit."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import cross_val_predict, KFold
+    from sklearn.metrics import balanced_accuracy_score
+    if len(np.unique(y)) < 2:
+        return np.nan
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+    # standardised first: the pairwise products are collinear and badly scaled, and
+    # unscaled the solver took ~50 s a patch to converge
+    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+    pred = cross_val_predict(model, Xf, y, cv=KFold(folds))
+    return float(balanced_accuracy_score(y, pred))
+
+
+def cmd_types(a, c, S, run):
+    import xspec, hashlib
+    K = len(run["tags"])
+    D, cen, pairs = geometry(c, S, run["labels"], K)
+    patches = make_patches(c, S, run, D, cen, pairs, a.radius, a.grid, a.reach)
+    keep = np.unique(np.concatenate([P["pv"] for P in patches]))
+    loc = -np.ones(c.nV, int); loc[keep] = np.arange(len(keep))
+    fs = run["frame_s"]
+    band = tuple(float(v) for v in a.band.split(","))
+    ck = hashlib.md5(keep.tobytes()).hexdigest()[:10]
+    cdir = a.cache or os.path.join(RESULTS, "interplay_cache")
+    os.makedirs(cdir, exist_ok=True)
+    fi = os.path.join(cdir, f"imp_{run['name']}_{run['nimp']}_{ck}.npz")
+    if os.path.exists(fi):
+        z = np.load(fi); Rh, Ru = z["Rh"], z["Ru"]
+    else:
+        print("  impulse responses with velocity ...", flush=True)
+        Rh, Ru = impulse_hu(c, run, keep)
+        np.savez(fi, Rh=Rh, Ru=Ru)
+    depth = np.asarray(__import__("fluid").build(c, run["p"], sponge=True)[3], float)
+    # the spectral construction has to equal the simulated, bandpassed field: check it on
+    # a run that was actually integrated, when one is cached
+    fr = os.path.join(cdir, f"run_{run['name']}_1154s_seed0_{ck}.npz")
+    if os.path.exists(fr):
+        import bandpass
+        T0 = int(round(1154 / fs))
+        A0 = xspec.realise(run["S"], run["idx"], T0, ref_frames=run["ref_frames"], seed=0)
+        v0 = loc[patches[0]["pv"]]
+        X0, _, _ = band_fields(Rh[:, v0], Ru[:, v0], A0, fs, band, verbose=False)
+        hs = np.load(fr)["hs"][:, v0]
+        ref = bandpass.apply(hs, fs, *band)
+        e = int(200 / fs)
+        rr = float(np.corrcoef(X0[e:-e, :, 0].ravel(), ref[e:-e].ravel())[0, 1])
+        print(f"  spectral field against the integrated run, bandpassed, one patch: "
+              f"r = {rr:.5f}, sd ratio {X0[e:-e, :, 0].std() / ref[e:-e].std():.4f}")
+        if rr < 0.995:
+            raise SystemExit("  the spectral construction does not reproduce the run")
+    T = int(round(a.seconds / fs))
+    A = xspec.realise(run["S"], run["idx"], T, ref_frames=run["ref_frames"], seed=a.seed)
+    fb = os.path.join(cdir, f"band_{run['name']}_{a.seconds:g}s_seed{a.seed}_"
+                      f"{band[0]:g}-{band[1]:g}_{ck}.npz")
+    if os.path.exists(fb):
+        z = np.load(fb); X, En, Z = z["X"], z["En"], z["Z"]
+    else:
+        print(f"  {a.seconds:g} s realisation ({T} frames), band {band}: building the "
+              f"field at {len(keep)} vertices ...", flush=True)
+        X, En, Z = band_fields(Rh, Ru, A, fs, band)
+        np.savez(fb, X=X, En=En, Z=Z)
+    del Rh, Ru
+    smooth_n = int(round(1.0 / (fs * np.mean(band))))
+    every = max(1, int(round(a.every_s / fs)))
+    nrm = np.asarray(c.m.vertex_normal)
+    area = np.asarray(c.A)
+    n_eff = a.seconds * (band[1] - band[0])
+    print(f"  ~{n_eff:.0f} independent states in band; states read every {every} frames "
+          f"({every * fs:.2f} s), smoothed over {smooth_n}")
+    res = []
+    for n, P in enumerate(patches):
+        st = patch_state(P, loc, X, depth, area, nrm, S.V, smooth_n, every)
+        lab = wave_types(st, a.floor)
+        en = (En[loc[P["pv"]]] * area[P["pv"], None]).sum(0)
+        ks = list(np.argsort(en)[::-1][:a.ninputs])
+        Tf, Af, Bf, ph = input_features(Z[::every][:len(lab)], ks)
+        # classes rarer than 3% are left out of the classifier, not merged
+        cls, cnt = np.unique(lab, return_counts=True)
+        ok = np.isin(lab, cls[cnt >= 0.03 * len(lab)])
+        r = dict(kind=P["kind"], ks=ks, occ={t: float(np.mean(lab == t)) for t in TYPES},
+                 n_cls=int(len(np.unique(lab[ok]))))
+        r["acc_t"] = classify(Tf[ok], lab[ok])
+        r["acc_a"] = classify(Af[ok], lab[ok])
+        r["acc_b"] = classify(Bf[ok], lab[ok])
+        cont = dict(along=st["dirn"] * np.cos(st["theta"]),
+                    across=st["dirn"] * np.sin(st["theta"]), expand=st["expand"],
+                    power=np.log(np.maximum(st["power"], 1e-30)))
+        for nm, y in cont.items():
+            r[f"r2t_{nm}"] = waves.explained(Tf, y, blocked=True)
+            r[f"r2a_{nm}"] = waves.explained(Af, y, blocked=True)
+            r[f"r2b_{nm}"] = waves.explained(Bf, y, blocked=True)
+        # pattern-triggered relative phases: per type, circular mean and consistency of
+        # each piece's phase against the first
+        trig = {}
+        for t in TYPES:
+            m = lab == t
+            if m.sum() >= 20:
+                zz = np.exp(1j * ph[m]).mean(0)
+                trig[t] = (np.angle(zz), np.abs(zz))
+        r["trig"] = trig
+        r.update({k: P[k] for k in ("i", "j", "vertex", "inside") if k in P})
+        r["state"] = {k: v.astype(np.float32) for k, v in st.items()}
+        r["labels"] = lab
+        res.append(r)
+        if (n + 1) % 50 == 0:
+            print(f"    {n+1}/{len(patches)} patches", flush=True)
+    for kind in ("grid", "pair"):
+        R = [r for r in res if r["kind"] == kind]
+        g = lambda k: np.array([r[k] for r in R], float)
+        occ = {t: np.mean([r["occ"][t] for r in R]) for t in TYPES}
+        chance = np.array([1.0 / max(r["n_cls"], 1) for r in R])
+        print(f"\n  {kind} patches ({len(R)}): mean occupancy "
+              + ", ".join(f"{t} {100*occ[t]:.0f}%" for t in TYPES))
+        print(f"    type predicted from (balanced accuracy, chance median "
+              f"{np.median(chance):.2f}): timing {np.nanmedian(g('acc_t')):.2f}, "
+              f"loudness {np.nanmedian(g('acc_a')):.2f}, both {np.nanmedian(g('acc_b')):.2f}; "
+              f"timing beats loudness in {np.mean(g('acc_t') > g('acc_a')):.0%} of patches")
+        for nm in ("along", "across", "expand", "power"):
+            print(f"    {nm:7s} R2 timing {np.median(g('r2t_'+nm)):.2f}  loudness "
+                  f"{np.median(g('r2a_'+nm)):.2f}  both {np.median(g('r2b_'+nm)):.2f}")
+    path = os.path.join(RESULTS, f"interplay_types_{run['name']}.npz")
+    np.savez(path, res=np.array(res, object), tags=np.array(run["tags"], object),
+             band=np.array(band), seconds=a.seconds, seed=a.seed, floor=a.floor,
+             every=every)
+    print(f"\n  wrote {path}")
+    _plot_types(path.replace(".npz", ".png"), res, run)
+
+
 # ============================================================ pictures
 
 def _plot_pairs(path, res, lags, hz):
@@ -665,9 +910,62 @@ def _plot_frames(path, res, run, fs, edge):
     print(f"  wrote {path}")
 
 
+def _plot_types(path, res, run):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig = plt.figure(figsize=(16, 3.4))
+    ax = fig.add_subplot(1, 4, 1)
+    for n, kind in enumerate(("grid", "pair")):
+        R = [r for r in res if r["kind"] == kind]
+        bottom = 0
+        for t, col in zip(TYPES, plt.cm.tab10.colors):
+            v = np.mean([r["occ"][t] for r in R])
+            ax.bar(n, v, bottom=bottom, color=col, label=t if n == 0 else None)
+            bottom += v
+    ax.set_xticks([0, 1]); ax.set_xticklabels(["grid", "pair"])
+    ax.set_title("pattern type occupancy", fontsize=9); ax.legend(fontsize=6)
+    ax = fig.add_subplot(1, 4, 2)
+    for kind, mk in (("grid", "s"), ("pair", "o")):
+        R = [r for r in res if r["kind"] == kind]
+        ax.scatter([r["acc_a"] for r in R], [r["acc_t"] for r in R], s=8, marker=mk,
+                   label=kind, alpha=0.7)
+    lim = [0, 1]; ax.plot(lim, lim, color="0.6", lw=0.6)
+    ax.set_xlabel("balanced accuracy from loudness", fontsize=8)
+    ax.set_ylabel("from timing", fontsize=8); ax.legend(fontsize=7)
+    ax.set_title("which inputs' property predicts the type", fontsize=9)
+    ax = fig.add_subplot(1, 4, 3)
+    nm = ("along", "across", "expand", "power")
+    for n, kind in enumerate(("grid", "pair")):
+        R = [r for r in res if r["kind"] == kind]
+        x = np.arange(len(nm)) + 0.2 * n
+        ax.bar(x, [np.median([r["r2t_" + k] for r in R]) for k in nm], 0.2,
+               label=f"{kind} timing")
+        ax.bar(x + 0.4, [np.median([r["r2a_" + k] for r in R]) for k in nm], 0.2,
+               label=f"{kind} loudness", alpha=0.5)
+    ax.set_xticks(np.arange(len(nm)) + 0.3); ax.set_xticklabels(nm, fontsize=8)
+    ax.set_title("median cross-validated R2", fontsize=9); ax.legend(fontsize=6)
+    # the patch whose type timing predicts best: its pieces' phases in two opposite states
+    best = max(res, key=lambda r: (r["acc_t"] if np.isfinite(r["acc_t"]) else -1))
+    ax = fig.add_subplot(1, 4, 4, projection="polar")
+    for t, col in zip(TYPES, plt.cm.tab10.colors):
+        if t in best["trig"]:
+            mu, R = best["trig"][t]
+            ax.scatter(mu, R, color=col, s=18, label=t)
+            for k, (m_, r_) in enumerate(zip(mu, R)):
+                ax.annotate(str(k + 1), (m_, r_), fontsize=5, color=col)
+    ax.set_title(f"best patch ({best['kind']}): pieces 2.. phase vs piece 1, by type",
+                 fontsize=8)
+    ax.legend(fontsize=5, loc="lower left", bbox_to_anchor=(1.0, 0.0))
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, facecolor="white")
+    plt.close(fig)
+    print(f"  wrote {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("cmd", choices=("pairs", "decomp", "frames"))
+    ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types"))
     ap.add_argument("--tag", default="nobp_sm6_s3_box")
     ap.add_argument("--hz", default="",
                     help="analysis frequencies; snapped to the nearest solved bins. Default: "
@@ -691,14 +989,20 @@ def main():
     ap.add_argument("--cache", default="",
                     help="frames: where to keep the run and responses (several GB); "
                          "default results/interplay_cache")
+    ap.add_argument("--floor", type=float, default=0.3,
+                    help="types: below this on both directedness and |expansion|: mixed")
+    ap.add_argument("--ninputs", type=int, default=8,
+                    help="types: the pieces per patch whose timing and loudness are read")
+    ap.add_argument("--every-s", type=float, default=1.0, dest="every_s",
+                    help="types: seconds between the states read")
     a = ap.parse_args()
     from mesh_cache import load_cortex
     c = load_cortex("fsaverage5", verbose=False)
     run = waves.load_run(c, a.tag)
     S = waves.Surface(c)
-    if a.cmd == "frames":
+    if a.cmd in ("frames", "types"):
         print(f"  {run['name']}: {len(run['tags'])} pieces")
-        cmd_frames(a, c, S, run)
+        (cmd_frames if a.cmd == "frames" else cmd_types)(a, c, S, run)
         return
     hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
     want = ([float(v) for v in a.hz.split(",")] if a.hz else np.geomspace(0.005, 0.5, 14))
