@@ -346,6 +346,9 @@ def load_run(c, tag=None, standin=None, basis=None):
     p, _, _ = bo_step.unpack(x, c)
     if "map_clip" in z.files:
         p["map_clip"] = str(z["map_clip"])
+    # the readout the solve was scored through: snapshot or frame-mean (fluid.run)
+    if "decimate" in z.files:
+        p["decimate"] = str(z["decimate"])
     if "maps" in z.files and len(z["maps"]):
         p["maps"] = tuple(str(m) for m in z["maps"])
         p["a"], p["b"] = np.asarray(z["map_a"], float), np.asarray(z["map_b"], float)
