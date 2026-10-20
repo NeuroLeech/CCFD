@@ -164,7 +164,7 @@ it a script in `analysis/` could not find `fit/xspec.py`.
 | `core/` | the mesh, the medium, the clock and the observable — `paths`, `mesh_cache`, `surf_ops`, `fluid`, `swe_rot`, `units`, `timescale`, `bandpass`, `ladder`, `regimes` |
 | `targets/` | reading scans and building the FC targets they are scored against — `rbc`, `fc_score`, `fc_group_nki`, `fc_group_rbc`, `fc_vertexwise`, `reliability`, `holdout`, `lagged`, `checkerboard` |
 | `fit/` | the input model, the convex solve and the torch descent — `xspec`, `best_fit`, `torch_fit`, `rescore`, `ascending_basis`, `bo_step`, `subparcels`, `connectome`, `family` |
-| `analysis/` | diagnostics and experiments — `diag_*`, `band_*`, `interference`, `zones`, `checkerboard_model`, `checkerboard_modulation`, `onoff_*`, `task_inputs` |
+| `analysis/` | diagnostics and experiments — `diag_*`, `band_*`, `interference`, `waves`, `zones`, `checkerboard_model`, `checkerboard_modulation`, `onoff_*`, `task_inputs` |
 | `viz/` | `render_*`, `plot_*`, `surface_plots` |
 
 `data/` holds the datasets and `results/` everything written; both are addressed through
@@ -207,6 +207,7 @@ directory.
 | `targets/holdout.py` | solve on one half of the subjects, score on the other |
 | `analysis/reach.py` | can this fluid produce the target's patterns at all? |
 | `analysis/diag_maps.py` | where the fit fails, drawn on the surface |
+| `analysis/waves.py` | which way the field travels, and how much of it the inputs' relative timing decides |
 | **input, by hand** | |
 | `fit/input2.py` | input as K regions with timecourses supplied directly |
 | `fit/input_model.py` | input as K regions driven through r shared latent factors |
