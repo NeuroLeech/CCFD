@@ -43,3 +43,6 @@ data/*.fib.gz
 # hosted on Dropbox rather than in git: ~1.9 GB.
 ccfd_remote_data.zip
 ccfd_remote_models.zip
+# The shared Dropbox folder's own note, unpacked at the root by fetch_remote_data.sh on
+# every run; it describes the folder, not the repo.
+/README.txt
