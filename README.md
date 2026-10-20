@@ -208,6 +208,7 @@ directory.
 | `analysis/reach.py` | can this fluid produce the target's patterns at all? |
 | `analysis/diag_maps.py` | where the fit fails, drawn on the surface |
 | `analysis/waves.py` | which way the field travels, and how much of it the inputs' relative timing decides |
+| `analysis/interplay.py` | how pairs of driven pieces steer, expand, reinforce and cancel the waves between them; the fitted drive's flux split exactly into emission and pair interference |
 | **input, by hand** | |
 | `fit/input2.py` | input as K regions with timecourses supplied directly |
 | `fit/input_model.py` | input as K regions driven through r shared latent factors |

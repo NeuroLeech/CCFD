@@ -360,13 +360,28 @@ def load_run(c, tag=None, standin=None, basis=None):
                 ref_frames=int(z["ref_frames"]) if "ref_frames" in z.files else None)
 
 
-def transfer_fields(c, run, hz, chunk=32, verbose=True):
+def transfer_fields(c, run, hz, chunk=32, verbose=True, velocity=False):
     """Each piece's transfer function at every vertex: (len(hz), nV, K) complex64.
 
-    The same impulse experiment xspec.impulse_responses runs - the profile as initial
-    depth, sampled every `save` steps over `nimp` frames - but all K pieces integrated at
-    once through RotSWE.step_b, and Fourier-summed as it goes at only the frequencies
-    asked for. Holding the responses instead would be K x nimp x nV, ~4 GB at full width
+    `velocity=True` also returns the fluid velocity's, gathered to vertex tangent vectors,
+    (len(hz), nV, 3, K), and the resting depth per vertex: -> (H, U, depth). Depth x
+    velocity x the depth anomaly is the medium's energy flux, which is what says which way
+    a wave is carrying its energy rather than which way its crests appear to move.
+
+    The impulse is ONE FRAME of drive, injected the way every realisation injects it -
+    1/save of the profile on each of that frame's `save` steps - and the field is read
+    after each step that opens a frame, as fluid.run reads it. A frame-sampled drive
+    convolved with this response is then exactly what the integrator produces.
+
+    That is not xspec.impulse_responses, which sets the whole profile down as initial
+    depth in one step. A piece-sized bump released at once sloshes faster than a frame,
+    and sampled every `save` steps that ringing aliases into every band. At save 4 it is
+    harmless (r >= 0.998 against a direct drive below 0.08 Hz); at the 3x clock, save 12,
+    the whole field correlates only 0.90-0.95 with a directly driven run and the response
+    at the piece itself is off by up to 9x, where the box is exact to r = 0.9999.
+
+    All K pieces are integrated at once through RotSWE.step_b and Fourier-summed as they
+    go, at only the frequencies asked for. Holding the responses instead would be K x nimp x nV, ~4 GB at full width
     for the 100-piece set; this is K x nV per frequency."""
     import fluid as fl
     from xspec import profile_tag
@@ -377,36 +392,52 @@ def transfer_fields(c, run, hz, chunk=32, verbose=True):
            f"_b{np.round(p.get('b', 0), 3)}_mc{p.get('map_clip')}_{p.get('mode')}"
            f"_{nimp}_{save}_{profile_tag(P)}_{run['frame_s']:.6g}"
            f"_hz{abs(hash(tuple(np.round(hz, 7)))) % 10**8}")
-    f = os.path.join(CACHE, "waveH_" + key.replace(" ", "") + ".npz")
+    f = os.path.join(CACHE, ("waveHUbox_" if velocity else "waveHbox_") + key.replace(" ", "")
+                     + ".npz")
     if os.path.exists(f):
         z = np.load(f)
         if np.allclose(z["hz"], hz):
-            return z["H"]
+            return (z["H"], z["U"], z["depth"]) if velocity else z["H"]
     s, dt, g, Hd = fl.build(c, p, sponge=True)
+    depth = np.asarray(Hd, float)
     K = len(P)
     w = 2 * np.pi * hz * run["frame_s"]                              # rad / frame
-    h = np.ascontiguousarray(P.T, np.float32)                        # (nV, K)
+    Pt = np.ascontiguousarray(P.T, np.float32) / np.float32(save)    # (nV, K) per step
+    h = np.zeros((c.nV, K), np.float32)
     ue = np.zeros((s.nE, K), np.float32)
     Hd = Hd[:, None]
     out = np.zeros((len(hz), c.nV * K), np.complex64)
-    buf, n0 = [h.copy()], 0
+    outu = np.zeros((len(hz), c.nV * 3 * K), np.complex64) if velocity else None
+    if velocity:
+        chunk = min(chunk, 16)
+    buf, bufu, n0 = [], [], 0
     dt = np.float32(dt)
 
-    def flush(buf, n0):
+    def flush(buf, bufu, n0):
         ph = np.exp(-1j * np.outer(w, np.arange(n0, n0 + len(buf)))).astype(np.complex64)
         out[:] += ph @ np.stack(buf).reshape(len(buf), -1)
+        if velocity:
+            outu[:] += ph @ np.stack(bufu).reshape(len(bufu), -1)
 
-    for n in range(1, nimp * save):
+    for n in range(nimp * save):
+        if n < save:
+            h += Pt
         ue, h = s.step_b(ue, h, dt, g, Hd)
         if n % save == 0:
             buf.append(h.copy())
+            if velocity:
+                bufu.append(s.gather_b(ue).astype(np.float32))
             if len(buf) == chunk:
-                flush(buf, n0); n0 += len(buf); buf = []
+                flush(buf, bufu, n0); n0 += len(buf); buf, bufu = [], []
         if verbose and n % (50 * save * 20) == 0:
             print(f"    transfer: frame {n // save}/{nimp}", flush=True)
     if buf:
-        flush(buf, n0)
+        flush(buf, bufu, n0)
     H = out.reshape(len(hz), c.nV, K)
+    if velocity:
+        U = outu.reshape(len(hz), c.nV, 3, K)
+        np.savez(f, H=H, U=U, depth=depth, hz=hz)
+        return H, U, depth
     np.savez(f, H=H, hz=hz)
     return H
 
