@@ -42,3 +42,4 @@ data/*.fib.gz
 # The data bundle for remote runs (results/fc/nobp, the input profiles, small caches),
 # hosted on Dropbox rather than in git: ~1.9 GB.
 ccfd_remote_data.zip
+ccfd_remote_models.zip
