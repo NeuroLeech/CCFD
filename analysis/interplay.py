@@ -813,6 +813,161 @@ def cmd_types(a, c, S, run):
     _plot_types(path.replace(".npz", ".png"), res, run)
 
 
+# ============================================================ E: steering modes
+
+READOUTS = ("along", "across", "expand")
+
+
+def steering_matrices(P, H, U, depth, area, nrm, V):
+    """Per readout, the Hermitian K x K matrix M with time-averaged patch flux
+    = Re(z^H M z) exactly, for complex input amplitudes z at this frequency; and G with
+    patch power = z^H G z.
+
+    The flux at a vertex is depth/2 Re(conj(h) u), h = H z and u = U z, so along a
+    direction d it is z^H B z / 2 with B = sum_v w depth conj(H_v)^T (U_v . d); its real
+    part is the Hermitian part of B. The readouts are the patch axis e1, the side axis e2,
+    and the direction away from the patch centre at each vertex."""
+    pv = P["pv"]
+    wd = area[pv] * depth[pv]
+    Hp, Up = H[pv], U[pv]                                            # (nv, K), (nv, 3, K)
+    od = V[pv] - P["centre"]
+    n_v = nrm[pv]
+    od = od - (od * n_v).sum(1, keepdims=True) * n_v
+    od /= np.maximum(np.linalg.norm(od, axis=1, keepdims=True), 1e-9)
+    dirs = dict(along=np.broadcast_to(P["e1"], od.shape),
+                across=np.broadcast_to(P["e2"], od.shape), expand=od)
+    out = {}
+    Hw = np.conj(Hp) * wd[:, None]
+    for nm, d in dirs.items():
+        Ud = np.einsum("vck,vc->vk", Up, d)
+        B = Hw.T @ Ud
+        out[nm] = 0.25 * (B + B.conj().T)                            # 1/2 flux, 1/2 Hermitian
+    out["G"] = (np.conj(Hp) * area[pv][:, None]).T @ Hp
+    return out
+
+
+def mode_shape(x, cen, P, hz, readout="along"):
+    """What an input combination is: how many pieces, how far away, and whether it is a
+    SWEEP in the readout's own direction - the downstream pieces lagging.
+
+    sweep: sum over pairs of |x_k|^2 |x_l|^2 sign(s_l - s_k) sin(phi_k - phi_l), over the
+    same with |sin|. s is position along e1 for `along`, along e2 for `across`, and
+    distance from the patch centre for `expand`. +1 when every piece further along lags
+    every one before it - an input wave moving the way the readout counts as positive,
+    or for `expand` the centre leading and the surround following; -1 the reverse."""
+    w = np.abs(x) ** 2
+    pr = 1.0 / np.sum(w ** 2)
+    rel = cen - P["centre"]
+    s = {"along": rel @ P["e1"], "across": rel @ P["e2"],
+         "expand": np.linalg.norm(rel, axis=1)}[readout]
+    dist = np.linalg.norm(cen - P["centre"], axis=1)
+    phi = np.angle(x)
+    top = np.argsort(w)[::-1][:12]
+    num = den = 0.0
+    for a_ in range(len(top)):
+        for b_ in range(a_ + 1, len(top)):
+            k, l = top[a_], top[b_]
+            if abs(s[l] - s[k]) < 3:
+                continue
+            ww = w[k] * w[l]
+            sn = np.sin(phi[k] - phi[l])
+            num += ww * np.sign(s[l] - s[k]) * sn
+            den += ww * abs(sn)
+    return dict(pr=float(pr), reach=float((w * dist).sum()), sweep=float(num / den) if den
+                else np.nan, top=top[:6], amp=np.abs(x[top[:6]]),
+                lag_s=(np.angle(x[top[:6]] * np.conj(x[top[0]])) / (2 * np.pi * hz)))
+
+
+def cmd_steer(a, c, S, run):
+    import glob
+    K = len(run["tags"])
+    D, cen, pairs = geometry(c, S, run["labels"], K)
+    patches = make_patches(c, S, run, D, cen, pairs, a.radius, a.grid, a.reach)
+    hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
+    grid = np.unique([int(np.argmin(np.abs(np.log(hzb / f)))) for f in np.geomspace(0.005, 0.5, 14)])
+    H, U, depth = waves.transfer_fields(c, run, hzb[grid], velocity=True)
+    want = [float(v) for v in a.hz.split(",")] if a.hz else [0.059, 0.0848, 0.1226]
+    sel = [int(np.argmin(np.abs(np.log(hzb[grid] / f)))) for f in want]
+    area, nrm = np.asarray(c.A), np.asarray(c.m.vertex_normal)
+    res = []
+    for fi in sel:
+        hz, b = hzb[grid][fi], grid[fi]
+        Sf = 0.5 * (run["S"][b] + run["S"][b].conj().T)
+        iso = np.trace(Sf).real / K
+        rows = []
+        for P in patches:
+            M = steering_matrices(P, H[fi], U[fi], depth, area, nrm, S.V)
+            r = dict(kind=P["kind"])
+            for nm in READOUTS:
+                ev, X = np.linalg.eigh(M[nm])
+                for sgn, j in (("+", -1), ("-", 0)):
+                    x = X[:, j]
+                    sh = mode_shape(x, cen, P, hz, nm)
+                    key = nm + sgn
+                    r[key] = dict(lam=float(ev[j]), use=float((x.conj() @ Sf @ x).real / iso),
+                                  **sh)
+                # how the fitted drive pushes this readout, and how hard it could
+                r[nm + "_drive"] = float(np.trace(M[nm] @ Sf).real)
+                r[nm + "_range"] = (float(ev[0]), float(ev[-1]))
+            r["M"] = {nm: M[nm].astype(np.complex64) for nm in READOUTS}
+            r.update({k: P[k] for k in ("i", "j", "vertex") if k in P})
+            rows.append(r)
+        res.append(dict(hz=float(hz), rows=rows))
+        print(f"\n  {hz:.4f} Hz (period {1/hz:.0f} s)")
+        for kind in ("pair", "grid"):
+            R = [r for r in rows if r["kind"] == kind]
+            for nm in READOUTS:
+                sw = np.array([r[nm + "+"]["sweep"] for r in R])
+                swm = np.array([r[nm + "-"]["sweep"] for r in R])
+                pr = np.array([r[nm + "+"]["pr"] for r in R])
+                reach = np.array([r[nm + "+"]["reach"] for r in R])
+                up = np.array([r[nm + "+"]["use"] for r in R])
+                um = np.array([r[nm + "-"]["use"] for r in R])
+                asym = np.array([r[nm + "_range"][1] / max(-r[nm + "_range"][0], 1e-30)
+                                 for r in R])
+                print(f"    {kind} {nm:6s}: + mode {np.median(pr):4.1f} pieces, centred "
+                      f"{np.median(reach):4.1f} mm away; sweep + {np.nanmedian(sw):+.2f} / "
+                      f"- {np.nanmedian(swm):+.2f}; |+|/|-| {np.median(asym):.2f}; fitted "
+                      f"drive uses + x{np.median(up):.2f}, - x{np.median(um):.2f}")
+    for q in res[:len(sel) // 2] + res[len(sel) // 2 + 1:]:
+        for r in q["rows"]:
+            r.pop("M", None)                       # kept only where they are used
+    # the exact quadratic form against the realised states: no fitting at all
+    tf = glob.glob(os.path.join(RESULTS, f"interplay_types_{run['name']}.npz"))
+    cdir = a.cache or os.path.join(RESULTS, "interplay_cache")
+    bf = glob.glob(os.path.join(cdir, f"band_{run['name']}_*s_seed*_*.npz"))
+    pred = None
+    if tf and bf:
+        zt = np.load(tf[0], allow_pickle=True)
+        every = int(zt["every"])
+        Z = np.load(bf[0], mmap_mode="r")["Z"]
+        smooth_n = int(round(1.0 / (run["frame_s"] * np.mean(zt["band"]))))
+        mid = sel[len(sel) // 2]
+        rows = res[len(sel) // 2]["rows"]
+        pred = []
+        for r, t in zip(rows, zt["res"]):
+            Fp = [_smooth(np.real(np.einsum("tk,tk->t", np.conj(Z), Z @ r["M"][nm].T)),
+                          smooth_n)[::every] for nm in ("along", "across")]
+            n = len(t["state"]["theta"])
+            thp = np.arctan2(Fp[1][:n], Fp[0][:n])
+            th = t["state"]["theta"]
+            w = t["state"]["dirn"]
+            agree = float((w * np.cos(thp - th)).sum() / w.sum())
+            rc = float(np.corrcoef(np.cos(thp), np.cos(th))[0, 1])
+            pred.append(dict(kind=r["kind"], agree=agree, r_cos=rc))
+        for kind in ("pair", "grid"):
+            P_ = [p for p in pred if p["kind"] == kind]
+            print(f"\n  {kind}: flux direction predicted from all {K} inputs by the "
+                  f"{hzb[grid][mid]:.4f} Hz form, no fitting: mean cos(predicted - actual) "
+                  f"median {np.median([p['agree'] for p in P_]):+.2f}; r(cos) median "
+                  f"{np.median([p['r_cos'] for p in P_]):+.2f}")
+    path = os.path.join(RESULTS, f"interplay_steer_{run['name']}.npz")
+    np.savez(path, res=np.array(res, object), pred=np.array(pred, object),
+             tags=np.array(run["tags"], object), cen=cen)
+    print(f"\n  wrote {path}")
+    _plot_steer(path.replace(".npz", ".png"), res, pred, c, run, cen, patches)
+
+
 # ============================================================ pictures
 
 def _plot_pairs(path, res, lags, hz):
@@ -963,9 +1118,83 @@ def _plot_types(path, res, run):
     print(f"  wrote {path}")
 
 
+def _plot_steer(path, res, pred, c, run, cen, patches):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.tri import Triangulation
+    from render_regimes import _proj
+    rows = res[len(res) // 2]["rows"]
+    hz = res[len(res) // 2]["hz"]
+    # the pair patch whose along-axis flux the inputs can swing hardest, both ways
+    best = max(range(len(rows)), key=lambda n: (rows[n]["kind"] == "pair") *
+               min(rows[n]["along_range"][1], -rows[n]["along_range"][0]))
+    P, r = patches[best], rows[best]
+    lab = np.asarray(run["labels"])
+    cv = int(np.argmin(np.linalg.norm(c.V - P["centre"], axis=1)))
+    views = _proj(c.V, c.F)
+    xy, vis, _ = next((v for v in views if v[1][cv]), views[0])     # one that shows it
+    keep = vis[c.F].all(1)
+    tri = Triangulation(xy[:, 0], xy[:, 1], c.F[keep])
+    ctr = xy[np.argmin(np.linalg.norm(c.V - P["centre"], axis=1))]
+    fig = plt.figure(figsize=(16, 7))
+    for n, key in enumerate(("along+", "along-", "expand+", "expand-")):
+        ax = fig.add_subplot(2, 4, n + 1)
+        ev, X = np.linalg.eigh(r["M"][key[:-1]].astype(complex))
+        x = X[:, -1] if key.endswith("+") else X[:, 0]
+        x = x * np.exp(-1j * np.angle(x[np.argmax(np.abs(x))]))
+        ph = np.where(lab >= 0, np.angle(x[np.clip(lab, 0, None)]), np.nan)
+        am = np.where(lab >= 0, np.abs(x[np.clip(lab, 0, None)]), 0.0)
+        am = am / max(am.max(), 1e-30)
+        ax.tripcolor(tri, np.zeros(c.nV), cmap="Greys", vmin=0, vmax=4, shading="gouraud")
+        col = plt.cm.twilight((np.nan_to_num(ph) + np.pi) / (2 * np.pi))
+        col[:, 3] = am
+        ax.scatter(xy[vis, 0], xy[vis, 1], c=col[vis], s=7, linewidths=0)
+        e1 = P["e1"]
+        p0 = ctr
+        p1 = xy[np.argmin(np.linalg.norm(c.V - (P["centre"] + 12 * e1), axis=1))]
+        ax.annotate("", p1, p0, arrowprops=dict(arrowstyle="->", lw=1.5))
+        ax.set_xlim(ctr[0] - 45, ctr[0] + 45); ax.set_ylim(ctr[1] - 35, ctr[1] + 35)
+        ax.set_aspect("equal"); ax.axis("off")
+        nm = {"along+": "pushes waves along the arrow", "along-": "pushes them back",
+              "expand+": "makes the patch radiate", "expand-": "makes it converge"}[key]
+        ax.set_title(f"{nm}\nsweep {r[key]['sweep']:+.2f}, {r[key]['pr']:.1f} pieces",
+                     fontsize=8)
+    ax = fig.add_subplot(2, 4, 5)
+    for nm, colr in zip(READOUTS, ("C0", "C1", "C2")):
+        v = np.array([q[nm + "+"]["sweep"] for q in rows])
+        ax.hist(v[np.isfinite(v)], 30, alpha=0.5, color=colr, label=f"{nm} +")
+    ax.set_title(f"sweep of the + modes ({hz:.3f} Hz)", fontsize=9); ax.legend(fontsize=7)
+    ax = fig.add_subplot(2, 4, 6)
+    for nm, colr in zip(READOUTS, ("C0", "C1", "C2")):
+        ax.scatter([q[nm + "+"]["use"] for q in rows], [q[nm + "-"]["use"] for q in rows],
+                   s=5, color=colr, label=nm, alpha=0.6)
+    ax.plot([0.1, 10], [0.1, 10], color="0.6", lw=0.6)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("fitted drive's power in + mode / isotropic", fontsize=8)
+    ax.set_ylabel("in - mode / isotropic", fontsize=8); ax.legend(fontsize=7)
+    ax = fig.add_subplot(2, 4, 7)
+    ax.hist([q["along+"]["pr"] for q in rows], 30, alpha=0.6, label="pieces in mode")
+    ax.hist([q["along+"]["reach"] for q in rows], 30, alpha=0.6, label="mm from patch")
+    ax.legend(fontsize=7); ax.set_title("size of the along+ modes", fontsize=9)
+    if pred:
+        ax = fig.add_subplot(2, 4, 8)
+        for kind in ("pair", "grid"):
+            ax.hist([p["agree"] for p in pred if p["kind"] == kind], 30, alpha=0.6,
+                    label=kind)
+        ax.set_title("direction from all inputs, no fitting: mean cos(error)", fontsize=9)
+        ax.legend(fontsize=7)
+    fig.suptitle(f"steering modes at {hz:.3f} Hz: colour = input phase, opacity = amplitude; "
+                 f"example patch {run['tags'][P['i']]}-{run['tags'][P['j']]}", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, facecolor="white")
+    plt.close(fig)
+    print(f"  wrote {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types"))
+    ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types", "steer"))
     ap.add_argument("--tag", default="nobp_sm6_s3_box")
     ap.add_argument("--hz", default="",
                     help="analysis frequencies; snapped to the nearest solved bins. Default: "
@@ -1000,9 +1229,9 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     run = waves.load_run(c, a.tag)
     S = waves.Surface(c)
-    if a.cmd in ("frames", "types"):
+    if a.cmd in ("frames", "types", "steer"):
         print(f"  {run['name']}: {len(run['tags'])} pieces")
-        (cmd_frames if a.cmd == "frames" else cmd_types)(a, c, S, run)
+        dict(frames=cmd_frames, types=cmd_types, steer=cmd_steer)[a.cmd](a, c, S, run)
         return
     hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
     want = ([float(v) for v in a.hz.split(",")] if a.hz else np.geomspace(0.005, 0.5, 14))
