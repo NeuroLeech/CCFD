@@ -1414,6 +1414,37 @@ def classify_flow(parts, total, interf):
     return "other", kappa, top
 
 
+def combine_at(run, patches, Hf, Uf, depth, area, nrm, S, D, adj, b, nregions=3):
+    """One frequency: for every patch, its net flow under the fitted drive set against
+    each main input region alone, everything else alone, and their interference."""
+    K = len(run["tags"])
+    Sf = 0.5 * (run["S"][b] + run["S"][b].conj().T)
+    rows = []
+    for P in patches:
+        M = steering_matrices(P, Hf, Uf, depth, area, nrm, S.V)
+        Fa, Fc = (float(np.real(np.trace(M[k] @ Sf))) for k in ("along", "across"))
+        mag = float(np.hypot(Fa, Fc))
+        n_hat = np.array([Fa, Fc]) / max(mag, 1e-30)
+        Mn = n_hat[0] * M["along"] + n_hat[1] * M["across"]
+        ck, _, _ = source_map(M, Sf, n_hat)
+        regs = source_regions(ck, adj)[:nregions]
+        used = np.zeros(K, bool)
+        parts = []
+        for mem, _ in regs:
+            msk = np.zeros(K, bool); msk[mem] = True; used |= msk
+            parts.append(flow_alone(Mn, Sf, msk))
+        rest = flow_alone(Mn, Sf, ~used)
+        total = flow_alone(Mn, Sf, np.ones(K, bool))
+        interf = total - sum(parts) - rest
+        cat, kappa, top = classify_flow(parts + [rest], total, interf)
+        power = float(np.real(np.trace(M["G"] @ Sf)))
+        rows.append(dict(cat=cat, kappa=kappa, top=top, interf=interf / total,
+                         parts=[p / total for p in parts], rest=rest / total,
+                         n_regions=len(regs), up=Fa / max(mag, 1e-30), power=power,
+                         src_dist=[float(np.mean(D[m, P["vertex"]])) for m, _ in regs]))
+    return rows
+
+
 def cmd_combine(a, c, S, run):
     K = len(run["tags"])
     D, cen, adj = geometry(c, S, run["labels"], K)
@@ -1438,31 +1469,9 @@ def cmd_combine(a, c, S, run):
           f"{run['name']}")
     res = []
     for fi in sel:
-        hz, b = float(hzb[grid][fi]), grid[fi]
-        Sf = 0.5 * (run["S"][b] + run["S"][b].conj().T)
-        rows = []
-        for P in patches:
-            M = steering_matrices(P, H[fi], U[fi], depth, area, nrm, S.V)
-            Fa, Fc = (float(np.real(np.trace(M[k] @ Sf))) for k in ("along", "across"))
-            mag = float(np.hypot(Fa, Fc))
-            n_hat = np.array([Fa, Fc]) / max(mag, 1e-30)
-            Mn = n_hat[0] * M["along"] + n_hat[1] * M["across"]
-            ck, _, _ = source_map(M, Sf, n_hat)
-            regs = source_regions(ck, adj)[:a.nregions]
-            used = np.zeros(K, bool)
-            parts = []
-            for mem, _ in regs:
-                msk = np.zeros(K, bool); msk[mem] = True; used |= msk
-                parts.append(flow_alone(Mn, Sf, msk))
-            rest = flow_alone(Mn, Sf, ~used)
-            total = flow_alone(Mn, Sf, np.ones(K, bool))
-            interf = total - sum(parts) - rest
-            cat, kappa, top = classify_flow(parts + [rest], total, interf)
-            power = float(np.real(np.trace(M["G"] @ Sf)))
-            rows.append(dict(cat=cat, kappa=kappa, top=top, interf=interf / total,
-                             parts=[p / total for p in parts], rest=rest / total,
-                             n_regions=len(regs), up=Fa / max(mag, 1e-30), power=power,
-                             src_dist=[float(np.mean(D[m, P["vertex"]])) for m, _ in regs]))
+        hz = float(hzb[grid][fi])
+        rows = combine_at(run, patches, H[fi], U[fi], depth, area, nrm, S, D, adj,
+                          grid[fi], a.nregions)
         res.append(dict(hz=hz, rows=rows))
         cats = np.array([r["cat"] for r in rows])
         kap = np.array([r["kappa"] for r in rows])
@@ -1482,6 +1491,89 @@ def cmd_combine(a, c, S, run):
              names=np.array([P["name"] for P in patches], object))
     print(f"\n  wrote {path}")
     _plot_combine(path.replace(".npz", ""), res, patches, c, run, g1)
+
+
+# ============================================================ J: weighted by what BOLD sees
+
+def hrf_power(hz):
+    """|HRF(f)|^2 of the SPM canonical double gamma (peak 6 s, undershoot 16 s, 1/6),
+    normalised to 1 at 0 Hz."""
+    from scipy.stats import gamma
+    t = np.arange(0, 40, 0.01)
+    h = gamma.pdf(t, 6) - gamma.pdf(t, 16) / 6.0
+    Hf = np.array([np.sum(h * np.exp(-2j * np.pi * f * t)) for f in np.atleast_1d(hz)])
+    H0 = np.sum(h)
+    return np.abs(Hf / H0) ** 2
+
+
+def observables(hz, frame_s, smooth_frames):
+    """Gain^2 per frequency of four readings of what is observed. Temporal filters act on
+    each frequency by a gain alone, so they reweight frequencies and change no wave's
+    geometry at any one of them."""
+    sd_t = smooth_frames / 2.3548 * frame_s
+    import bandpass
+    model = np.exp(-(2 * np.pi * hz * sd_t) ** 2)          # the gaussian kernel, squared
+    hrf = hrf_power(hz)
+    return {"raw field": np.ones_like(hz),
+            "this model's observable": model,
+            "haemodynamic response": hrf,
+            "HRF + 0.01-0.08 Hz": hrf * bandpass.response(hz, frame_s, 0.01, 0.08)}
+
+
+def cmd_bold(a, c, S, run):
+    import json
+    K = len(run["tags"])
+    D, cen, adj = geometry(c, S, run["labels"], K)
+    g1 = np.load(os.path.join(os.path.dirname(RESULTS), "data", "cache",
+                              f"cortical_maps_{c.mesh}.npz"))["grad1"]
+    patches = cortex_patches(c, S, a.grid, a.radius, g1)
+    gr = np.array([float(g1[P["pv"]].mean()) for P in patches])
+    hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
+    grid = np.unique([int(np.argmin(np.abs(np.log(hzb / f)))) for f in np.geomspace(0.005, 0.5, 14)])
+    hz = hzb[grid]
+    cf = os.path.join(RESULTS, f"interplay_combine_all_{run['name']}.npz")
+    if os.path.exists(cf):
+        allrows = list(np.load(cf, allow_pickle=True)["rows"])
+    else:
+        H, U, depth = waves.transfer_fields(c, run, hz, velocity=True)
+        area, nrm = np.asarray(c.A), np.asarray(c.m.vertex_normal)
+        allrows = []
+        for fi in range(len(grid)):
+            allrows.append(combine_at(run, patches, H[fi], U[fi], depth, area, nrm, S, D,
+                                      adj, grid[fi], a.nregions))
+            print(f"    {hz[fi]:.4f} Hz done", flush=True)
+        np.savez(cf, rows=np.array(allrows, object), hz=hz)
+    z = np.load(os.path.join(RESULTS, f"xspec_{run['name']}.npz"), allow_pickle=True)
+    smooth = float(json.loads(str(z["args_json"])).get("smooth", 8.0))
+    obs = observables(hz, run["frame_s"], smooth)
+    width = np.gradient(hz)                                  # each bin stands for a band
+    power = np.array([[r["power"] for r in rows] for rows in allrows])     # (nf, np)
+    cats = np.array([[r["cat"] for r in rows] for rows in allrows])
+    interf = np.array([[r["interf"] for r in rows] for rows in allrows])
+    out = {}
+    print(f"\n  {len(patches)} patches, {len(hz)} frequencies {hz[0]:.4f}-{hz[-1]:.3f} Hz, "
+          f"under the fitted drive of {run['name']}")
+    for nm, g in obs.items():
+        w = g[:, None] * power * width[:, None]
+        w = w / w.sum(0, keepdims=True)                      # per patch, over frequency
+        share = {k: (w * (cats == k)).sum(0) for k in CATS}  # per patch
+        f_med = np.array([np.interp(0.5, np.cumsum(w[:, p]), hz) for p in range(w.shape[1])])
+        out[nm] = dict(w=w, share=share, f_med=f_med,
+                       interf=(w * np.clip(interf, -10, 10)).sum(0))
+        lo, hi = gr <= np.percentile(gr, 20), gr >= np.percentile(gr, 80)
+        print(f"\n  {nm}: half of what is seen lies below {np.median(f_med):.3f} Hz (median "
+              f"patch)")
+        for lab_, m in (("all", np.ones(len(gr), bool)), ("sensorimotor fifth", lo),
+                        ("transmodal fifth", hi)):
+            print(f"    {lab_:19s}: " + ", ".join(f"{k} {np.mean(share[k][m]):.0%}"
+                                                  for k in CATS)
+                  + f"; interference adds {np.median(out[nm]['interf'][m]):+.0%} of the net "
+                    f"(median)")
+    path = os.path.join(RESULTS, f"interplay_bold_{run['name']}.npz")
+    np.savez(path, hz=hz, grad=gr, out=np.array([out], object),
+             obs=np.array([obs], object), vertex=np.array([P["vertex"] for P in patches]))
+    print(f"\n  wrote {path}")
+    _plot_bold(path.replace(".npz", ""), hz, obs, out, power, width, gr, patches, c, run, g1)
 
 
 # ============================================================ pictures
@@ -2114,10 +2206,95 @@ def _plot_combine(stem, res, patches, c, run, g1):
     print(f"  wrote {stem}_gradient.png")
 
 
+def _plot_bold(stem, hz, obs, out, power, width, gr, patches, c, run, g1):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.tri import Triangulation
+    from render_regimes import _proj
+    ink, muted = "#1a1a19", "#6b6a64"
+    col = dict(zip(CATS, ("#2a78d6", "#1baf7a", "#eb6834", "#b5b3ab")))
+    ocol = dict(zip(obs, ("#b5b3ab", "#6250d6", "#e87ba4", "#008300")))
+    names = list(obs)
+    fig = plt.figure(figsize=(17, 8.6), facecolor="white")
+    gs = fig.add_gridspec(2, 5, width_ratios=(1.25, 1, 1, 1, 1), hspace=0.38, wspace=0.28)
+    # what each observable keeps: the median patch's weight per frequency
+    ax = fig.add_subplot(gs[0, 0])
+    for nm in names:
+        w = out[nm]["w"] / width[:, None]
+        ax.plot(hz, np.median(w, 1) / np.median(w, 1).max(), "o-", ms=3, lw=2,
+                color=ocol[nm], label=nm)
+    ax.set_xscale("log"); ax.set_xlabel("Hz", fontsize=8, color=muted)
+    ax.set_title("what each observable sees of the field\n(median patch, peak = 1)",
+                 fontsize=9, color=ink)
+    ax.legend(fontsize=7, frameon=False); ax.tick_params(labelsize=7, colors=muted)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    # the category mix along the gradient, per observable
+    edges = np.percentile(gr, [0, 20, 40, 60, 80, 100])
+    bins = np.clip(np.digitize(gr, edges[1:-1]), 0, 4)
+    for k, nm in enumerate(names):
+        ax = fig.add_subplot(gs[0, k + 1])
+        bottom = np.zeros(5)
+        for ct in CATS:
+            v = np.array([np.mean(out[nm]["share"][ct][bins == i]) for i in range(5)])
+            ax.bar(range(5), v, bottom=bottom, color=col[ct], edgecolor="white",
+                   linewidth=2, label=ct)
+            bottom += v
+        ax.set_xticks(range(5))
+        ax.set_xticklabels(["sensori-\nmotor", "", "", "", "trans-\nmodal"], fontsize=7,
+                           color=muted)
+        ax.set_ylim(0, 1)
+        ax.set_title(nm, fontsize=9, color=ocol[nm] if nm != "raw field" else ink)
+        ax.tick_params(labelsize=7, colors=muted)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        if k == 0:
+            ax.set_ylabel("share of observed wave power", fontsize=8, color=muted)
+    h_, l_ = fig.axes[1].get_legend_handles_labels()
+    fig.legend(h_, l_, loc="upper center", ncol=4, frameon=False, fontsize=9,
+               bbox_to_anchor=(0.6, 0.995))
+    # maps: each patch's dominant way of making its observed waves
+    greys = LinearSegmentedColormap.from_list("g", ("#f4f3ef", "#b9b7af"))
+    lab = np.asarray(run["labels"])
+    xy, vis, _ = _proj(c.V, c.F, views=((8, 180, "lateral"),))[0]
+    keep = vis[c.F].all(1)
+    tri = Triangulation(xy[:, 0], xy[:, 1], c.F[keep])
+    vx = np.array([P["vertex"] for P in patches])
+    for k, nm in enumerate(names):
+        ax = fig.add_subplot(gs[1, k + 1])
+        ax.tripcolor(tri, g1, cmap=greys, shading="gouraud", rasterized=True)
+        ax.tricontour(tri, (lab >= 0).astype(float), levels=[0.5], colors=muted,
+                      linewidths=0.5)
+        sh = np.stack([out[nm]["share"][ct] for ct in CATS])
+        dom = np.array(CATS)[np.argmax(sh, 0)]
+        m = vis[vx]
+        for ct in CATS:
+            mm = m & (dom == ct)
+            ax.scatter(xy[vx[mm], 0], xy[vx[mm], 1], s=30, color=col[ct],
+                       edgecolors="white", linewidths=0.8)
+        ax.set_aspect("equal"); ax.axis("off")
+        ax.set_title(f"{nm}: dominant, lateral", fontsize=8, color=ink)
+    ax = fig.add_subplot(gs[1, 0]); ax.axis("off")
+    ax.text(0, 0.95, "each patch's observed waves are weighted\nover frequency by "
+            "(observable gain)^2 x\n(the patch's power under the fitted drive)\nx (bin "
+            "width); the category shares are\nthe fractions of that weight in frequencies\n"
+            "where the patch's flow is single source,\nreinforcing, cancelling or other.\n\n"
+            "filters in time change no wave's\ngeometry at a given frequency; they only\n"
+            "decide which frequencies are seen.", va="top", fontsize=8.5, color=ink,
+            transform=ax.transAxes)
+    fig.suptitle("Which way of making waves dominates what is OBSERVED, by reading of "
+                 "the observable", fontsize=12, color=ink, y=1.04)
+    fig.savefig(stem + ".png", dpi=130, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {stem}.png")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types", "steer",
-                                    "steermap", "sweeps", "remote", "combine"))
+                                    "steermap", "sweeps", "remote", "combine", "bold"))
     ap.add_argument("--tag", default="nobp_sm6_s3_box")
     ap.add_argument("--hz", default="",
                     help="analysis frequencies; snapped to the nearest solved bins. Default: "
@@ -2157,10 +2334,12 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     run = waves.load_run(c, a.tag)
     S = waves.Surface(c)
-    if a.cmd in ("frames", "types", "steer", "steermap", "sweeps", "remote", "combine"):
+    if a.cmd in ("frames", "types", "steer", "steermap", "sweeps", "remote", "combine",
+                 "bold"):
         print(f"  {run['name']}: {len(run['tags'])} pieces")
         dict(frames=cmd_frames, types=cmd_types, steer=cmd_steer, steermap=cmd_steermap,
-             sweeps=cmd_sweeps, remote=cmd_remote, combine=cmd_combine)[a.cmd](a, c, S, run)
+             sweeps=cmd_sweeps, remote=cmd_remote, combine=cmd_combine,
+             bold=cmd_bold)[a.cmd](a, c, S, run)
         return
     hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
     want = ([float(v) for v in a.hz.split(",")] if a.hz else np.geomspace(0.005, 0.5, 14))
