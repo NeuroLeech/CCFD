@@ -1414,6 +1414,38 @@ def classify_flow(parts, total, interf):
     return "other", kappa, top
 
 
+def control_drive(run, mode, seed=0):
+    """The fitted cross-spectrum, or a control with something taken out of it.
+
+      fitted        as solved
+      independent   each input keeps its fitted power, all coherence between inputs
+                    removed (S -> diag S): interference averages to zero by construction,
+                    so this shows what the inputs' coherence is responsible for
+      random        at every frequency the fitted eigenvalues - the same total power and
+                    the same spread of it over independent patterns - with eigenvectors
+                    drawn at random (Haar unitary): coherent like the fit, but with timing
+                    patterns that were never fitted to anything"""
+    S = np.asarray(run["S"])
+    if mode == "fitted":
+        return run
+    if mode == "independent":
+        d = np.real(np.einsum("fkk->fk", S))
+        return dict(run, S=np.einsum("fk,kl->fkl", d, np.eye(S.shape[1])).astype(complex),
+                    name=f"{run['name']}_independent")
+    if mode == "random":
+        rng = np.random.default_rng(seed)
+        K = S.shape[1]
+        out = np.empty_like(S)
+        for f in range(len(S)):
+            ev = np.clip(np.linalg.eigvalsh(0.5 * (S[f] + S[f].conj().T)), 0, None)
+            Z = (rng.standard_normal((K, K)) + 1j * rng.standard_normal((K, K))) / np.sqrt(2)
+            Q, R = np.linalg.qr(Z)
+            Q = Q * (np.diag(R) / np.abs(np.diag(R)))[None, :]
+            out[f] = (Q * ev) @ Q.conj().T
+        return dict(run, S=out, name=f"{run['name']}_random{seed}")
+    raise ValueError(mode)
+
+
 def combine_at(run, patches, Hf, Uf, depth, area, nrm, S, D, adj, b, nregions=3):
     """One frequency: for every patch, its net flow under the fitted drive set against
     each main input region alone, everything else alone, and their interference."""
@@ -1446,6 +1478,7 @@ def combine_at(run, patches, Hf, Uf, depth, area, nrm, S, D, adj, b, nregions=3)
 
 
 def cmd_combine(a, c, S, run):
+    run = control_drive(run, a.drive, a.seed)
     K = len(run["tags"])
     D, cen, adj = geometry(c, S, run["labels"], K)
     g1 = np.load(os.path.join(os.path.dirname(RESULTS), "data", "cache",
@@ -1521,6 +1554,7 @@ def observables(hz, frame_s, smooth_frames):
 
 
 def cmd_bold(a, c, S, run):
+    run = control_drive(run, a.drive, a.seed)
     import json
     K = len(run["tags"])
     D, cen, adj = geometry(c, S, run["labels"], K)
@@ -1543,7 +1577,7 @@ def cmd_bold(a, c, S, run):
                                       adj, grid[fi], a.nregions))
             print(f"    {hz[fi]:.4f} Hz done", flush=True)
         np.savez(cf, rows=np.array(allrows, object), hz=hz)
-    z = np.load(os.path.join(RESULTS, f"xspec_{run['name']}.npz"), allow_pickle=True)
+    z = np.load(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), allow_pickle=True)
     smooth = float(json.loads(str(z["args_json"])).get("smooth", 8.0))
     obs = observables(hz, run["frame_s"], smooth)
     width = np.gradient(hz)                                  # each bin stands for a band
@@ -2322,6 +2356,8 @@ def main():
                     help="types: below this on both directedness and |expansion|: mixed")
     ap.add_argument("--ninputs", type=int, default=8,
                     help="types: the pieces per patch whose timing and loudness are read")
+    ap.add_argument("--drive", default="fitted", choices=("fitted", "independent", "random"),
+                    help="combine/bold: the fitted drive, or a control (see control_drive)")
     ap.add_argument("--nregions", type=int, default=3,
                     help="combine: the input regions split out per patch; the rest is one")
     ap.add_argument("--sigma", type=float, default=6.0,
