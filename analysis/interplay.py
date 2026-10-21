@@ -1610,6 +1610,51 @@ def cmd_bold(a, c, S, run):
     _plot_bold(path.replace(".npz", ""), hz, obs, out, power, width, gr, patches, c, run, g1)
 
 
+def cmd_media(a):
+    """The whole-cortex categories of `bold` side by side across media, against frequency
+    and against frequency x the medium's decay time (cycles per decay). Reads only the
+    cached per-bin categories, so each medium needs `bold` run first, with its controls
+    for the grey band."""
+    import json
+    tags = [t for t in a.media.split(",") if t.strip()]
+    med = []
+    for t in tags:
+        cf = os.path.join(RESULTS, f"interplay_combine_all_{t}.npz")
+        if not os.path.exists(cf):
+            raise SystemExit(f"  no {cf}: run `bold --tag {t}` first")
+        z = np.load(cf, allow_pickle=True)
+        args = json.loads(str(np.load(os.path.join(RESULTS, f"xspec_{t}.npz"),
+                                      allow_pickle=True)["args_json"]))
+
+        def frac(rows):
+            cats = np.array([[r["cat"] for r in rr] for rr in rows])
+            return {k: (cats == k).mean(1) for k in CATS}
+        ctl = [frac(np.load(f, allow_pickle=True)["rows"]) for f in
+               (os.path.join(RESULTS, f"interplay_combine_all_{t}_random{s}.npz")
+                for s in range(3)) if os.path.exists(f)]
+        med.append(dict(tag=t, hz=z["hz"], tau=float(args["decay_s"]),
+                        speed=float(args["spread_mm_s"]), frac=frac(z["rows"]), ctl=ctl))
+    print(f"\n  share of 150 patches by category, fitted drive (random coherent drive in "
+          f"brackets, mean of {len(med[0]['ctl'])} seeds)")
+    for m in med:
+        print(f"\n  {m['tag']}: {m['speed']:g} mm/s, decay {m['tau']:.3g} s")
+        for i, f in enumerate(m["hz"]):
+            print(f"    {f:.4f} Hz = {f * m['tau']:5.2f} cyc/decay: " + ", ".join(
+                f"{k[:6]} {m['frac'][k][i]:4.0%}"
+                + (f" ({np.mean([c[k][i] for c in m['ctl']]):3.0%})" if m["ctl"] else "")
+                for k in CATS[:3]))
+        d = m["frac"]["reinforcing"] - m["frac"]["cancelling"]
+        x = np.flatnonzero((d[:-1] > 0) & (d[1:] <= 0))
+        if len(x):
+            i = x[0]
+            lf = np.log(m["hz"][i]) + d[i] / (d[i] - d[i + 1]) * np.log(m["hz"][i + 1]
+                                                                    / m["hz"][i])
+            m["cross"] = float(np.exp(lf))
+            print(f"    reinforcing gives way to cancelling at {m['cross']:.3f} Hz = "
+                  f"{m['cross'] * m['tau']:.2f} cycles per decay")
+    _plot_media(os.path.join(RESULTS, "interplay_media"), med)
+
+
 # ============================================================ pictures
 
 def _plot_pairs(path, res, lags, hz):
@@ -2240,6 +2285,66 @@ def _plot_combine(stem, res, patches, c, run, g1):
     print(f"  wrote {stem}_gradient.png")
 
 
+def _plot_media(stem, med):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ink, muted, band = "#1a1a19", "#6b6a64", "#e4e2dc"
+    flat = sorted({m["speed"] for m in med if "mapsmm" not in m["tag"]})
+    shade = dict(zip(flat, [BLUES[i] for i in np.linspace(4, len(BLUES) - 1,
+                                                          len(flat)).astype(int)]))
+    show = ("reinforcing", "cancelling", "single source")
+    fig, axs = plt.subplots(2, 3, figsize=(13.5, 7.4), facecolor="white")
+    for r, unit in enumerate(("hz", "cyc")):
+        for k, ct in enumerate(show):
+            ax = axs[r, k]
+            # what a random coherent drive gives in the same media: the spread over media
+            # and seeds, drawn once per panel as a band
+            if all(m["ctl"] for m in med):
+                xs, ys = [], []
+                for m in med:
+                    x = m["hz"] * (m["tau"] if unit == "cyc" else 1)
+                    for cc in m["ctl"]:
+                        xs.append(x); ys.append(cc[ct])
+                gx = np.geomspace(min(x.min() for x in xs), max(x.max() for x in xs), 60)
+                Y = np.array([np.where((gx >= x[0]) & (gx <= x[-1]),
+                                       np.interp(np.log(gx), np.log(x), y), np.nan)
+                              for x, y in zip(xs, ys)])
+                ax.fill_between(gx, np.nanmin(Y, 0), np.nanmax(Y, 0), color=band, lw=0,
+                                label="random coherent drive (range)")
+            if unit == "hz":
+                ax.axvspan(0.01, 0.08, color="#f2efe6", lw=0, zorder=0)
+            for m in med:
+                dash = "mapsmm" in m["tag"]
+                x = m["hz"] * (m["tau"] if unit == "cyc" else 1)
+                lab = (f"3x map-weighted ({m['tau']:.3g} s decay)" if dash else
+                       f"{m['speed'] / 1.5:g}x flat ({m['tau']:.3g} s decay)")
+                ax.plot(x, m["frac"][ct], "--" if dash else "-", marker="o", ms=3, lw=2,
+                        color=shade.get(m["speed"], BLUES[8]), label=lab)
+            ax.set_xscale("log"); ax.set_ylim(0, 1)
+            if unit == "cyc":
+                ax.axvline(1, color=muted, lw=0.8, ls=":")
+            ax.set_xlabel("Hz" if unit == "hz" else "cycles per decay time (Hz x decay s)",
+                          fontsize=8, color=muted)
+            if k == 0:
+                ax.set_ylabel("share of patches", fontsize=8, color=muted)
+            if r == 0:
+                ax.set_title(ct, fontsize=10, color=ink)
+            ax.tick_params(labelsize=7, colors=muted)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+    axs[0, 0].text(0.0105, 0.97, "0.01-0.08 Hz", fontsize=7, color=muted, va="top")
+    h_, l_ = axs[0, 0].get_legend_handles_labels()
+    fig.legend(h_, l_, loc="upper center", ncol=len(l_), frameon=False, fontsize=8,
+               bbox_to_anchor=(0.5, 0.995))
+    fig.suptitle("How patches make their waves, across media (fitted drive, whole cortex)",
+                 fontsize=11, color=ink, y=1.04)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(stem + ".png", dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\n  wrote {stem}.png")
+
+
 def _plot_bold(stem, hz, obs, out, power, width, gr, patches, c, run, g1):
     import matplotlib
     matplotlib.use("Agg")
@@ -2328,7 +2433,8 @@ def _plot_bold(stem, hz, obs, out, power, width, gr, patches, c, run, g1):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types", "steer",
-                                    "steermap", "sweeps", "remote", "combine", "bold"))
+                                    "steermap", "sweeps", "remote", "combine", "bold",
+                                    "media"))
     ap.add_argument("--tag", default="nobp_sm6_s3_box")
     ap.add_argument("--hz", default="",
                     help="analysis frequencies; snapped to the nearest solved bins. Default: "
@@ -2365,7 +2471,13 @@ def main():
                          "into a field (also read at 4 and 9 mm)")
     ap.add_argument("--every-s", type=float, default=1.0, dest="every_s",
                     help="types: seconds between the states read")
+    ap.add_argument("--media", default="nobp_sm6_s1_box,nobp_sm6_s3_box,nobp_sm6_s5_box,"
+                                       "nobp_sm6_mapsmm_s3_box",
+                    help="media: the tags compared; a 'mapsmm' tag is drawn dashed")
     a = ap.parse_args()
+    if a.cmd == "media":
+        cmd_media(a)
+        return
     from mesh_cache import load_cortex
     c = load_cortex("fsaverage5", verbose=False)
     run = waves.load_run(c, a.tag)
