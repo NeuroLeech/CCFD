@@ -1222,6 +1222,164 @@ def cmd_sweeps(a, c, S, run):
     _plot_sweeps(path.replace(".npz", ".png"), res, pred, c, S, patches, hz, c_med)
 
 
+# ============================================================ H: remote cortex
+
+def cortex_patches(c, S, spacing, radius, axis_map):
+    """Patches over the WHOLE cortex: centres by farthest-point sampling `spacing` mm
+    apart, each the vertices within `radius`. The patch axis e1 is the direction up
+    `axis_map` (the principal gradient), averaged over the patch, so flux along +e1 is
+    flux climbing the gradient."""
+    from scipy.sparse.csgraph import dijkstra as _dj
+    nrm = np.asarray(c.m.vertex_normal)
+    gface = S.scalar_grad(axis_map)
+    cent = [int(np.argmin(axis_map))]
+    dmin = np.linalg.norm(S.V - S.V[cent[0]], axis=1)
+    while dmin.max() > spacing:
+        q = int(np.argmax(dmin)); cent.append(q)
+        dmin = np.minimum(dmin, np.linalg.norm(S.V - S.V[q], axis=1))
+    G = S.graph()
+    out = []
+    for q in cent:
+        d = _dj(G, indices=[q], limit=radius)[0]
+        pv = np.flatnonzero(np.isfinite(d))
+        inside = np.isin(S.F, pv).all(1)
+        n = nrm[pv].mean(0); n /= np.linalg.norm(n)
+        ax = gface[inside].mean(0) if inside.any() else np.array([0.0, 1.0, 0.0])
+        ax = ax - (ax @ n) * n
+        steep = float(np.linalg.norm(ax))
+        if steep < 1e-6:
+            ax = np.array([0.0, 1.0, 0.0]) - n[1] * n
+        e1 = ax / np.linalg.norm(ax)
+        out.append(dict(kind="cortex", pv=pv, centre=S.V[q], vertex=int(q), e1=e1,
+                        e2=np.cross(n, e1), n=n, steep=steep))
+    return out
+
+
+def source_map(M, Sf, n_hat):
+    """Exact split of a patch's net time-averaged flux over the inputs, under drive Sf.
+
+    C[k, l] = Re(M_net[k, l] Sf[l, k]) with M_net the flux matrix along the net flux
+    direction, so sum C = |net flux|. Each input gets its own term and half of every
+    pair term it is in: c_k = (C[k, :].sum() + C[:, k].sum()) / 2, sum c_k = |net flux|.
+    -> c (K,), own (K,), pair share (pair terms over the net)."""
+    Mn = n_hat[0] * M["along"] + n_hat[1] * M["across"]
+    C = np.real(Mn * Sf.T)
+    c = 0.5 * (C.sum(1) + C.sum(0))
+    own = np.real(np.diag(C))
+    net = C.sum()
+    return c, own, float((net - own.sum()) / net) if net else np.nan
+
+
+def source_regions(c, adj, frac=0.15):
+    """Contiguous regions of inputs that carry a patch's flux, found from its own map:
+    inputs with |c_k| >= frac * max|c|, joined when their pieces share a border.
+    -> list of (members, summed contribution), largest |contribution| first."""
+    K = len(c)
+    big = np.abs(c) >= frac * np.abs(c).max()
+    parent = list(range(K))
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]; i = parent[i]
+        return i
+    for i, j in adj:
+        if big[i] and big[j] and np.sign(c[i]) == np.sign(c[j]):
+            parent[find(i)] = find(j)
+    groups = {}
+    for k in np.flatnonzero(big):
+        groups.setdefault(find(k), []).append(int(k))
+    out = [(m, float(c[m].sum())) for m in groups.values()]
+    return sorted(out, key=lambda t: -abs(t[1]))
+
+
+def cmd_remote(a, c, S, run):
+    K = len(run["tags"])
+    D, cen, adj = geometry(c, S, run["labels"], K)
+    g1 = np.load(os.path.join(os.path.dirname(RESULTS), "data", "cache",
+                              f"cortical_maps_{c.mesh}.npz"))["grad1"]
+    patches = cortex_patches(c, S, a.grid, a.radius, g1)
+    lab = np.asarray(run["labels"])
+    dterr = S.distance_from(np.flatnonzero(lab >= 0))
+    names = [str(v).removeprefix("L_").removesuffix("_ROI") for v in c.names]
+    for P in patches:
+        P["grad"] = float(g1[P["pv"]].mean())
+        P["dist"] = float(dterr[P["vertex"]])
+        P["name"] = names[int(c.lab[P["vertex"]])]
+    hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
+    grid = np.unique([int(np.argmin(np.abs(np.log(hzb / f)))) for f in np.geomspace(0.005, 0.5, 14)])
+    H, U, depth = waves.transfer_fields(c, run, hzb[grid], velocity=True)
+    want = [float(v) for v in a.hz.split(",")] if a.hz else [0.0212, 0.0409, 0.059, 0.0848, 0.1226]
+    sel = [int(np.argmin(np.abs(np.log(hzb[grid] / f)))) for f in want]
+    area, nrm = np.asarray(c.A), np.asarray(c.m.vertex_normal)
+    gr = np.array([P["grad"] for P in patches]); dist = np.array([P["dist"] for P in patches])
+    print(f"\n  {len(patches)} patches over the whole cortex; principal gradient "
+          f"{gr.min():+.2f} to {gr.max():+.2f}; distance from input median {np.median(dist):.0f} mm, "
+          f"max {dist.max():.0f} mm")
+    res = []
+    for fi in sel:
+        hz, b = float(hzb[grid][fi]), grid[fi]
+        Sf = 0.5 * (run["S"][b] + run["S"][b].conj().T)
+        rows = []
+        for P in patches:
+            M = steering_matrices(P, H[fi], U[fi], depth, area, nrm, S.V)
+            Fa, Fc = (float(np.real(np.trace(M[k] @ Sf))) for k in ("along", "across"))
+            Fx = float(np.real(np.trace(M["expand"] @ Sf)))
+            power = float(np.real(np.trace(M["G"] @ Sf)))
+            # magnitude of the expected flux vertex by vertex, for directedness
+            pv = P["pv"]
+            HS = np.conj(H[fi][pv]) @ Sf.T                                # (nv, K)
+            Fv = depth[pv, None] * 0.5 * np.real(np.einsum("vck,vk->vc", U[fi][pv], HS))
+            tot = float((area[pv] * np.linalg.norm(Fv, axis=1)).sum())
+            mag = float(np.hypot(Fa, Fc))
+            n_hat = np.array([Fa, Fc]) / max(mag, 1e-30)
+            cmap_, own, pshare = source_map(M, Sf, n_hat)
+            regs = source_regions(cmap_, adj)
+            w = np.abs(cmap_) / max(np.abs(cmap_).sum(), 1e-30)
+            # source distances from the patch along the surface
+            dsrc = D[:, P["vertex"]]
+            rows.append(dict(
+                up=Fa / max(mag, 1e-30), theta=float(np.arctan2(Fc, Fa)),
+                directed=mag / max(tot, 1e-30), expand=Fx / max(tot, 1e-30),
+                power=power, pair_share=pshare,
+                fight=float(np.abs(cmap_).sum() / max(abs(cmap_.sum()), 1e-30)),
+                src_dist=float((w * dsrc).sum()), n_src=len(regs),
+                main_src=float(abs(regs[0][1]) / max(np.abs(cmap_).sum(), 1e-30)) if regs else np.nan,
+                c=cmap_.astype(np.float32),
+                regions=[(m, v) for m, v in regs[:4]]))
+        res.append(dict(hz=hz, rows=rows))
+        R = rows
+        g = lambda k: np.array([r[k] for r in R], float)
+        hi, lo, far = gr >= np.percentile(gr, 80), gr <= np.percentile(gr, 20), dist > 30
+        print(f"\n  {hz:.4f} Hz (period {1/hz:.0f} s)")
+        for nm, m in (("all", np.ones(len(R), bool)), ("top 20% of gradient", hi),
+                      ("bottom 20%", lo), ("> 30 mm from input", far)):
+            print(f"    {nm:20s} up-gradient {np.median(g('up')[m]):+.2f}  directed "
+                  f"{np.median(g('directed')[m]):.2f}  interference share "
+                  f"{np.median(g('pair_share')[m]):+.2f}  sources fight x{np.median(g('fight')[m]):.1f}"
+                  f"  source regions {np.median(g('n_src')[m]):.0f}, main carries "
+                  f"{np.median(g('main_src')[m]):.2f}, sources {np.median(g('src_dist')[m]):.0f} mm away")
+        print(f"    across patches: r(gradient, up-gradient flow) {np.corrcoef(gr, g('up'))[0,1]:+.2f}; "
+              f"r(distance, interference share) {np.corrcoef(dist, g('pair_share'))[0,1]:+.2f}; "
+              f"r(distance, source regions) {np.corrcoef(dist, g('n_src'))[0,1]:+.2f}")
+    # named remote sites at the band's centre frequency
+    mid = res[min(range(len(res)), key=lambda n: abs(res[n]["hz"] - 0.0848))]
+    order = np.argsort(-gr)[:a.top]
+    print(f"\n  the top of the gradient at {mid['hz']:.4f} Hz: where each patch's waves come from")
+    for n in order:
+        P, r = patches[n], mid["rows"][n]
+        srcs = "; ".join(f"{len(m)} pieces centred {np.mean(D[m, P['vertex']]):.0f} mm away "
+                         f"({100 * v / max(np.abs(r['c']).sum(), 1e-30):+.0f}%)"
+                         for m, v in r["regions"][:3])
+        print(f"    {P['name']:>7s} grad {P['grad']:+.2f}, {P['dist']:4.0f} mm from input: "
+              f"up-gradient {r['up']:+.2f}, interference {r['pair_share']:+.2f}; {srcs}")
+    path = os.path.join(RESULTS, f"interplay_remote_{run['name']}.npz")
+    np.savez(path, res=np.array(res, object),
+             patches=np.array([{k: P[k] for k in ("vertex", "grad", "dist", "name", "e1",
+                                                  "e2", "centre")} for P in patches], object),
+             tags=np.array(run["tags"], object))
+    print(f"\n  wrote {path}")
+    _plot_remote(path.replace(".npz", ""), res, patches, c, S, run, g1, cen, D)
+
+
 # ============================================================ pictures
 
 def _plot_pairs(path, res, lags, hz):
@@ -1625,10 +1783,138 @@ def _plot_sweeps(path, res, pred, c, S, patches, hz, c_med):
     print(f"  wrote {path}")
 
 
+def _plot_remote(stem, res, patches, c, S, run, g1, cen, D):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+    from matplotlib.tri import Triangulation
+    from render_regimes import _proj
+    ink, muted = "#1a1a19", "#6b6a64"
+    greys = LinearSegmentedColormap.from_list("g", ("#f4f3ef", "#a9a79f"))
+    # diverging blue <-> red, neutral grey midpoint (dataviz reference pair)
+    div = LinearSegmentedColormap.from_list("d", ("#184f95", "#6da7ec", "#f0efec",
+                                                  "#ec8a88", "#a12a29"))
+    lab = np.asarray(run["labels"])
+    views = _proj(c.V, c.F, views=((8, 180, "lateral"), (8, 0, "medial"),
+                                   (-90, 180, "ventral")))
+    gr = np.array([P["grad"] for P in patches])
+    pick = [min(res, key=lambda q: abs(q["hz"] - f)) for f in (0.0212, 0.0848)]
+
+    # 1. the expected energy flow over the whole cortex
+    fig = plt.figure(figsize=(16, 9.6), facecolor="white")
+    gs = fig.add_gridspec(len(pick), len(views), hspace=0.08, wspace=0.02)
+    for ri, q in enumerate(pick):
+        for vi, (xy, vis, vname) in enumerate(views):
+            ax = fig.add_subplot(gs[ri, vi])
+            keep = vis[c.F].all(1)
+            tri = Triangulation(xy[:, 0], xy[:, 1], c.F[keep])
+            ax.tripcolor(tri, g1, cmap=greys, shading="gouraud", rasterized=True)
+            ax.tricontour(tri, (lab >= 0).astype(float), levels=[0.5], colors=ink,
+                          linewidths=0.6)
+            P0, U0, C0 = [], [], []
+            for P, r in zip(patches, q["rows"]):
+                v = P["vertex"]
+                if not vis[v]:
+                    continue
+                dvec = np.cos(r["theta"]) * P["e1"] + np.sin(r["theta"]) * P["e2"]
+                tip = int(np.argmin(np.linalg.norm(c.V - (P["centre"] + 7 * dvec), axis=1)))
+                L = min(1.0, r["directed"] * 2.5)
+                P0.append(xy[v]); U0.append((xy[tip] - xy[v]) * L); C0.append(r["pair_share"])
+            P0, U0 = np.array(P0), np.array(U0)
+            qv = ax.quiver(P0[:, 0], P0[:, 1], U0[:, 0], U0[:, 1], np.clip(C0, -1, 1),
+                           cmap=div, norm=TwoSlopeNorm(0, -1, 1), angles="xy",
+                           scale_units="xy", scale=1, width=0.004, headwidth=3.5)
+            ax.set_aspect("equal"); ax.axis("off")
+            if ri == 0:
+                ax.set_title(vname, fontsize=9, color=ink)
+            if vi == 0:
+                ax.text(-0.02, 0.5, f"{q['hz']:.3f} Hz", transform=ax.transAxes, ha="right",
+                        va="center", fontsize=9, color=ink)
+    cax = fig.add_axes([0.36, 0.05, 0.28, 0.01])
+    cb = fig.colorbar(qv, cax=cax, orientation="horizontal")
+    cb.set_label("share of the patch's net flow from interference between inputs "
+                 "(blue: interference opposes it, red: adds to it)", fontsize=8, color=muted)
+    cb.ax.tick_params(labelsize=7, colors=muted)
+    fig.suptitle("expected energy flow under the fitted drive; arrow length = how directed; "
+                 "background = principal gradient (dark = transmodal); outline = inputs",
+                 fontsize=10, color=ink)
+    fig.savefig(stem + "_flow.png", dpi=130, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {stem}_flow.png")
+
+    # 2. against the gradient
+    fig, axs = plt.subplots(1, 4, figsize=(16, 3.4), facecolor="white")
+    cols = ("#2a78d6", "#eb6834", "#1baf7a", "#6250d6", "#e34948")
+    for q, col in zip(res, cols):
+        R = q["rows"]
+        for ax, k, t in zip(axs, ("up", "pair_share", "n_src", "src_dist"),
+                            ("flow up the gradient (cos)", "interference share of net flow",
+                             "separate source regions", "where the sources are (mm)")):
+            y = np.array([r[k] for r in R], float)
+            o = np.argsort(gr)
+            # running median over 25 patches, so trends read through the scatter
+            from scipy.ndimage import median_filter
+            ax.scatter(gr, y, s=4, color=col, alpha=0.25, linewidths=0)
+            ax.plot(gr[o], median_filter(y[o], 25, mode="nearest"), color=col, lw=2,
+                    label=f"{q['hz']:.3f} Hz")
+            ax.set_title(t, fontsize=9, color=ink)
+            ax.set_xlabel("principal gradient (sensorimotor -> transmodal)", fontsize=8,
+                          color=muted)
+            ax.tick_params(labelsize=7, colors=muted)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+    axs[0].axhline(0, color=muted, lw=0.6); axs[1].axhline(0, color=muted, lw=0.6)
+    axs[1].set_ylim(-3, 3)
+    axs[0].legend(fontsize=7, frameon=False)
+    fig.tight_layout()
+    fig.savefig(stem + "_gradient.png", dpi=130, facecolor="white")
+    plt.close(fig)
+    print(f"  wrote {stem}_gradient.png")
+
+    # 3. source maps of four remote, high-gradient patches
+    q = pick[-1]
+    far = [n for n in np.argsort(-gr) if patches[n]["dist"] > 25]
+    ex = []
+    for n in far:
+        if all(np.linalg.norm(patches[n]["centre"] - patches[m]["centre"]) > 40 for m in ex):
+            ex.append(n)
+        if len(ex) == 4:
+            break
+    fig = plt.figure(figsize=(16, 4.4), facecolor="white")
+    for k, n in enumerate(ex):
+        P, r = patches[n], q["rows"][n]
+        xy, vis, vname = next((v for v in views if v[1][P["vertex"]]), views[0])
+        ax = fig.add_subplot(1, 4, k + 1)
+        keep = vis[c.F].all(1)
+        tri = Triangulation(xy[:, 0], xy[:, 1], c.F[keep])
+        cc = r["c"] / max(np.abs(r["c"]).max(), 1e-30)
+        field = np.where(lab >= 0, cc[np.clip(lab, 0, None)], 0.0)
+        ax.tripcolor(tri, field, cmap=div.reversed(), norm=TwoSlopeNorm(0, -1, 1),
+                     shading="gouraud", rasterized=True)
+        ax.tricontour(tri, (lab >= 0).astype(float), levels=[0.5], colors=muted,
+                      linewidths=0.4)
+        v = P["vertex"]
+        dvec = np.cos(r["theta"]) * P["e1"] + np.sin(r["theta"]) * P["e2"]
+        tip = int(np.argmin(np.linalg.norm(c.V - (P["centre"] + 14 * dvec), axis=1)))
+        ax.annotate("", xy[tip], xy[v], arrowprops=dict(arrowstyle="-|>", lw=2, color="black"))
+        ax.scatter(*xy[v], s=70, facecolors="none", edgecolors="black", linewidths=1.6)
+        ax.set_aspect("equal"); ax.axis("off")
+        ax.set_title(f"{P['name']} (gradient {P['grad']:+.2f}, {P['dist']:.0f} mm from input, "
+                     f"{vname})\n{r['n_src']} source regions; interference "
+                     f"{r['pair_share']:+.0%} of the flow", fontsize=8, color=ink)
+    fig.suptitle(f"where remote waves come from ({q['hz']:.3f} Hz): each input coloured by "
+                 f"how much it drives the patch's net flow (red: along the arrow, blue: "
+                 f"against)", fontsize=10, color=ink)
+    fig.savefig(stem + "_sources.png", dpi=130, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {stem}_sources.png")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types", "steer",
-                                    "steermap", "sweeps"))
+                                    "steermap", "sweeps", "remote"))
     ap.add_argument("--tag", default="nobp_sm6_s3_box")
     ap.add_argument("--hz", default="",
                     help="analysis frequencies; snapped to the nearest solved bins. Default: "
@@ -1666,10 +1952,10 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     run = waves.load_run(c, a.tag)
     S = waves.Surface(c)
-    if a.cmd in ("frames", "types", "steer", "steermap", "sweeps"):
+    if a.cmd in ("frames", "types", "steer", "steermap", "sweeps", "remote"):
         print(f"  {run['name']}: {len(run['tags'])} pieces")
-        dict(frames=cmd_frames, types=cmd_types, steer=cmd_steer,
-             steermap=cmd_steermap, sweeps=cmd_sweeps)[a.cmd](a, c, S, run)
+        dict(frames=cmd_frames, types=cmd_types, steer=cmd_steer, steermap=cmd_steermap,
+             sweeps=cmd_sweeps, remote=cmd_remote)[a.cmd](a, c, S, run)
         return
     hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
     want = ([float(v) for v in a.hz.split(",")] if a.hz else np.geomspace(0.005, 0.5, 14))
