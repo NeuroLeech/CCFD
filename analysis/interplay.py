@@ -1380,6 +1380,110 @@ def cmd_remote(a, c, S, run):
     _plot_remote(path.replace(".npz", ""), res, patches, c, S, run, g1, cen, D)
 
 
+# ============================================================ I: single source or cancellation
+
+CATS = ("single source", "reinforcing", "cancelling", "other")
+
+
+def flow_alone(Mn, Sf, mask):
+    """The patch's net flow (along the net direction) if only the inputs in `mask` were
+    driven, with the fitted drive's own timing and loudness among them: the cross-spectrum
+    restricted to mask x mask. Exact: the medium is linear, and switching inputs off
+    removes their rows and columns of S."""
+    m = np.flatnonzero(mask)
+    return float(np.real(np.sum(Mn[np.ix_(m, m)] * Sf[np.ix_(m, m)].T)))
+
+
+def classify_flow(parts, total, interf):
+    """How a patch's net flow is made from its input regions (each alone) and their
+    interference, as shares of the net. Provisional thresholds, round numbers:
+
+      cancelling     the parts alone would push at least twice the net: it is a remainder
+      reinforcing    interference between regions adds at least 40% of the net
+      single source  one region alone gives 60-150% of the net, the rest little
+      other          none of these"""
+    kappa = sum(abs(p) for p in parts) / max(abs(total), 1e-30)
+    top = max(parts, key=abs) / total if total else np.nan
+    it = interf / total if total else np.nan
+    if kappa >= 2.0:
+        return "cancelling", kappa, top
+    if it >= 0.4:
+        return "reinforcing", kappa, top
+    if 0.6 <= top <= 1.5 and abs(it) < 0.4:
+        return "single source", kappa, top
+    return "other", kappa, top
+
+
+def cmd_combine(a, c, S, run):
+    K = len(run["tags"])
+    D, cen, adj = geometry(c, S, run["labels"], K)
+    g1 = np.load(os.path.join(os.path.dirname(RESULTS), "data", "cache",
+                              f"cortical_maps_{c.mesh}.npz"))["grad1"]
+    patches = cortex_patches(c, S, a.grid, a.radius, g1)
+    lab = np.asarray(run["labels"])
+    dterr = S.distance_from(np.flatnonzero(lab >= 0))
+    names = [str(v).removeprefix("L_").removesuffix("_ROI") for v in c.names]
+    for P in patches:
+        P["grad"] = float(g1[P["pv"]].mean())
+        P["dist"] = float(dterr[P["vertex"]])
+        P["name"] = names[int(c.lab[P["vertex"]])]
+    gr = np.array([P["grad"] for P in patches])
+    hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
+    grid = np.unique([int(np.argmin(np.abs(np.log(hzb / f)))) for f in np.geomspace(0.005, 0.5, 14)])
+    H, U, depth = waves.transfer_fields(c, run, hzb[grid], velocity=True)
+    want = [float(v) for v in a.hz.split(",")] if a.hz else [0.0212, 0.0409, 0.0848, 0.2513, 0.4936]
+    sel = [int(np.argmin(np.abs(np.log(hzb[grid] / f)))) for f in want]
+    area, nrm = np.asarray(c.A), np.asarray(c.m.vertex_normal)
+    print(f"\n  {len(patches)} patches over the whole cortex, under the fitted drive of "
+          f"{run['name']}")
+    res = []
+    for fi in sel:
+        hz, b = float(hzb[grid][fi]), grid[fi]
+        Sf = 0.5 * (run["S"][b] + run["S"][b].conj().T)
+        rows = []
+        for P in patches:
+            M = steering_matrices(P, H[fi], U[fi], depth, area, nrm, S.V)
+            Fa, Fc = (float(np.real(np.trace(M[k] @ Sf))) for k in ("along", "across"))
+            mag = float(np.hypot(Fa, Fc))
+            n_hat = np.array([Fa, Fc]) / max(mag, 1e-30)
+            Mn = n_hat[0] * M["along"] + n_hat[1] * M["across"]
+            ck, _, _ = source_map(M, Sf, n_hat)
+            regs = source_regions(ck, adj)[:a.nregions]
+            used = np.zeros(K, bool)
+            parts = []
+            for mem, _ in regs:
+                msk = np.zeros(K, bool); msk[mem] = True; used |= msk
+                parts.append(flow_alone(Mn, Sf, msk))
+            rest = flow_alone(Mn, Sf, ~used)
+            total = flow_alone(Mn, Sf, np.ones(K, bool))
+            interf = total - sum(parts) - rest
+            cat, kappa, top = classify_flow(parts + [rest], total, interf)
+            power = float(np.real(np.trace(M["G"] @ Sf)))
+            rows.append(dict(cat=cat, kappa=kappa, top=top, interf=interf / total,
+                             parts=[p / total for p in parts], rest=rest / total,
+                             n_regions=len(regs), up=Fa / max(mag, 1e-30), power=power,
+                             src_dist=[float(np.mean(D[m, P["vertex"]])) for m, _ in regs]))
+        res.append(dict(hz=hz, rows=rows))
+        cats = np.array([r["cat"] for r in rows])
+        kap = np.array([r["kappa"] for r in rows])
+        print(f"\n  {hz:.4f} Hz (period {1/hz:.0f} s): "
+              + ", ".join(f"{k} {np.mean(cats == k):.0%}" for k in CATS)
+              + f"; parts overshoot the net x{np.median(kap):.1f} (median)")
+        for nm, m in (("bottom 20% of gradient", gr <= np.percentile(gr, 20)),
+                      ("top 20% of gradient", gr >= np.percentile(gr, 80)),
+                      ("> 30 mm from input", np.array([P["dist"] > 30 for P in patches]))):
+            print(f"    {nm:24s}: " + ", ".join(f"{k} {np.mean(cats[m] == k):.0%}" for k in CATS)
+                  + f"; overshoot x{np.median(kap[m]):.1f}")
+        print(f"    r(gradient, log overshoot) {np.corrcoef(gr, np.log(kap))[0, 1]:+.2f}")
+    path = os.path.join(RESULTS, f"interplay_combine_{run['name']}.npz")
+    np.savez(path, res=np.array(res, object), grad=gr,
+             dist=np.array([P["dist"] for P in patches]),
+             vertex=np.array([P["vertex"] for P in patches]),
+             names=np.array([P["name"] for P in patches], object))
+    print(f"\n  wrote {path}")
+    _plot_combine(path.replace(".npz", ""), res, patches, c, run, g1)
+
+
 # ============================================================ pictures
 
 def _plot_pairs(path, res, lags, hz):
@@ -1911,10 +2015,109 @@ def _plot_remote(stem, res, patches, c, S, run, g1, cen, D):
     print(f"  wrote {stem}_sources.png")
 
 
+def _plot_combine(stem, res, patches, c, run, g1):
+    """Maps per frequency - one dot per patch, coloured by how its flow is made (three
+    categorical slots, the most the validated palette separates on a map) - and the
+    category mix and overshoot against the principal gradient."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.tri import Triangulation
+    from render_regimes import _proj
+    ink, muted = "#1a1a19", "#6b6a64"
+    # three categorical slots (all-pairs safe on a map) and neutral grey for "other"
+    col = dict(zip(CATS, ("#2a78d6", "#1baf7a", "#eb6834", "#b5b3ab")))
+    greys = LinearSegmentedColormap.from_list("g", ("#f4f3ef", "#b9b7af"))
+    lab = np.asarray(run["labels"])
+    views = _proj(c.V, c.F, views=((8, 180, "lateral"), (8, 0, "medial")))
+    vx = np.array([P["vertex"] for P in patches])
+    fig = plt.figure(figsize=(4.6 * len(views) + 0.4, 3.1 * len(res) + 0.8), facecolor="white")
+    gs = fig.add_gridspec(len(res), len(views), hspace=0.05, wspace=0.02,
+                          top=1 - 0.7 / (3.1 * len(res) + 0.8))
+    for ri, q in enumerate(res):
+        for vi, (xy, vis, vname) in enumerate(views):
+            ax = fig.add_subplot(gs[ri, vi])
+            keep = vis[c.F].all(1)
+            tri = Triangulation(xy[:, 0], xy[:, 1], c.F[keep])
+            ax.tripcolor(tri, g1, cmap=greys, shading="gouraud", rasterized=True)
+            ax.tricontour(tri, (lab >= 0).astype(float), levels=[0.5], colors=muted,
+                          linewidths=0.6)
+            m = vis[vx]
+            for k in CATS:
+                mm = m & np.array([r["cat"] == k for r in q["rows"]])
+                ax.scatter(xy[vx[mm], 0], xy[vx[mm], 1], s=42, color=col[k],
+                           edgecolors="white", linewidths=1.0, label=k)
+            ax.set_aspect("equal"); ax.axis("off")
+            if ri == 0:
+                ax.set_title(vname, fontsize=10, color=ink)
+            if vi == 0:
+                ax.text(-0.02, 0.5, f"{q['hz']:.3f} Hz\n({1 / q['hz']:.0f} s cycle)",
+                        transform=ax.transAxes, ha="right", va="center", fontsize=9,
+                        color=ink)
+    h, l = fig.axes[0].get_legend_handles_labels()
+    fig.legend(h, l, loc="upper center", ncol=4, frameon=False, fontsize=9,
+               bbox_to_anchor=(0.5, 1 - 0.25 / (3.1 * len(res) + 0.8)))
+    fig.suptitle("how each patch's waves are made under the fitted drive: one input region, "
+                 "several reinforcing, or the remainder of several cancelling\n"
+                 "(background: principal gradient, dark = transmodal; outline: inputs)",
+                 fontsize=10, color=ink, y=1.0)
+    fig.savefig(stem + "_maps.png", dpi=130, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {stem}_maps.png")
+
+    gr = np.array([P["grad"] for P in patches])
+    edges = np.percentile(gr, [0, 20, 40, 60, 80, 100])
+    bins = np.clip(np.digitize(gr, edges[1:-1]), 0, 4)
+    fig, axs = plt.subplots(1, len(res) + 1, figsize=(3.2 * (len(res) + 1), 3.3),
+                            facecolor="white")
+    for ax, q in zip(axs, res):
+        cats = np.array([r["cat"] for r in q["rows"]])
+        bottom = np.zeros(5)
+        for k in CATS:
+            v = np.array([np.mean(cats[bins == i] == k) for i in range(5)])
+            ax.bar(range(5), v, bottom=bottom, color=col[k], edgecolor="white",
+                   linewidth=2, label=k)
+            bottom += v
+        ax.set_xticks(range(5))
+        ax.set_xticklabels(["sensori-\nmotor", "", "", "", "trans-\nmodal"], fontsize=7,
+                           color=muted)
+        ax.set_title(f"{q['hz']:.3f} Hz", fontsize=9, color=ink)
+        ax.tick_params(labelsize=7, colors=muted)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+    axs[0].set_ylabel("share of patches", fontsize=8, color=muted)
+    h_, l_ = axs[0].get_legend_handles_labels()
+    fig.legend(h_, l_, loc="upper center", ncol=4, frameon=False, fontsize=8,
+               bbox_to_anchor=(0.42, 0.93))
+    ax = axs[-1]
+    # frequency is ordered: one hue, light (slow) to dark (fast) - never the category colours
+    pal = [BLUES[i] for i in np.linspace(3, len(BLUES) - 1, len(res)).astype(int)]
+    for q, cl in zip(res, pal):
+        k = np.array([r["kappa"] for r in q["rows"]])
+        ax.plot(range(5), [np.median(k[bins == i]) for i in range(5)], "o-", color=cl,
+                lw=2, ms=4, label=f"{q['hz']:.3f} Hz")
+    ax.set_yscale("log"); ax.axhline(1, color=muted, lw=0.6)
+    ax.set_xticks(range(5))
+    ax.set_xticklabels(["sensori-\nmotor", "", "", "", "trans-\nmodal"], fontsize=7,
+                       color=muted)
+    ax.set_title("parts alone / net (median)", fontsize=9, color=ink)
+    ax.legend(fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    ax.tick_params(labelsize=7, colors=muted)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    fig.suptitle("against the principal gradient (fifths of the patches)", fontsize=10,
+                 color=ink)
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    fig.savefig(stem + "_gradient.png", dpi=130, facecolor="white")
+    plt.close(fig)
+    print(f"  wrote {stem}_gradient.png")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types", "steer",
-                                    "steermap", "sweeps", "remote"))
+                                    "steermap", "sweeps", "remote", "combine"))
     ap.add_argument("--tag", default="nobp_sm6_s3_box")
     ap.add_argument("--hz", default="",
                     help="analysis frequencies; snapped to the nearest solved bins. Default: "
@@ -1942,6 +2145,8 @@ def main():
                     help="types: below this on both directedness and |expansion|: mixed")
     ap.add_argument("--ninputs", type=int, default=8,
                     help="types: the pieces per patch whose timing and loudness are read")
+    ap.add_argument("--nregions", type=int, default=3,
+                    help="combine: the input regions split out per patch; the rest is one")
     ap.add_argument("--sigma", type=float, default=6.0,
                     help="sweeps: mm, the smoothing that turns the piecewise input map "
                          "into a field (also read at 4 and 9 mm)")
@@ -1952,10 +2157,10 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     run = waves.load_run(c, a.tag)
     S = waves.Surface(c)
-    if a.cmd in ("frames", "types", "steer", "steermap", "sweeps", "remote"):
+    if a.cmd in ("frames", "types", "steer", "steermap", "sweeps", "remote", "combine"):
         print(f"  {run['name']}: {len(run['tags'])} pieces")
         dict(frames=cmd_frames, types=cmd_types, steer=cmd_steer, steermap=cmd_steermap,
-             sweeps=cmd_sweeps, remote=cmd_remote)[a.cmd](a, c, S, run)
+             sweeps=cmd_sweeps, remote=cmd_remote, combine=cmd_combine)[a.cmd](a, c, S, run)
         return
     hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
     want = ([float(v) for v in a.hz.split(",")] if a.hz else np.geomspace(0.005, 0.5, 14))
