@@ -1055,6 +1055,173 @@ def cmd_steermap(a, c, S, run):
                    mats, hz)
 
 
+# ============================================================ G: steering as input sweeps
+
+def area_metric(c, P):
+    """W[k, l] = sum_v A_v P_k(v) P_l(v): injected power per mm^2 of cortex, so a mode
+    normalised in it is a timing pattern per unit of injection over the surface, whatever
+    the number and size of the pieces that carry it."""
+    Pa = np.asarray(P, float) * np.sqrt(np.asarray(c.A))[None, :]
+    return Pa @ Pa.T
+
+
+def area_modes(M, W):
+    """Extreme generalised eigenvectors of (M, W): the per-area steering modes.
+    -> {"+": (lam, x), "-": (lam, x)}."""
+    from scipy.linalg import eigh
+    ev, X = eigh(np.asarray(M, complex), W + 1e-9 * np.trace(W) / len(W) * np.eye(len(W)))
+    return {"+": (float(ev[-1]), X[:, -1]), "-": (float(ev[0]), X[:, 0])}
+
+
+def medium_phase_speed(S, H, lab, hz, nsamp=25, seed=0):
+    """The medium's own wave phase speed and wavelength at this frequency: |grad arg H|
+    of single pieces' responses, 5-30 mm from the piece, median over pieces."""
+    rng = np.random.default_rng(seed)
+    K = H.shape[1]
+    g = []
+    for k in rng.choice(K, min(nsamp, K), replace=False):
+        d = S.distance_from(np.flatnonzero(lab == k))
+        gr = np.linalg.norm(S.phase_grad(H[:, k][None])[0], axis=1)
+        dfc = d[S.F].mean(1)
+        g.append(np.median(gr[(dfc > 5) & (dfc < 30)]))
+    k_ = float(np.median(g))
+    return 2 * np.pi * hz / k_, 2 * np.pi / k_
+
+
+def cmd_sweeps(a, c, S, run):
+    import glob
+    from scipy.sparse.csgraph import dijkstra as _dj
+    K = len(run["tags"])
+    z = np.load(os.path.join(RESULTS, f"interplay_steer_{run['name']}.npz"), allow_pickle=True)
+    q = next(r for r in z["res"] if "M" in r["rows"][0])
+    rows, hz = q["rows"], float(q["hz"])
+    D, cen, pairs = geometry(c, S, run["labels"], K)
+    patches = make_patches(c, S, run, D, cen, pairs, a.radius, a.grid, a.reach)
+    Pf = np.asarray(run["profiles"], np.float32)
+    W = area_metric(c, Pf)
+    lab = np.asarray(run["labels"])
+    hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
+    grid = np.unique([int(np.argmin(np.abs(np.log(hzb / f)))) for f in np.geomspace(0.005, 0.5, 14)])
+    H, _, _ = waves.transfer_fields(c, run, hzb[grid], velocity=True)
+    fi = int(np.argmin(np.abs(hzb[grid] - hz)))
+    c_med, lam_med = medium_phase_speed(S, H[fi], lab, hz)
+    print(f"\n  {hz:.4f} Hz: the medium's own waves travel at {c_med:.1f} mm/s, "
+          f"wavelength {lam_med:.0f} mm (inflated-surface mm)")
+    smooth = {sg: waves.Surface(c, radius=sg).K for sg in sorted({a.sigma, 4.0, 9.0})}
+    G = S.graph()
+    res = []
+    for n, (P, r) in enumerate(zip(patches, rows)):
+        cvx = int(np.argmin(np.linalg.norm(S.V - P["centre"], axis=1)))
+        dpc = _dj(G, indices=[cvx])[0]
+        ax = dict(e1=S.axis(S.V @ P["e1"]), e2=S.axis(S.V @ P["e2"]), out=S.axis(dpc))
+        out = dict(kind=P["kind"])
+        for nm in READOUTS:
+            md = area_modes(r["M"][nm], W)
+            for sgn in ("+", "-"):
+                lam, x = md[sgn]
+                qv = (x @ Pf).astype(np.complex64)                      # injection map
+                for sg, Ks in smooth.items():
+                    qs = np.asarray(Ks @ qv)
+                    d = waves.describe(S, qs[None], hz, ax)
+                    a2 = np.abs(qs) ** 2 * np.asarray(c.A)
+                    w = a2 / a2.sum()
+                    rec = dict(lam=lam, speed=float(d["speed"][0]),
+                               planar=float(d["planar"][0]),
+                               a_e1=float(d["align_e1"][0]), a_e2=float(d["align_e2"][0]),
+                               a_out=float(d["align_out"][0]),
+                               extent=float(np.sqrt((w * dpc ** 2).sum())),
+                               centroid=float((w * dpc).sum()))
+                    out[f"{nm}{sgn}@{sg:g}"] = rec
+                    if sg == a.sigma:
+                        out[f"{nm}{sgn}"] = rec
+                        if nm == "along" and sgn == "+":
+                            out["q_along+"] = qs.astype(np.complex64)
+                        if sgn == "+":
+                            out[f"w_{nm}"] = (np.abs(qs[S.F]) ** 2).mean(1).astype(np.float32)
+        out.update({k: P[k] for k in ("i", "j", "vertex") if k in P})
+        res.append(out)
+        if (n + 1) % 50 == 0:
+            print(f"    {n+1}/{len(patches)} patches", flush=True)
+    # what the modes are, as sweeps
+    want = {"along": "a_e1", "across": "a_e2", "expand": "a_out"}
+    for kind in ("pair", "grid"):
+        R = [r for r in res if r["kind"] == kind]
+        print(f"\n  {kind} patches ({len(R)}), per-area modes smoothed at {a.sigma:g} mm:")
+        for nm in READOUTS:
+            for sgn in ("+", "-"):
+                k = f"{nm}{sgn}"
+                g = lambda f: np.array([r[k][f] for r in R])
+                print(f"    {k:8s} sweep along its own direction {np.median(g(want[nm])):+.2f}; "
+                      f"speed {np.median(g('speed')):5.1f} mm/s "
+                      f"(x{np.median(g('speed')) / c_med:.2f} the medium's); planar "
+                      f"{np.median(g('planar')):.2f}; aimed at the patch "
+                      f"{-np.median(g('a_out')):+.2f}; extent {np.median(g('extent')):4.0f} mm, "
+                      f"centred {np.median(g('centroid')):4.0f} mm away")
+    for sg in sorted(smooth):
+        R = res
+        print(f"  smoothing {sg:g} mm: along+ sweep {np.median([r[f'along+@{sg:g}']['a_e1'] for r in R]):+.2f}, "
+              f"speed {np.median([r[f'along+@{sg:g}']['speed'] for r in R]):.1f} mm/s, "
+              f"planar {np.median([r[f'along+@{sg:g}']['planar'] for r in R]):.2f}")
+    # the fitted drive's own sweeps, in the region that can steer each patch
+    pred = None
+    tf = os.path.join(RESULTS, f"interplay_types_{run['name']}.npz")
+    cdir = a.cache or os.path.join(RESULTS, "interplay_cache")
+    bf = glob.glob(os.path.join(cdir, f"band_{run['name']}_*s_seed*_*.npz"))
+    if os.path.exists(tf) and bf:
+        zt = np.load(tf, allow_pickle=True)
+        every = int(zt["every"])
+        Z = np.load(bf[0], mmap_mode="r")["Z"][::every]
+        Ks = smooth[a.sigma]
+        n_t = min(len(Z), len(zt["res"][0]["state"]["theta"]))
+        Wm = {nm: np.stack([r[f"w_{nm}"] for r in res]) for nm in READOUTS}
+        Wm = {nm: v / v.sum(1, keepdims=True) for nm, v in Wm.items()}
+        E1 = np.stack([S.axis(S.V @ P["e1"]) for P in patches])          # (np, nF, 3)
+        E2 = np.stack([S.axis(S.V @ P["e2"]) for P in patches])
+        num = {nm: np.zeros((len(patches), n_t)) for nm in READOUTS}
+        den = {nm: np.zeros((len(patches), n_t)) for nm in READOUTS}
+        outf = []
+        for P in patches:
+            cvx = int(np.argmin(np.linalg.norm(S.V - P["centre"], axis=1)))
+            outf.append(S.axis(_dj(G, indices=[cvx])[0]))
+        outf = np.stack(outf)
+        E1, E2, outf = (x.astype(np.float32) for x in (E1, E2, outf))
+        Wm = {k: v.astype(np.float32) for k, v in Wm.items()}
+        for t0 in range(0, n_t, 16):                     # (patches x frames x faces) per step
+            t1 = min(n_t, t0 + 16)
+            qd = np.asarray(Ks @ (np.asarray(Z[t0:t1]) @ Pf).T).T               # (n, nV)
+            g = S.phase_grad(qd).astype(np.float32)
+            kh = -g / np.maximum(np.linalg.norm(g, axis=-1, keepdims=True), 1e-12)
+            a2 = (np.abs(qd[:, S.F]) ** 2).mean(-1)                              # (n, nF)
+            for nm, Ax in (("along", E1), ("across", E2), ("expand", outf)):
+                proj = np.einsum("nfc,pfc->pnf", kh, Ax)                         # (np, n, nF)
+                wgt = Wm[nm][:, None, :] * a2[None]
+                num[nm][:, t0:t1] = (wgt * proj).sum(-1)
+                den[nm][:, t0:t1] = wgt.sum(-1)
+        sm = int(round(1.0 / (run["frame_s"] * np.mean(zt["band"])) / every))
+        pred = []
+        for p, (r, t) in enumerate(zip(res, zt["res"])):
+            st = t["state"]
+            act = dict(along=(st["dirn"] * np.cos(st["theta"]))[:n_t],
+                       across=(st["dirn"] * np.sin(st["theta"]))[:n_t],
+                       expand=st["expand"][:n_t])
+            rec = dict(kind=r["kind"])
+            for nm in READOUTS:
+                sw = _smooth(num[nm][p] / np.maximum(den[nm][p], 1e-30), sm)
+                rec[nm] = float(np.corrcoef(sw, act[nm])[0, 1])
+            pred.append(rec)
+        for kind in ("pair", "grid"):
+            P_ = [p for p in pred if p["kind"] == kind]
+            print(f"\n  {kind}: the fitted drive's input sweep, in the region that can steer "
+                  f"the patch, against the patch's actual waves (r, median): "
+                  + ", ".join(f"{nm} {np.nanmedian([p[nm] for p in P_]):+.2f}"
+                              for nm in READOUTS))
+    path = os.path.join(RESULTS, f"interplay_sweeps_{run['name']}.npz")
+    np.savez(path, res=np.array(res, object), pred=np.array(pred, object), hz=hz,
+             c_med=c_med, lam_med=lam_med, sigma=a.sigma)
+    print(f"\n  wrote {path}")
+    _plot_sweeps(path.replace(".npz", ".png"), res, pred, c, S, patches, hz, c_med)
+
+
 # ============================================================ pictures
 
 def _plot_pairs(path, res, lags, hz):
@@ -1356,10 +1523,112 @@ def _plot_steermap(path, c, run, patches, shares, names, groups, mats, hz):
     print(f"  wrote {p2}")
 
 
+def _plot_sweeps(path, res, pred, c, S, patches, hz, c_med):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.tri import Triangulation
+    from render_regimes import _proj
+    ink, muted = "#1a1a19", "#6b6a64"
+    blue, orange, aqua = "#2a78d6", "#eb6834", "#1baf7a"
+    fig = plt.figure(figsize=(17, 7.6), facecolor="white")
+    gs = fig.add_gridspec(2, 4, hspace=0.35, wspace=0.28)
+    # one patch's along+ mode, as the smoothed input field it is: phase as hue, amplitude
+    # as opacity, the sweep direction as arrows, the patch axis as the black arrow
+    best = max(range(len(res)), key=lambda n: (res[n]["kind"] == "grid") *
+               res[n]["along+"]["a_e1"] * (res[n]["along+"]["planar"] > 0.3))
+    r, P = res[best], patches[best]
+    qs = r["q_along+"].astype(complex)
+    cv = int(np.argmin(np.linalg.norm(c.V - P["centre"], axis=1)))
+    views = _proj(c.V, c.F)
+    xy, vis, vname = next((v for v in views if v[1][cv]), views[0])
+    ax = fig.add_subplot(gs[:, 0:2])
+    keep = vis[c.F].all(1)
+    tri = Triangulation(xy[:, 0], xy[:, 1], c.F[keep])
+    amp = np.clip(np.abs(qs) / np.percentile(np.abs(qs)[np.abs(qs) > 0], 95), 0, 1)
+    ph = np.angle(qs * np.exp(-1j * np.angle(qs[np.argmax(np.abs(qs))])))
+    ax.tripcolor(tri, np.zeros(c.nV), cmap="Greys", vmin=0, vmax=8, shading="gouraud")
+    col = plt.cm.twilight_shifted((ph + np.pi) / (2 * np.pi))
+    col[:, 3] = 0.08 + 0.92 * amp
+    ax.scatter(xy[vis, 0], xy[vis, 1], c=col[vis], s=16, linewidths=0)
+    g = S.phase_grad(qs[None])[0]
+    kh = -g / np.maximum(np.linalg.norm(g, axis=1, keepdims=True), 1e-12)
+    fa = np.abs(qs[S.F]).mean(1) / np.percentile(np.abs(qs)[np.abs(qs) > 0], 95)
+    fc = S.V[S.F].mean(1)
+    sel = np.flatnonzero((fa > 0.25) & vis[S.F].all(1))[::6]
+    # project face centres and directions into the view
+    def to2(X):
+        return np.array([[np.argmin(np.linalg.norm(c.V - x, axis=1))] for x in X]).ravel()
+    vi = to2(fc[sel])
+    tip = to2(fc[sel] + 6 * kh[sel])
+    ax.quiver(xy[vi, 0], xy[vi, 1], xy[tip, 0] - xy[vi, 0], xy[tip, 1] - xy[vi, 1],
+              angles="xy", scale_units="xy", scale=1, width=0.0025, color=ink, alpha=0.75)
+    p1 = xy[np.argmin(np.linalg.norm(c.V - (P["centre"] + 15 * P["e1"]), axis=1))]
+    ax.annotate("", p1, xy[cv], arrowprops=dict(arrowstyle="-|>", lw=2.2, color="black"))
+    ax.scatter(*xy[cv], s=60, facecolors="none", edgecolors="black", linewidths=1.5)
+    ax.set_aspect("equal"); ax.axis("off")
+    ax.set_title(f"the input timing that pushes waves along the black arrow ({hz:.3f} Hz, "
+                 f"{vname})\nhue = when each place peaks in the cycle, opacity = how hard it "
+                 f"is driven, arrows = where the peak moves next", fontsize=9, color=ink)
+    def hist(axh, key, field, title, sign=1):
+        for kind, colr in (("grid", blue), ("pair", orange)):
+            v = sign * np.array([q[key][field] for q in res if q["kind"] == kind])
+            axh.hist(v, 30, color=colr, alpha=0.65, label=kind)
+        axh.set_title(title, fontsize=9, color=ink)
+        axh.tick_params(labelsize=7, colors=muted)
+        for sp in ("top", "right"):
+            axh.spines[sp].set_visible(False)
+    ax = fig.add_subplot(gs[0, 2])
+    for nm, fld, colr in (("along+", "a_e1", blue), ("across+", "a_e2", orange),
+                          ("expand+", "a_out", aqua)):
+        ax.hist([q[nm][fld] for q in res], 30, color=colr, alpha=0.6, label=nm)
+    ax.axvline(0, color=muted, lw=0.6)
+    ax.set_title("does the input sweep point the way the waves are pushed?", fontsize=9,
+                 color=ink)
+    ax.set_xlabel("alignment of input sweep with the pushed direction", fontsize=8,
+                  color=muted)
+    ax.legend(fontsize=7, frameon=False); ax.tick_params(labelsize=7, colors=muted)
+    ax = fig.add_subplot(gs[0, 3])
+    hist(ax, "along+", "speed", "apparent speed of the steering sweep (mm/s)")
+    ax.axvline(c_med, color=ink, lw=1.2, ls="--")
+    ax.text(c_med, ax.get_ylim()[1] * 0.92, " medium's own\n wave speed", fontsize=7,
+            color=ink, va="top")
+    ax.set_xscale("log")
+    from matplotlib.ticker import FixedLocator, NullLocator, FixedFormatter
+    tk = [20, 30, 50, 100, 200]
+    ax.xaxis.set_major_locator(FixedLocator(tk))
+    ax.xaxis.set_major_formatter(FixedFormatter([str(t) for t in tk]))
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.legend(fontsize=7, frameon=False)
+    ax = fig.add_subplot(gs[1, 2])
+    for kind, colr in (("grid", blue), ("pair", orange)):
+        R = [q for q in res if q["kind"] == kind]
+        ax.scatter([q["along+"]["planar"] for q in R], [-q["along+"]["a_out"] for q in R],
+                   s=10, color=colr, alpha=0.7, label=kind, edgecolors="white",
+                   linewidths=0.4)
+    ax.axhline(0, color=muted, lw=0.6)
+    ax.set_xlabel("planarity of the along+ sweep", fontsize=8, color=muted)
+    ax.set_ylabel("aimed at the patch (+) or away (-)", fontsize=8, color=muted)
+    ax.set_title("straight sweep, or focused on the patch?", fontsize=9, color=ink)
+    ax.legend(fontsize=7, frameon=False); ax.tick_params(labelsize=7, colors=muted)
+    if pred:
+        ax = fig.add_subplot(gs[1, 3])
+        for nm, colr in zip(READOUTS, (blue, orange, aqua)):
+            ax.hist([p[nm] for p in pred if np.isfinite(p[nm])], 30, color=colr, alpha=0.6,
+                    label=nm)
+        ax.axvline(0, color=muted, lw=0.6)
+        ax.set_title("fitted drive's sweep vs the patch's actual waves (r)", fontsize=9,
+                     color=ink)
+        ax.legend(fontsize=7, frameon=False); ax.tick_params(labelsize=7, colors=muted)
+    fig.savefig(path, dpi=130, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cmd", choices=("pairs", "decomp", "frames", "types", "steer",
-                                    "steermap"))
+                                    "steermap", "sweeps"))
     ap.add_argument("--tag", default="nobp_sm6_s3_box")
     ap.add_argument("--hz", default="",
                     help="analysis frequencies; snapped to the nearest solved bins. Default: "
@@ -1387,6 +1656,9 @@ def main():
                     help="types: below this on both directedness and |expansion|: mixed")
     ap.add_argument("--ninputs", type=int, default=8,
                     help="types: the pieces per patch whose timing and loudness are read")
+    ap.add_argument("--sigma", type=float, default=6.0,
+                    help="sweeps: mm, the smoothing that turns the piecewise input map "
+                         "into a field (also read at 4 and 9 mm)")
     ap.add_argument("--every-s", type=float, default=1.0, dest="every_s",
                     help="types: seconds between the states read")
     a = ap.parse_args()
@@ -1394,10 +1666,10 @@ def main():
     c = load_cortex("fsaverage5", verbose=False)
     run = waves.load_run(c, a.tag)
     S = waves.Surface(c)
-    if a.cmd in ("frames", "types", "steer", "steermap"):
+    if a.cmd in ("frames", "types", "steer", "steermap", "sweeps"):
         print(f"  {run['name']}: {len(run['tags'])} pieces")
         dict(frames=cmd_frames, types=cmd_types, steer=cmd_steer,
-             steermap=cmd_steermap)[a.cmd](a, c, S, run)
+             steermap=cmd_steermap, sweeps=cmd_sweeps)[a.cmd](a, c, S, run)
         return
     hzb = run["idx"] / run["ref_frames"] / run["frame_s"]
     want = ([float(v) for v in a.hz.split(",")] if a.hz else np.geomspace(0.005, 0.5, 14))
