@@ -13,8 +13,8 @@ the medium.
 Status of the numbers: the analyses were first run in October on the box-impulse solves.
 The container that held them was later reclaimed. All four solves were rebuilt on
 2026-11-24 with the same flags (see [Reproducing](#reproducing)), and every analysis
-quoted here was re-run on the rebuilt solves, except the timing-vs-loudness results
-(`interplay.py types`), which are still running. The tables give the rebuilt values. 1x,
+quoted here was re-run on the rebuilt solves. The exception is the exact-form direction
+prediction (`interplay.py frames`), which is still running. The tables give the rebuilt values. 1x,
 5x and the map-weighted 3x reproduced exactly. The rebuilt flat 3x scores 0.756
 against 0.757, and its category shares moved by 1–4 points. Figures are in
 `docs/figures/`.
@@ -178,16 +178,36 @@ Numbers from `interplay.py steer` (per unit drive) and `sweeps` (per unit inject
 ![Steering modes per unit drive](figures/interplay_steer_nobp_sm6_s3_box.png)
 ![Steering modes per unit area](figures/interplay_sweeps_nobp_sm6_s3_box.png)
 
-### Timing, not loudness, predicts direction
+### Timing predicts wave type better than loudness, but regressions predict direction poorly
 
-*October numbers; the re-run on the rebuilt solve is in progress.*
+`interplay.py types` on the rebuilt 3x solve: a 1154 s realisation, band 0.06–0.12 Hz,
+states read every 0.97 s (about 69 independent states), with the 8 loudest inputs per patch.
+Pairwise features: *timing* is the cos and sin of each pair's phase difference; *loudness*
+is each input's share of the power; *both* is the cross-products, which is the form the
+flux actually takes.
 
-- **The exact quadratic form predicts direction with no fitting.** Mean cosine with the
-  observed patch direction is 0.82; r = 0.67.
-- **Regressions do worse.** With pairwise input features they reach R² ≈ 0.38 under blocked
-  cross-validation. Per-piece linear features were misspecified: switching to pairwise features
-  took one fit from R² 0.26 to 0.46.
-- **Timing beats loudness** as a predictor in 94% of patches.
+- **Wave type** (which of seven patterns a patch shows: along or across either way,
+  radiating, converging, mixed). Blocked cross-validated balanced accuracy, median over
+  patches:
+
+  | patches | chance | timing | loudness | both | timing beats loudness in |
+  |---|---|---|---|---|---|
+  | grid (87) | 0.20 | 0.37 | 0.32 | 0.43 | 80% of patches |
+  | pair (197) | 0.17 | 0.35 | 0.29 | 0.40 | 82% of patches |
+
+  Timing is the better single predictor in most patches, but every model is modestly above
+  chance. The October run reported 94%. That run was on the solve that was lost, and the
+  figure is not reproduced here.
+- **Continuous direction** (flux along, across, outward). Median cross-validated R² is
+  0.04–0.09 from timing and 0.07–0.17 from loudness. The combined features have a median
+  of 0: with about 64 features against about 69 independent states they overfit. So the
+  regressions say little about direction either way. The October figure of R² ≈ 0.38 does not
+  reproduce. The code notes a median of 0.26 → 0.46 on 40 patches when pairwise features
+  replaced per-piece ones, but that was an earlier version of the analysis.
+- **The exact quadratic form** needs no fitting, which avoids the sample-size problem. The
+  October notes give a mean cosine of 0.82 with the observed direction, and r = 0.67. The
+  output that produced these has not been found. `interplay.py frames` is being re-run to
+  check them.
 
 ### Two worked examples
 
@@ -381,6 +401,10 @@ Fit alone does not decide between the media: 1x scores 0.724, 3x 0.756 and 5x 0.
 - **The map weightings are somewhat arbitrary.** Only one map-weighted medium was analysed.
 - **BOLD is represented only by linear readings.** A slow, nonlinear transformation may lose
   information in ways none of these capture.
+- **Regressions on long realisations are sample-limited.** About 69 independent states in
+  the 0.06–0.12 Hz band over 1154 s is too few for 64 pairwise features. A longer
+  realisation, or fewer inputs per patch, would be needed before reading anything into the
+  timing-vs-loudness R².
 - **Only three random-control seeds were run**, and the random control changes loudness as
   well as timing.
 - **Media were compared at 150 evaluations.** Longer solves concentrate the drive, and
