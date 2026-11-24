@@ -10,10 +10,14 @@ and the medium it was fitted in. Nothing is refitted for the wave analysis. The 
 gradient is used only as an external map to read results against, never as an input to
 the medium.
 
-Status of the numbers: the 3x results were computed in October on the box-impulse
-solves. The container that held those solves was later reclaimed, and the solves are
-being rebuilt with the same flags and seed (see [Reproducing](#reproducing)). Figures will
-be added under `docs/figures/` as they are regenerated.
+Status of the numbers: the analyses were first run in October on the box-impulse solves.
+The container that held them was later reclaimed. All four solves were rebuilt on
+2026-11-24 with the same flags (see [Reproducing](#reproducing)), and every analysis
+quoted here was re-run on the rebuilt solves, except the timing-vs-loudness results
+(`interplay.py types`), which are still running. The tables give the rebuilt values. 1x,
+5x and the map-weighted 3x reproduced exactly. The rebuilt flat 3x scores 0.756
+against 0.757, and its category shares moved by 1–4 points. Figures are in
+`docs/figures/`.
 
 ---
 
@@ -69,7 +73,7 @@ does not support the factored solver, so the stopping point was compared directl
 | 5x | 150 | 0.785 | 0.739 ± 0.003 | 9.6 |
 | 5x | 300 | 0.795 | 0.748 ± 0.005 | 5.8 |
 | 5x | 600 | 0.802 | 0.757 ± 0.003 | 1.9 |
-| 3x flat | 150 | | 0.757 ± 0.001 | 21.7 (8 draws) |
+| 3x flat | 150 | 0.809 | 0.756 ± 0.002 | 18.6 |
 | 3x flat | 600 | 0.818 | 0.764 ± 0.003 | 5.5 |
 
 The realised score keeps rising with evaluations, but by 600 the 5x field is almost one
@@ -77,8 +81,8 @@ pattern. A one-dimensional field leaves little to analyse as interplay between r
 so the wave analysis uses the 150-evaluation solves throughout, matched across media.
 
 3x was then run to 600 evaluations as well, to compare the two speeds at matched effort.
-It does the same thing more slowly. Its realised score rises 0.757 → 0.764 while the rank
-falls 21.7 → 5.5. At both stopping points 3x scores above 5x (0.757 vs 0.739 at 150;
+It does the same thing more slowly. Its realised score rises 0.756 → 0.764 while the rank
+falls 18.6 → 5.5. At both stopping points 3x scores above 5x (0.756 vs 0.739 at 150;
 0.764 vs 0.757 at 600), and at 600 it keeps more structure (rank 5.5 vs 1.9). On this
 evidence 3x fits at least as well as 5x, but the gap narrows with effort and the scores
 are within about 0.01. That is too close to call a best speed from score alone.
@@ -155,17 +159,28 @@ timing-only control that keeps each input's fitted loudness has not been run.
 
 ### Direction comes from timing sweeps across the inputs
 
-- **Timing advances toward the patch.** Downstream inputs lag upstream ones in every
-  steering mode; per-unit modes have sweep scores of about +0.8 to +0.95.
-- **The modes are long-range.** About 25 pieces over 50–60 mm per unit drive, and 90–100 mm
-  per unit area.
-- **They are focused on the patch.**
-- **They sweep 2–3x faster than the medium's phase speed.** Phase speed is about 21 mm/s at
-  0.085 Hz, a wavelength of about 250 mm.
-- **Radiating is easier than converging.** A patch is made to radiate by inputs close to it
-  (about 30–40 mm rms away). Converging needs inputs about 60 mm away.
+Numbers from `interplay.py steer` (per unit drive) and `sweeps` (per unit injected area,
+0.085 Hz) on the rebuilt 3x solve.
+
+- **Timing advances toward the patch.** In the modes that push waves along or across a
+  patch, downstream inputs lag upstream ones. Sweep scores are +0.81 to +0.96 at 0.06 Hz.
+  They weaken as frequency rises: +0.49 to +0.84 at 0.085 Hz and +0.44 to +0.73 at 0.12 Hz.
+- **The modes are long-range.** Per unit drive, a mode uses about 22–27 pieces centred
+  50–61 mm from the patch. Per unit area, it spans 89–100 mm.
+- **They are aimed at the patch.** The aim score is +0.64 to +0.71 (per unit area).
+- **They sweep 2–3x faster than the medium's phase speed.** Phase speed is 20.8 mm/s at
+  0.085 Hz, a wavelength of 246 mm. The input sweeps run at 41–65 mm/s, 2.0–3.1x that.
+- **Radiating is local and easier than converging.** The radiating mode uses only 5–9
+  pieces centred 25–36 mm away, and pushes about 1.8x harder per unit drive than its
+  converging opposite (pair patches). Per unit area, converging modes are centred
+  75–84 mm away.
+
+![Steering modes per unit drive](figures/interplay_steer_nobp_sm6_s3_box.png)
+![Steering modes per unit area](figures/interplay_sweeps_nobp_sm6_s3_box.png)
 
 ### Timing, not loudness, predicts direction
+
+*October numbers; the re-run on the rebuilt solve is in progress.*
 
 - **The exact quadratic form predicts direction with no fitting.** Mean cosine with the
   observed patch direction is 0.82; r = 0.67.
@@ -178,14 +193,23 @@ timing-only control that keeps each input's fitted loudness has not been run.
 
 `viz/render_steering.py --site s1|frontal`: input timing beside the wave it makes.
 
+Both are per unit injected area, for the rebuilt 3x solve.
+
 - **S1-strip patch.** Separate timing patterns push waves up or down the strip, or make the
-  patch radiate or converge. Inputs within about 30–40 mm make it radiate; up, down and
-  converging need inputs about 60 mm away.
-- **Frontal patch 8Av** (51 mm from the nearest input):
-  - At 0.085 Hz one remote region dominates the flow.
-  - At 0.25–0.49 Hz the flow is the remainder of strong cancellation between regions. For
-    example, two regions alone give +452% and +392% of the net, and their interference
-    −784%.
+  patch radiate or converge. Radiating uses the nearest inputs (44–58 mm rms away over
+  0.085–0.49 Hz). Pushing down the strip needs inputs 67–81 mm away, converging 77–82 mm,
+  and pushing up the strip 91–97 mm.
+- **Frontal patch 8Av** (51 mm from the nearest input). The figures below split the strongest
+  timing pattern at the patch, which carries 73–78% of the fitted flow.
+  - At 0.085 Hz one remote region (11 pieces, about 73 mm away) gives +99% of the flow.
+  - At 0.25 Hz the flow is the remainder of strong cancellation. One region alone gives
+    +453% of the net and everything outside the two named regions gives +394%. Their
+    interference is −787%.
+  - At 0.49 Hz the same pattern holds: +282% (one region), +8% (a second region), +78%
+    (the rest), and −269% interference.
+
+![S1 steering at 0.085 Hz](figures/steering_s1_nobp_sm6_s3_box_0.085Hz.png)
+![8Av at 0.25 Hz](figures/steering_frontal_nobp_sm6_s3_box_0.251Hz.png)
 
 ### Across the whole cortex: reinforcing when slow, cancelling when fast
 
@@ -193,11 +217,17 @@ Share of the 150 patches by category, fitted drive:
 
 | Hz | single source | reinforcing | cancelling | other |
 |---|---|---|---|---|
-| 0.021 | 5% | 79% | 10% | 6% |
-| 0.041 | 3% | 85% | 10% | 2% |
-| 0.085 | 7% | 13% | 69% | 11% |
+| 0.021 | 5% | 79% | 9% | 6% |
+| 0.041 | 3% | 85% | 11% | 2% |
+| 0.085 | 7% | 13% | 70% | 11% |
 | 0.25 | 2% | 3% | 89% | 5% |
-| 0.49 | 5% | 2% | 75% | 17% |
+| 0.49 | 5% | 2% | 75% | 19% |
+
+![Categories over the cortex, 3x flat](figures/interplay_combine_nobp_sm6_s3_box_maps.png)
+
+Green: reinforcing. Orange: cancelling. Blue: single source. Grey: other. The background
+is the principal gradient (dark = transmodal). Against the gradient:
+[figures/interplay_combine_nobp_sm6_s3_box_gradient.png](figures/interplay_combine_nobp_sm6_s3_box_gradient.png).
 
 - **Single-source patches are rare** at every frequency (2–7%). Almost every patch's waves
   come from several input regions, usually remote.
@@ -212,11 +242,14 @@ cancelling in the sensorimotor and transmodal fifths of the gradient.
 
 | reading | single | reinforcing | cancelling | other | cancelling, SM / TM |
 |---|---|---|---|---|---|
-| raw field | 5% | 4% | 77% | 14% | 87% / 71% |
-| HRF | 8% | 43% | 37% | 12% | 34% / 47% |
+| raw field | 5% | 5% | 76% | 15% | 87% / 67% |
+| this model's observable | 5% | 11% | 73% | 10% | 78% / 71% |
+| HRF | 8% | 43% | 37% | 12% | 34% / 46% |
 | HRF + 0.01–0.08 Hz | 7% | 53% | 29% | 11% | 23% / 39% |
 
-The model's own observable sits close to the raw field, at about 75% cancelling. Weighting
+![BOLD readings, 3x flat](figures/interplay_bold_nobp_sm6_s3_box.png)
+
+The model's own observable sits close to the raw field, at 73% cancelling. Weighting
 by the HRF moves the picture from mostly cancelling to roughly half reinforcing, because
 the HRF passes the slow bins where inputs reinforce.
 
@@ -226,7 +259,7 @@ Share by category, raw field, all patches:
 
 | drive | single source | reinforcing | cancelling |
 |---|---|---|---|
-| fitted | 5% | 4% | 77% |
+| fitted | 5% | 5% | 76% |
 | independent inputs | 50% | 0% | 20% |
 | random coherent (3 seeds) | 19–24% | 31–41% | 16–31% |
 
@@ -249,11 +282,13 @@ Same 150 patches as the flat 3x. Shares are single source / reinforcing / cancel
 
 | Hz | flat 3x | map-weighted 3x | same category | direction agreement (r) |
 |---|---|---|---|---|
-| 0.021 | 5 / 79 / 10 / 6 | 4 / 87 / 5 / 3 | 79% | +0.78 |
-| 0.041 | 3 / 85 / 10 / 2 | 16 / 51 / 17 / 16 | 55% | +0.78 |
-| 0.085 | 7 / 13 / 69 / 11 | 9 / 10 / 72 / 9 | 61% | +0.76 |
+| 0.021 | 5 / 79 / 9 / 6 | 4 / 87 / 5 / 3 | 79% | +0.78 |
+| 0.041 | 3 / 85 / 11 / 2 | 16 / 51 / 17 / 16 | 54% | +0.78 |
+| 0.085 | 7 / 13 / 70 / 11 | 9 / 10 / 72 / 9 | 61% | +0.76 |
 | 0.25 | 2 / 3 / 89 / 5 | 1 / 1 / 90 / 8 | 81% | +0.41 |
-| 0.49 | 5 / 2 / 75 / 17 | 10 / 3 / 75 / 13 | 62% | +0.49 |
+| 0.49 | 5 / 2 / 75 / 19 | 10 / 3 / 75 / 13 | 61% | +0.50 |
+
+![Categories over the cortex, map-weighted 3x](figures/interplay_combine_nobp_sm6_mapsmm_s3_box_maps.png)
 
 The controls are qualitatively the same:
 
@@ -266,7 +301,7 @@ The controls are qualitatively the same:
 The frontal patch 8Av reads the same way:
 
 - at 0.085 Hz one remote region gives 101% of the flow;
-- at 0.49 Hz the regions alone give +276%, +53% and +128% (everything else), with
+- at 0.49 Hz two regions alone give +276% and +53%, everything else +128%, with
   interference −357%.
 
 What does **not** carry over is the gradient asymmetry under the HRF. Cancelling in the
@@ -274,8 +309,8 @@ sensorimotor / transmodal fifths:
 
 | reading | flat 3x | map-weighted 3x |
 |---|---|---|
-| raw field | 87 / 71% | 88 / 66% |
-| HRF | 34 / 47% | 29 / 30% |
+| raw field | 87 / 67% | 88 / 66% |
+| HRF | 34 / 46% | 29 / 30% |
 | HRF + 0.01–0.08 Hz | 23 / 39% | 23 / 24% |
 
 So the transmodal excess depends on the medium as well as the fit.
@@ -291,6 +326,11 @@ across media. Measured in **cycles per decay time** (Hz × decay s), the media l
 | 3x flat | 8.33 s | 0.063 Hz | 0.53 |
 | 5x | 5 s | 0.102 Hz | 0.51 |
 | 3x map-weighted | 8.33 s (median) | 0.051 Hz | 0.42 |
+
+![Categories across media](figures/interplay_media.png)
+
+Top row in Hz (shaded: 0.01–0.08 Hz), bottom row in cycles per decay time (dotted: one
+cycle). The grey band is the range of the random coherent drive over all media and seeds.
 
 The crossover is where the reinforcing and cancelling shares are equal, interpolated in
 log frequency (`interplay.py media`).
@@ -315,8 +355,8 @@ Other features of the slower and faster media:
 
 | reading | 1x | 3x flat | 5x |
 |---|---|---|---|
-| raw field | 24 / 7 / 47 / 22 | 5 / 4 / 77 / 14 | 6 / 8 / 75 / 12 |
-| this model's observable | 10 / 7 / 68 / 14 | ≈75% cancelling | 6 / 26 / 55 / 13 |
+| raw field | 24 / 7 / 47 / 22 | 5 / 5 / 76 / 15 | 6 / 8 / 75 / 12 |
+| this model's observable | 10 / 7 / 68 / 14 | 5 / 11 / 73 / 10 | 6 / 26 / 55 / 13 |
 | HRF | 9 / 16 / 59 / 16 | 8 / 43 / 37 / 12 | 10 / 60 / 17 / 13 |
 | HRF + 0.01–0.08 Hz | 10 / 17 / 55 / 18 | 7 / 53 / 29 / 11 | 10 / 64 / 14 / 12 |
 
@@ -328,7 +368,7 @@ The 0.01–0.08 Hz band lies mostly *below* the switch in 3x and 5x, but mostly 
 - the BOLD-visible waves are mostly reinforcing in 3x and 5x;
 - they are mostly cancelling in 1x.
 
-Fit alone does not decide between the media: 1x scores 0.724 and 3x 0.757.
+Fit alone does not decide between the media: 1x scores 0.724, 3x 0.756 and 5x 0.739.
 
 ---
 
