@@ -105,7 +105,7 @@ python fit/best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smoo
 python viz/render_frames.py --tag pr_taper --start 200 --n 600 --save 16 --fps 20
 ```
 
-`RUNS.md` indexes every solve and fit on disk with its parameters and its score.
+`RUNS.md` indexes every solve and fit on disk with its parameters and its score. `docs/waves-findings.md` collects what the wave analyses (`analysis/interplay.py`) have found so far.
 
 ## The 100 driven regions
 
