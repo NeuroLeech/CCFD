@@ -13,8 +13,9 @@ the medium.
 Status of the numbers: the analyses were first run in October on the box-impulse solves.
 The container that held them was later reclaimed. All four solves were rebuilt on
 2026-11-24 with the same flags (see [Reproducing](#reproducing)), and every analysis
-quoted here was re-run on the rebuilt solves. The exception is the exact-form direction
-prediction (`interplay.py frames`), which is still running. The tables give the rebuilt values. 1x,
+quoted here was re-run on the rebuilt solves. Three October figures did not survive
+the re-run, and the text now says so where each appears. They were the 94% timing-vs-loudness
+figure, the R² ≈ 0.38 direction regression, and the "cosine 0.82" direction prediction. The tables give the rebuilt values. 1x,
 5x and the map-weighted 3x reproduced exactly. The rebuilt flat 3x scores 0.756
 against 0.757, and its category shares moved by 1–4 points. Figures are in
 `docs/figures/`.
@@ -204,10 +205,33 @@ flux actually takes.
   regressions say little about direction either way. The October figure of R² ≈ 0.38 does not
   reproduce. The code notes a median of 0.26 → 0.46 on 40 patches when pairwise features
   replaced per-piece ones, but that was an earlier version of the analysis.
-- **The exact quadratic form** needs no fitting, which avoids the sample-size problem. The
-  October notes give a mean cosine of 0.82 with the observed direction, and r = 0.67. The
-  output that produced these has not been found. `interplay.py frames` is being re-run to
-  check them.
+### Frame by frame, interference carries most of the flux
+
+`interplay.py frames` on the rebuilt 3x solve uses the same 1154 s realisation and
+0.06–0.12 Hz band. It splits each patch's flux at every frame exactly into own-emission and
+pair terms. The split reproduces the integrated run to r = 1.000000.
+
+| | pair patches (197) | grid patches (87) |
+|---|---|---|
+| pair terms' share of the flux magnitude along its direction (median) | 0.82 | 0.81 |
+| cos between the total flux and own emission alone (median) | +0.16 | +0.40 |
+| power from pair interference, as a share of the total (median) | −111% | −140% |
+| how much the direction wanders over time (1 − mean resultant length) | 0.35 | 0.31 |
+
+- **Interference carries the flux.** About four fifths of the flux along a patch's direction
+  comes from pair terms.
+- **Interference turns the flux.** Own emission alone points well away from the actual flux.
+- **Interference cancels power.** The inputs' own emissions alone would give about 2.1–2.4x the
+  power that is actually there.
+- **One pair does not decide a patch.** In pair patches, the sine of the lag between the two
+  named inputs tracks their own pair term well (r median 0.66, IQR 0.58–0.72). It tracks
+  the patch's total flux only weakly (r 0.10), because the other inputs' terms dominate.
+
+The October notes gave "mean cosine 0.82, r = 0.67" for the exact form predicting
+direction. Those were these two numbers misattributed: the pair share, and the lag-vs-pair-term
+correlation. No direction-prediction cosine has been measured.
+
+![Frame-by-frame split, 3x flat](figures/interplay_frames_nobp_sm6_s3_box.png)
 
 ### Two worked examples
 
