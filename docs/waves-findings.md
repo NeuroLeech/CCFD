@@ -70,12 +70,18 @@ does not support the factored solver, so the stopping point was compared directl
 | 5x | 300 | 0.795 | 0.748 ± 0.005 | 5.8 |
 | 5x | 600 | 0.802 | 0.757 ± 0.003 | 1.9 |
 | 3x flat | 150 | | 0.757 ± 0.001 | 21.7 (8 draws) |
-| 3x flat | 600 | | *running* | |
+| 3x flat | 600 | 0.818 | 0.764 ± 0.003 | 5.5 |
 
 The realised score keeps rising with evaluations, but by 600 the 5x field is almost one
 pattern. A one-dimensional field leaves little to analyse as interplay between regions,
 so the wave analysis uses the 150-evaluation solves throughout, matched across media.
-Which speed fits best cannot be called until the media are compared at matched effort.
+
+3x was then run to 600 evaluations as well, to compare the two speeds at matched effort.
+It does the same thing more slowly. Its realised score rises 0.757 → 0.764 while the rank
+falls 21.7 → 5.5. At both stopping points 3x scores above 5x (0.757 vs 0.739 at 150;
+0.764 vs 0.757 at 600), and at 600 it keeps more structure (rank 5.5 vs 1.9). On this
+evidence 3x fits at least as well as 5x, but the gap narrows with effort and the scores
+are within about 0.01. That is too close to call a best speed from score alone.
 
 ---
 
