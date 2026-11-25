@@ -1,0 +1,10 @@
+[FCTarget] group-RBCNKI100nobp_hemi-L_space-fsaverage5_mask-glasser_spearmanfc.npy
+           9305 vertices (69 of cortex.nV unmatched), 1999771 edges, metric=spearman, centre=double, burn=50
+  nobp_sm6_s3_box: 100 channels, 135 solved frequencies, save 12
+  drive independent (seed 0), surface smoothing 6 mm
+  medium from the file: a [-0. -0.  0.], b [-0.  0.  0.], Ld 3.131e+04, map_clip none
+  realise 3578 frames (577s) at 0.16125s, 4 draws, smoothing FWHM 8 frames
+  draws 2-4 over 3 workers
+
+  realised over 3578 frames (577s), 4 draws: sim +0.1369 +- 0.0143   gap 0.081   rank 36.3   [134s]
+  wrote results/scores_nobp_sm6_s3_box.json

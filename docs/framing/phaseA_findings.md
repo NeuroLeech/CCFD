@@ -237,6 +237,83 @@ python analysis/phase_reach.py --fit-figure results/phase_reach_<...>.npz  # the
 
 ---
 
+## A1: FC score under the controls
+
+**Question.** The wave analysis shows the fitted drive's timing organising the waves. Does
+the FC fit need that timing, or would the same input powers and coherence magnitudes fit
+it as well?
+
+**Test.** `fit/rescore.py` realises each control in place of the fitted cross-spectrum
+and scores it exactly as the fit was scored: 4 draws of 577 s, 6 mm surface smoothing,
+Spearman against the unfiltered RBC FC. The controls (`interplay.control_drive`):
+
+- **independent**: each input keeps its power, all coherence is removed;
+- **random**: the fitted eigenvalues with random eigenvectors, so coherent but never fitted;
+- **timing**: every input's power and every coherence magnitude kept, a random phase per
+  input per frequency;
+- **delay jitter**: the fitted drive exactly, with each input shifted by its own random
+  delay (normal, sd given; the same delays for every draw). Only the relative timing
+  between inputs moves.
+
+### Rebuilt 3x solve (`nobp_sm6_s3_box`)
+
+| drive | realised FC, 4 draws | rank |
+|---|---|---|
+| fitted | +0.7568 ± 0.0014 | 18.6 |
+| independent | +0.1369 ± 0.0143 | 36.3 |
+| random, seeds 0/1/2 | +0.1106 / +0.1068 / +0.1138 | 32–35 |
+| timing, seeds 0/1/2 | +0.1288 / +0.1117 / +0.1528 | 30–31 |
+
+| delay jitter, sd (seed 0) | realised FC |
+|---|---|
+| 0 (fitted) | +0.7568 ± 0.0014 |
+| 5 s, the **same** delay for every input (check) | +0.7577 ± 0.0014 (2 draws) |
+| 0.1 s | +0.6141 ± 0.0027 (2 draws) |
+| 0.3 s | +0.2619 ± 0.0145 (2 draws) |
+| 0.5 s | +0.1341 ± 0.0135 (2 draws) |
+| 1, 2, 5, 10, 20 s | +0.090, +0.106, +0.141, +0.072, +0.119 (4 draws each) |
+
+**The check.** A delay common to every input is a pure time shift of the whole drive, so it
+must leave the score unchanged, and it does (0.758 against 0.757). The drop under jitter
+therefore comes from the relative timing between inputs alone.
+
+**Result.** Every control drops the FC score from 0.757 to 0.11–0.15. Each input's power
+and the medium together give about 0.12–0.14; everything above that comes from how the
+inputs are timed relative to one another. Delay jitter shows how precisely: an sd of
+0.1 s (most inputs moved by one 0.16 s frame or not at all) already costs 0.14, 0.3 s
+costs about two thirds of the excess, and from 0.5 s up the score sits on the controls'
+floor. The 1–20 s values scatter around that floor without trend (one seed each).
+
+**What carries that timing.** A delay τ rotates the phase at frequency f by 2πfτ, so a
+0.1–0.3 s jitter scrambles only the upper part of the band: the coherence that survives
+is about exp(−4π²f²σ²), which halves at 0.13/σ Hz (1.3 Hz at σ = 0.1 s, 0.44 Hz at
+σ = 0.3 s). So the fit leans on precisely held timing at a few tenths of a hertz and up to
+the fMRI Nyquist of 0.775 Hz. That fits what `interplay.py bold` reports for this solve:
+in the observable the fit is scored on, half of what each patch sees lies above 0.2 Hz
+(median patch), and its waves there are mostly cancelling, with interference removing
+117% of the net (logs/bold_s3_box_fitted.txt).
+
+**Why this matters, and what it does not yet show.**
+
+- **For framing point 2.** Under this observation model the answer to A1 is unambiguous:
+  the FC fit needs the fitted relative timing, not just the powers and coherences.
+- **The observation model.** The observable these solves are fitted and scored on is the
+  field low-passed by a 1.29 s gaussian (`--bold-smooth`). It has no haemodynamic
+  response, which in real BOLD removes most of what lies above about 0.1 Hz. So the fit is
+  free to carry FC structure in sub-second timing at frequencies the measured signal
+  barely contains. How much of the timing dependence survives an HRF in the fit is
+  exactly A4. A4 is now the decisive test for A1, not a robustness check.
+- **Interpreting the wave analysis.** The categories read through the HRF (53%
+  reinforcing in the BOLD band, 3x) are a reading of the same solve. They do not show
+  that a fit through the HRF would choose the same timing.
+
+The 0.1–0.5 s rows are 2-draw checks. A 4-draw grid at 0.1, 0.2, 0.3 and 0.5 s on all four
+rebuilt solves is queued after the rebuilds.
+
+Logs: [logs/a1_s3](logs/a1_s3/).
+
+---
+
 ## Rebuilds of the wave-analysis solves
 
 Each rebuild is held to its recorded values within draw scatter. Recorded values are from
