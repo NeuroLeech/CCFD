@@ -84,7 +84,8 @@ cycle per decay.
 | 3x map-weighted | 0.45 | 0.42 |
 
 The fitted switch comes out within 0.03 of the in-phase crossing, and the map-weighted medium is lowest
-on both. Only two distinct values of the medium-only crossing are in play, so this is
+on both. That 0.03 is below the resolution of the fitted switch, which is read from bins
+a factor of about 1.45 apart (see Rebuilds below). Only two distinct values of the medium-only crossing are in play, so this is
 agreement, not a correlation. The fitted values are from the impulse-fixed solves; they will
 be replaced by the rebuilt solves' values when the queue reaches them.
 
@@ -158,3 +159,23 @@ docs/waves-findings.md, at 150 evaluations.
 | `nobp_sm6_s3_box` (3x flat) | 0.8087 | +0.7568 ± 0.0014 | 18.6 | fit 0.809, realised 0.756 ± 0.002, rank 18.6 | reproduced |
 
 Log: [logs/build_s3.txt](logs/build_s3.txt). The 3x build took 28 minutes in this container.
+
+**Categories and switch, 3x rebuilt** (`interplay.py bold` and `media`). Shares are
+single source / reinforcing / cancelling / other, %, over all patches:
+
+| reading | rebuilt | recorded |
+|---|---|---|
+| raw field | 5 / 4 / 77 / 14 | 5 / 5 / 76 / 15 |
+| this model's observable | 5 / 11 / 74 / 10 | 5 / 11 / 73 / 10 |
+| HRF | 8 / 43 / 37 / 12 | 8 / 43 / 37 / 12 |
+| HRF + 0.01–0.08 Hz | 7 / 53 / 29 / 11 | 7 / 53 / 29 / 11 |
+| switch, reinforcing to cancelling | 0.063 Hz = 0.53 cycles per decay | 0.063 Hz = 0.53 |
+
+The timing-only control's first crossovers come out at 0.13, 0.11 and 0.04 cycles per
+decay for the three seeds, inside the recorded 0.03–0.85 range.
+
+**Resolution of the switch.** The switch is read from 14 log-spaced bins. Near it they
+sit at 0.34, 0.49 and 0.71 cycles per decay, a factor of about 1.45 apart. So differences
+of a few hundredths between a fitted switch and an in-phase crossing (A2, finding 4) are
+below what the bins resolve. The A3 prediction is a shift of about a factor of 0.7 or
+2.5, which they resolve easily.
