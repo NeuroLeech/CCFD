@@ -158,7 +158,7 @@ Below 0.36 cycles per decay the in-phase crossing says inputs could still add he
 R 0.99 at 0.04 cycles per decay), but the fitted drive does not use that.
 
 The controls cancel more in this medium than in 3x too, but far less than the fit. The
-random coherent drive cancels at 15–53% of patches and the timing-only control at 18–45%.
+random coherent drive cancels at 15–53% of patches and the timing-only control at 16–45%.
 
 So the in-phase crossing marks where reinforcing becomes impossible, not where the fit will
 use it. Whether the fit reinforces below the crossing depends on what this FC asks of this
