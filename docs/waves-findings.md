@@ -453,10 +453,14 @@ Fit alone does not decide between the media: 1x scores 0.724, 3x 0.756 and 5x 0.
   is why ranges are quoted rather than means.
 - **Media were compared at 150 evaluations.** Longer solves concentrate the drive, and
   whether the half-cycle-per-decay switch holds in a more converged solve is untested.
-- **Why half a cycle per decay?** Not yet explained. A first guess: below it, the medium's
-  response at a patch keeps a similar phase over the distances that separate input regions,
-  so coherent inputs add. The obvious test is a medium-only calculation of that phase
-  spread against distance.
+- **Why half a cycle per decay?** Answered by the medium-only test in
+  [framing/phaseA_findings.md](framing/phaseA_findings.md) (A2). The "phase π across one
+  attenuation length" guess gives the right number only because these four media all have
+  a reach (~220 mm; the true wave speed is 5.9x the spread label) about as large as the
+  sheet. With the decay fixed, the frequency where in-phase inputs stop adding moves with
+  reach: 0.36 cycles per decay at 74 mm, 1.27 at 664 mm, 0.19 on an infinite plane. Each
+  fitted switch above sits within 0.03 of its medium's in-phase crossing. A fitted test at
+  the two other reaches is queued.
 
 ---
 

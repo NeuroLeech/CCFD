@@ -35,6 +35,30 @@ Media are the recorded solves' (only the medium is read; their S is not used), p
 stand-ins at a chosen (decay, speed) with the same flat construction (waves.standin_medium),
 which is how decay and reach are separated.
 
+RESULT, 2026-11-25 (docs/framing/phaseA_findings.md has the full account):
+
+  The stand-in at 8.3333 s, 4.5 reproduces nobp_sm6_s3 to every printed digit.
+
+  The wave speed on the sheet is 5.9x the spread label (the label is an older time-to-peak
+  spread measured on the white surface, timescale.py). Measured from the high-frequency
+  phase speed, the four recorded media all have a true reach c tau of ~220 mm; the sheet's
+  patch-to-patch geodesic distances have median 119 mm and maximum 257 mm.
+
+  Median arrival R falls through 0.5 (interpolated, `crossing`) at, in cycles per decay:
+      recorded media (reach ~220 mm)   1x 0.51, 3x 0.51, 5x 0.51, 3x map-weighted 0.45
+      decay 8.33 s, reach  74 mm       0.36   (R hovers at 0.50-0.52 from 0.29 to 0.46)
+      decay 8.33 s, reach 664 mm       1.27
+      infinite flat plane (plane_R)    0.19
+  So the frequency where in-phase inputs stop adding is not set by the medium alone: it
+  rises with reach relative to the sheet, and "half a cycle per decay" is where it falls
+  when reach ~ sheet. The four media's fitted switches (0.54, 0.53, 0.51, 0.42; interplay.py
+  media) sit just below their in-phase crossings, map-weighted lowest in both.
+
+  The dispersion check is not informative for the recorded media: at a 220 mm reach the
+  15-60 mm annuli lie in the near field, where even the flat-plane Green's function does
+  not give the far-field ratio. For the 73 mm stand-in at high f tau it does, and the mesh
+  matches it (ratio 31.7 against 2 pi f tau 31.4 at f tau 5; L 74 mm against c tau 73 mm).
+
   python analysis/phase_reach.py --tags nobp_sm6_s1,nobp_sm6_s3,nobp_sm6_s5,nobp_sm6_mapsmm_s3
   python analysis/phase_reach.py --standin 8.3333,1.5 --standin 8.3333,13.5
 """
@@ -61,6 +85,23 @@ def medium(c, spec):
     args = provenance.read(z).get("args", {})
     run = waves.load_run(c, spec)
     return run, float(args["decay_s"]), spec
+
+
+def plane_R(ftau):
+    """Arrival R on an infinite flat plane driven everywhere in phase, as a function of
+    cycles per decay time alone (with c = tau = 1 the plane has no other scale).
+
+    The response to a point source is G = (i/4) H0(kr), k = omega + i; the in-phase sum is
+    the uniform response |1/k^2|, the incoherent sum the integral of |G| over the plane."""
+    from scipy.special import hankel1
+    from scipy.integrate import quad
+    out = []
+    for ft in np.atleast_1d(ftau):
+        k = 2 * np.pi * ft + 1j
+        f = lambda r: abs(0.25 * hankel1(0, k * r)) * 2 * np.pi * r
+        den = quad(f, 0, 1, limit=400)[0] + quad(f, 1, 60, limit=800)[0]
+        out.append(1.0 / abs(k) ** 2 / den)
+    return np.array(out)
 
 
 def rim(S):
@@ -126,7 +167,12 @@ def main():
                     help="pieces used for the dispersion check, farthest from the rim")
     ap.add_argument("--rlo", type=float, default=15.0)
     ap.add_argument("--rhi", type=float, default=60.0)
+    ap.add_argument("--figure", default="",
+                    help="only redraw the findings figure from this saved .npz")
     a = ap.parse_args()
+    if a.figure:
+        reach_figure(a.figure, a.figure.replace(".npz", "_reach.png"))
+        return
 
     c = load_cortex("fsaverage5", verbose=False)
     S = waves.Surface(c)
@@ -174,6 +220,101 @@ def main():
     np.savez(stem + ".npz", out=np.array(out, object))
     print(f"\n  wrote {stem}.npz")
     _plot(stem + ".png", out)
+
+
+def crossing(ft, R, level=0.5):
+    """First f tau at which R falls through `level`, interpolated in log f tau."""
+    i = np.flatnonzero((R[:-1] >= level) & (R[1:] < level))
+    if not len(i):
+        return np.nan
+    i = i[0]
+    w = (R[i] - level) / (R[i] - R[i + 1])
+    return float(np.exp(np.log(ft[i]) + w * np.log(ft[i + 1] / ft[i])))
+
+
+# where the fitted drives' reinforcing share gives way to cancelling, in cycles per decay
+# (interplay.py media on the impulse-fixed solves, docs/waves-findings.md). To be replaced
+# by the rebuilt solves' values once the Phase A queue has run `interplay.py bold` on them.
+FITTED_SWITCH = {"nobp_sm6_s1": 0.54, "nobp_sm6_s3": 0.53, "nobp_sm6_s5": 0.51,
+                 "nobp_sm6_mapsmm_s3": 0.42}
+NAMES = {"nobp_sm6_s1": "1x", "nobp_sm6_s3": "3x", "nobp_sm6_s5": "5x",
+         "nobp_sm6_mapsmm_s3": "3x map-weighted"}
+C_PER_LABEL = 5.9        # wave speed on the sheet per mm/s of spread label, measured here
+
+
+def reach_figure(npz, path):
+    """Two panels for the findings note: (a) arrival R against f tau at a fixed decay with
+    the reach varied, against the infinite plane; (b) each recorded medium's in-phase
+    crossing against its fitted switch."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    out = np.load(npz, allow_pickle=True)["out"].item()
+    ink, ink2, grid = "#191919", "#666666", "#e5e5e5"
+    plt.rcParams.update({"font.size": 9, "axes.edgecolor": ink2, "axes.labelcolor": ink,
+                         "xtick.color": ink2, "ytick.color": ink2, "axes.spines.top": False,
+                         "axes.spines.right": False})
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4.2), gridspec_kw=dict(width_ratios=[1.6, 1]))
+
+    a = ax[0]
+    ftp = np.geomspace(0.02, 5, 60)
+    a.plot(ftp, plane_R(ftp), color="#8c8c8c", lw=1.5, ls=(0, (4, 3)))
+    a.text(0.045, 0.80, "infinite flat plane", color=ink2, fontsize=8, ha="right")
+    series = [("8.3333,1.5", "#257de0"), ("8.3333,4.5", "#f47230"), ("8.3333,13.5", "#00b894")]
+    for spec, col in series:
+        if spec not in out:
+            continue
+        r = out[spec]
+        spr = float(spec.split(",")[1])
+        reach = C_PER_LABEL * spr * r["tau"]
+        a.plot(r["ftau"], r["R_med"], color=col, lw=2, marker="o", ms=4,
+               markeredgecolor="white", markeredgewidth=0.8)
+        lab = f"reach {reach:.0f} mm" + (" = 3x" if spr == 4.5 else "")
+        # direct labels, each placed in a clear part of the panel
+        i, dx, dy, ha = {1.5: (int(np.flatnonzero(r["R_med"] < 0.5)[0]), 0, -16, "center"),
+                         4.5: (int(np.flatnonzero(r["R_med"] < 0.6)[0]), 8, 0, "left"),
+                         13.5: (int(np.flatnonzero(r["R_med"] < 0.8)[0]), 8, 0, "left")
+                         }.get(spr, (0, 8, 0, "left"))
+        a.annotate(lab, (r["ftau"][i], r["R_med"][i]), xytext=(dx, dy),
+                   textcoords="offset points", color=ink, fontsize=8, va="center", ha=ha)
+    a.axhline(0.5, color=grid, lw=1, zorder=0)
+    a.axvline(0.5, color=ink2, lw=0.8, ls=":")
+    a.text(0.52, 1.02, "half a cycle per decay", color=ink2, fontsize=8)
+    a.set_xscale("log")
+    a.set_ylim(0, 1.06)
+    a.set_xlabel("cycles per decay time (f tau), decay held at 8.33 s")
+    a.set_ylabel("arrival R: in-phase sum / sum of sizes\n(median over 150 patches)")
+    a.set_title("(a) Where in-phase inputs stop adding moves with reach", loc="left",
+                fontsize=10, color=ink)
+    a.grid(axis="y", color=grid, lw=0.6)
+
+    b = ax[1]
+    xs, ys, labs = [], [], []
+    for tag, fs in FITTED_SWITCH.items():
+        if tag in out:
+            xs.append(crossing(out[tag]["ftau"], out[tag]["R_med"]))
+            ys.append(fs)
+            labs.append(NAMES[tag])
+    lim = (0.38, 0.6)
+    b.plot(lim, lim, color=ink2, lw=0.8, ls=":", zorder=0)
+    b.scatter(xs, ys, s=40, color="#f47230", edgecolor="white", linewidth=1, zorder=3)
+    off = {"1x": (7, 2), "3x": (7, -9), "5x": (7, -3), "3x map-weighted": (7, -3)}
+    for x, y, l in zip(xs, ys, labs):
+        b.annotate(l, (x, y), xytext=off.get(l, (7, -3)), textcoords="offset points",
+                   color=ink, fontsize=8)
+    b.text(0.385, 0.59, "dotted: equal", color=ink2, fontsize=8)
+    b.set_xlim(lim); b.set_ylim(lim)
+    b.set_xlabel("in-phase crossing, medium only (f tau)")
+    b.set_ylabel("fitted switch, reinforcing to cancelling (f tau)")
+    b.set_title("(b) Fitted switch against the medium's crossing", loc="left",
+                fontsize=10, color=ink)
+    b.grid(color=grid, lw=0.6)
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, facecolor="white")
+    print(f"  wrote {path}")
+    for tag in out:
+        print(f"    {out[tag]['label']:40s} crossing {crossing(out[tag]['ftau'], out[tag]['R_med']):.3f}")
+    print(f"    {'infinite flat plane':40s} crossing {crossing(ftp, plane_R(ftp)):.3f}")
 
 
 def _plot(path, out):
