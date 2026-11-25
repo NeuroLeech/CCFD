@@ -278,7 +278,7 @@ must leave the score unchanged, and it does (0.758 against 0.757). The drop unde
 therefore comes from the relative timing between inputs alone.
 
 **Result.** Every control drops the FC score from 0.757 to 0.11–0.15. Each input's power
-and the medium together give about 0.12–0.14; everything above that comes from how the
+and the medium together give about 0.11–0.15; everything above that comes from how the
 inputs are timed relative to one another. Delay jitter shows how precisely: an sd of
 0.1 s (most inputs moved by one 0.16 s frame or not at all) already costs 0.14, 0.3 s
 costs about two thirds of the excess, and from 0.5 s up the score sits on the controls'
