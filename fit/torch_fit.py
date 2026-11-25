@@ -91,7 +91,7 @@ def interp_weights(idx, ref_frames, nframes):
 class Fit:
     def __init__(self, ref, cortex, target, seconds, device="mps", dtype=torch.float32,
                  amp=2e-4, nl_flux=0.0, nl_adv=0.0, Ld=None, maps_scale=1.0,
-                 lag_taus=(), wa=1.0, chunk=0):
+                 lag_taus=(), wa=1.0, chunk=0, speed=1):
         import fluid as fl
         self.ref, self.c, self.t = ref, cortex, target
         # The SIMULATION runs on `dev`; the complex arithmetic - building the drive from
@@ -99,7 +99,15 @@ class Fit:
         # backward for complex ops. Both boundaries are real-valued and small: A is
         # (nsteps, K) and F is (nframes, 1000), against a 28,000-edge state per step.
         self.dev, self.cdev, self.dtype = device, "cpu", dtype
-        self.amp, self.save = amp, ref["save"]
+        # SPEED at fixed reach: `speed` x the steps per frame, nothing else. The per-step
+        # system - dt, damping per step, rotation, the nonlinear terms, the maps - is left
+        # exactly as it is, so the medium is the same discrete fluid with each step standing
+        # for 1/speed of the time: wave speed in mm/s x speed, decay in seconds / speed,
+        # reach unchanged. What moves is where the target's band sits in the medium's own
+        # time, an octave lower per doubling. G lives on the frame-frequency grid, in
+        # seconds, so a drive carries across speeds unchanged.
+        self.speed = int(speed)
+        self.amp, self.save = amp, ref["save"] * self.speed
         self.p, _, _ = bo_step.unpack(ref["x"], cortex)
         # The reference's medium includes how its maps were clipped. Replaying a solve
         # in an unclipped medium is a different system, the same way replaying G in the
@@ -508,6 +516,9 @@ def main():
                          "15827.6 gives an inertial period of 23,026 s, ten times the "
                          "longest realisation, so rotation is inert. 52.4 gives 76 s, "
                          "inside the 0.01-0.08 Hz the measurement can see")
+    ap.add_argument("--speed", type=int, default=1,
+                    help="x steps per frame at the same per-step medium: wave speed x speed, "
+                         "decay / speed, reach held (see Fit)")
     ap.add_argument("--device", default="mps")
     ap.add_argument("--eval-every", type=int, default=25, dest="eval_every")
     ap.add_argument("--eval-draws", type=int, default=6, dest="eval_draws",
@@ -532,13 +543,14 @@ def main():
     t = fc_score.default_target(c, verbose=False)
     fit = Fit(ref, c, t, a.seconds, device=a.device, amp=a.amp, nl_flux=a.nl_flux,
               nl_adv=a.nl_adv, Ld=a.Ld, maps_scale=a.maps_scale, wa=a.wa,
-              lag_taus=[int(v) for v in a.lag_taus.split(",") if v.strip()])
+              lag_taus=[int(v) for v in a.lag_taus.split(",") if v.strip()],
+              speed=a.speed)
     print(f"  ref {a.ref}: {fit.K} pieces, {len(ref['idx'])} solved frequencies, "
           f"{len(ref['sub'])} vertices")
     print(f"  realise {fit.nframes} frames ({a.seconds:.0f}s) = {fit.nsteps} steps, "
           f"chunk {fit.chunk}, amp {a.amp:g}, nl_flux {a.nl_flux:g}, "
           f"nl_adv {a.nl_adv:g}, Ld {fit.p['Ld']:.1f}, maps x{a.maps_scale:g}, "
-          f"device {a.device}")
+          f"speed x{fit.speed} (save {fit.save}), device {a.device}")
     _Ti = 2 * np.pi * fit.p["Ld"] / fit.dt * (ref["frame_s"] / fit.save)
     print(f"  H {fit.Hf.min():.4f}-{fit.Hf.max():.4f}, dt {fit.dt:.4f}, "
           f"inertial period {_Ti:.0f}s ({_Ti/a.seconds:.2f} of the realisation)")
@@ -656,7 +668,7 @@ def main():
         np.savez(os.path.join(RESULTS, f"torchfit_{a.tag}_it{it}.npz"), G=Gd,
                  S=np.einsum("fab,fcb->fac", Gd, Gd.conj()), best_iter=it, ref=a.ref,
                  best_sim=np.nan, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
-                 nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale,
+                 nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale, speed=fit.speed,
                  amp=a.amp, hist=np.asarray(hist),
                  **_medium_state(fit, a), **provenance.stamp(a))
         print(f"        dumped G at iteration {it}", flush=True)
@@ -717,7 +729,7 @@ def main():
         np.savez(os.path.join(RESULTS, f"torchfit_{a.tag}.npz"), G=Gb, S=Sg,
                  hist=np.asarray(hist), best_sim=best[0], best_iter=best[2],
                  ref=a.ref, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
-                 nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale,
+                 nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale, speed=fit.speed,
                  amp=a.amp, **_medium_state(fit, a), **provenance.stamp(a))
         print(f"  wrote results/torchfit_{a.tag}.npz")
 

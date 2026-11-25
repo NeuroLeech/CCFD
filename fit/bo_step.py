@@ -93,18 +93,14 @@ def _impulse(args):
     c = _W["cortex"]
     s, dt, g, H = fl.build(c, p, sponge=True)
     if _W.get("profiles") is not None:
-        h = _W["profiles"][int(region)].astype(np.float32).copy()
+        prof = _W["profiles"][int(region)]
     else:
         T, ids = parcel_tapers(c, verbose=False)
         pos = {int(q): i for i, q in enumerate(ids)}
-        h = T[pos[int(region)]].astype(np.float32).copy()
-    ue = np.zeros(s.nE, np.float32)
-    fr = [h.copy()]
-    for n in range(1, nsteps):
-        ue, h = s.step(ue, h, np.float32(dt), g, H)
-        if n % save == 0:
-            fr.append(h.copy())
-    return np.asarray(fr)
+        prof = T[pos[int(region)]]
+    # one frame of drive, read as fluid.run reads it - see xspec.impulse_series
+    return xspec.impulse_series(s, dt, g, H, prof, nsteps, save,
+                                p.get("decimate", "snapshot") == "mean")
 
 
 def evaluate(pool, x, verbose=True):

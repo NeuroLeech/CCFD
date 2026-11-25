@@ -191,13 +191,28 @@ def run(cortex, drive, p, nsteps, save_every=25, sponge=True, dt=None, coupling=
     ue = np.zeros(s.nE, np.float32)
     dtD = np.float32(dt)
     frames = []
+    # decimate="mean": a frame is the AVERAGE of the field over the steps since the last one,
+    # not a snapshot of the last step. A snapshot every `save` steps folds any field content
+    # above the frame Nyquist back into lower frequencies; a fast medium at a TR/4 clock has
+    # most of its power there (10x: 73% above 1 Hz, 55% of peak at the 3.1 Hz Nyquist). The
+    # box average attenuates it (to 0.64 at the Nyquist, zero at the frame rate) - partial,
+    # and cheap. It must match xspec.impulse_responses and bo_step._impulse, which read the
+    # same key, or H describes a system that is not the one simulated.
+    mean = p.get("decimate", "snapshot") == "mean"
+    acc = np.zeros(cortex.nV, np.float32) if mean else None
     for n in range(nsteps):
         h += Aser[n] @ P
         ue, h = s.step(ue, h, dtD, g, Hf)
+        if mean:
+            acc += h
         if n % save_every == 0:
             if not np.isfinite(h).all():
                 raise FloatingPointError(f"diverged at step {n}")
-            frames.append(h.copy())
+            if mean:
+                frames.append(acc / (1 if n == 0 else save_every))
+                acc = np.zeros_like(acc)
+            else:
+                frames.append(h.copy())
     return np.asarray(frames), dt
 
 

@@ -105,7 +105,7 @@ python fit/best_fit.py --oversample 4 --decay-s 9.03 --spread-mm-s 6 --bold-smoo
 python viz/render_frames.py --tag pr_taper --start 200 --n 600 --save 16 --fps 20
 ```
 
-`RUNS.md` indexes every solve and fit on disk with its parameters and its score.
+`RUNS.md` indexes every solve and fit on disk with its parameters and its score. `docs/waves-findings.md` collects what the wave analyses (`analysis/interplay.py`) have found so far.
 
 ## The 100 driven regions
 
@@ -164,7 +164,7 @@ it a script in `analysis/` could not find `fit/xspec.py`.
 | `core/` | the mesh, the medium, the clock and the observable — `paths`, `mesh_cache`, `surf_ops`, `fluid`, `swe_rot`, `units`, `timescale`, `bandpass`, `ladder`, `regimes` |
 | `targets/` | reading scans and building the FC targets they are scored against — `rbc`, `fc_score`, `fc_group_nki`, `fc_group_rbc`, `fc_vertexwise`, `reliability`, `holdout`, `lagged`, `checkerboard` |
 | `fit/` | the input model, the convex solve and the torch descent — `xspec`, `best_fit`, `torch_fit`, `rescore`, `ascending_basis`, `bo_step`, `subparcels`, `connectome`, `family` |
-| `analysis/` | diagnostics and experiments — `diag_*`, `band_*`, `interference`, `zones`, `checkerboard_model`, `checkerboard_modulation`, `onoff_*`, `task_inputs` |
+| `analysis/` | diagnostics and experiments — `diag_*`, `band_*`, `interference`, `waves`, `zones`, `checkerboard_model`, `checkerboard_modulation`, `onoff_*`, `task_inputs` |
 | `viz/` | `render_*`, `plot_*`, `surface_plots` |
 
 `data/` holds the datasets and `results/` everything written; both are addressed through
@@ -207,6 +207,8 @@ directory.
 | `targets/holdout.py` | solve on one half of the subjects, score on the other |
 | `analysis/reach.py` | can this fluid produce the target's patterns at all? |
 | `analysis/diag_maps.py` | where the fit fails, drawn on the surface |
+| `analysis/waves.py` | which way the field travels, and how much of it the inputs' relative timing decides |
+| `analysis/interplay.py` | how pairs of driven pieces steer, expand, reinforce and cancel the waves between them; the fitted drive's flux split exactly into emission and pair interference; `bold` weights the whole-cortex categories by what BOLD sees, `media` compares them across media in cycles per decay |
 | **input, by hand** | |
 | `fit/input2.py` | input as K regions with timecourses supplied directly |
 | `fit/input_model.py` | input as K regions driven through r shared latent factors |

@@ -153,7 +153,9 @@ class TorchSWE:
     def grad(self, h):
         return (h[self.Ej] - h[self.Ei]) / self.d
 
-    def step(self, ue, h, dt, g, H, niter=2):
+    def step(self, ue, h, dt, g, H, niter=2, gain=None):
+        """`gain` (nV,) multiplies the damping per vertex - edges take the mean of their two
+        ends - for adaptive damping (run_adaptive). None is the original step exactly."""
         frot = None
         rhs = ue + dt * (-g * self.grad(h))
         if self.nl_adv != 0.0:
@@ -169,8 +171,13 @@ class TorchSWE:
         Hf = H if self.nl_flux == 0.0 else H + self.nl_flux * h
         hn = h - dt * Hf * self.divergence(un)
         if self.sig_v is not None:
-            un = un / (1.0 + dt * self.sig_e)
-            hn = hn / (1.0 + dt * self.sig_v)
+            if gain is None:
+                un = un / (1.0 + dt * self.sig_e)
+                hn = hn / (1.0 + dt * self.sig_v)
+            else:
+                ge = 0.5 * (gain[self.Ei] + gain[self.Ej])
+                un = un / (1.0 + dt * self.sig_e * ge)
+                hn = hn / (1.0 + dt * self.sig_v * gain)
         return un, hn
 
     def zeros(self):
@@ -186,7 +193,8 @@ def _as(v, sw):
     return torch.as_tensor(np.asarray(v), dtype=sw.dtype, device=sw.device)
 
 
-def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
+def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None, adapt=None,
+        observe="h", decimate="snapshot"):
     """Integrate, returning saved frames. The drive is `A[n] @ P` added to h per step,
     exactly as in `fluid.run` - held as (nsteps, K) amplitudes and (K, nV) profiles rather
     than a dense (nsteps, nV) field, which at 57,000 steps would be 4 GB on its own.
@@ -197,7 +205,16 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
     does not fit; sqrt(nsteps) segments turn that into tens of MB for about 2x the forward
     cost. `keep` is a vertex index: only those columns are kept, which is what the loss
     needs and keeps the saved frames off the graph at full width.
-    -> (frames, ue, h), with the final state returned so windows can be chained."""
+    -> (frames, ue, h), with the final state returned so windows can be chained.
+
+    Three options, all off by default (and then the path below is the original, unchanged):
+      adapt=(k, tau_steps, a_ref)   adaptive damping, as run_adaptive: a slow per-vertex
+                                    running average of h^2 scales the damping by 1 + k a/a_ref;
+                                    k and tau_steps may be tensors, and are differentiated
+      observe="energy"              frames are of h^2, the local energy BOLD is read from
+      decimate="mean"               a frame is the average over its steps, not a snapshot
+    With any of them set the integration carries (a, frame accumulator, count) across
+    checkpoint segments, and stays differentiable throughout."""
     nsteps = A.shape[0]
     ue, h = sw.zeros() if state is None else state
     A = _as(A, sw)
@@ -219,6 +236,9 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
         return ue, h, (torch.stack(out) if out else
                        torch.zeros(0, nc, dtype=sw.dtype, device=sw.device))
 
+    if adapt is not None or observe != "h" or decimate != "snapshot":
+        return _run_extended(sw, A, P, dt, g, H, save, chunk, ue, h, keep, adapt,
+                             observe, decimate)
     frames, k = [], chunk if chunk > 0 else nsteps
     for a0 in range(0, nsteps, k):
         blk = A[a0:a0 + k]
@@ -230,6 +250,105 @@ def run(sw, A, P, dt, g, H, save=1, chunk=0, state=None, keep=None):
         if fr.shape[0]:
             frames.append(fr)
     return torch.cat(frames) if frames else None, ue, h
+
+
+def _run_extended(sw, A, P, dt, g, H, save, chunk, ue, h, keep, adapt, observe, decimate):
+    """run() with adaptive damping / energy frames / averaged frames - see run()."""
+    nsteps = A.shape[0]
+    # k and tau_steps may be tensors that require grad (adaptive_fit --learn-adapt): they are
+    # carried as 0-d tensors and passed into each checkpoint segment, so the gradient reaches
+    # them through every step. Floats give the same arithmetic.
+    on = adapt is not None and (torch.is_tensor(adapt[0]) or float(adapt[0]) != 0.0)
+    kk, tau, aref = ((0.0, 1.0, 1.0) if not on else
+                     (_as(adapt[0], sw), _as(adapt[1], sw), float(adapt[2])))
+    if not on:
+        kk = tau = torch.zeros((), dtype=sw.dtype, device=sw.device)
+    mean = decimate == "mean"
+    a = torch.zeros_like(h)
+    acc = torch.zeros_like(h)
+    cnt = torch.zeros((), dtype=h.dtype, device=h.device)
+
+    def seg(ue, h, a, acc, cnt, kk, tau, blk, off):
+        out = []
+        dr = blk @ P
+        for n in range(dr.shape[0]):
+            gain = 1.0 + kk * a / aref if on else None
+            ue, h = sw.step(ue, h + dr[n], dt, g, H, gain=gain)
+            h2 = h * h
+            if on:
+                a = a + (h2 - a) / tau
+            v = h2 if observe == "energy" else h
+            if mean:
+                acc = acc + v; cnt = cnt + 1
+            if (off + n) % save == 0:
+                fr = acc / cnt if mean else v
+                if mean:
+                    acc = torch.zeros_like(acc); cnt = torch.zeros_like(cnt)
+                out.append(fr if keep is None else fr[keep])
+        nc = sw.nV if keep is None else len(keep)
+        return ue, h, a, acc, cnt, (torch.stack(out) if out else
+                                    torch.zeros(0, nc, dtype=sw.dtype, device=sw.device))
+
+    frames, k = [], chunk if chunk > 0 else nsteps
+    for a0 in range(0, nsteps, k):
+        blk = A[a0:a0 + k]
+        if chunk > 0 and torch.is_grad_enabled():
+            ue, h, a, acc, cnt, fr = torch.utils.checkpoint.checkpoint(
+                seg, ue, h, a, acc, cnt, kk, tau, blk, a0, use_reentrant=False)
+        else:
+            ue, h, a, acc, cnt, fr = seg(ue, h, a, acc, cnt, kk, tau, blk, a0)
+        if fr.shape[0]:
+            frames.append(fr)
+    return torch.cat(frames) if frames else None, ue, h
+
+
+def run_adaptive(sw, A, P, dt, g, H, save, k=0.0, tau_steps=1.0, a_ref=1.0, keep=None,
+                 state=None):
+    """Integrate with ADAPTIVE DAMPING and return frame-averaged observables.
+
+    One slow state per vertex, a running average of local wave energy,
+
+        a <- a + (h^2 - a) / tau_steps                      (tau_steps = tau_a / seconds per step)
+
+    scales that vertex's damping by gain = 1 + k a / a_ref (edges: mean of their ends). Regions
+    with sustained fast activity are damped harder for ~tau_a: gain control with a slow
+    timescale of its own, which a linear fast medium does not have. It can only raise damping,
+    so it cannot destabilise the integration. a_ref is the typical h^2 of the same medium and
+    drive with k = 0, so k is dimensionless (k = 1 doubles the damping at typical activity).
+
+    Frames are AVERAGES over each frame's steps, of h and of h^2 (local energy - what BOLD is
+    read from in this model). Averaging h is fluid.run's decimate="mean"; for h^2 it is not
+    optional, since snapshots of a squared fast signal alias everything into the slow band.
+    No gradient is kept (torch.no_grad); fitting through this is a later step.
+
+    -> dict(h=(T, nkeep), energy=(T, nkeep), a=(T, nkeep)) as numpy, and the final state."""
+    import numpy as _np
+    with torch.no_grad():
+        ue, h = sw.zeros() if state is None else state[:2]
+        a = torch.zeros_like(h) if state is None else state[2]
+        A, P = _as(A, sw), _as(P, sw)
+        dt = torch.as_tensor(dt, dtype=sw.dtype, device=sw.device)
+        g = torch.as_tensor(g, dtype=sw.dtype, device=sw.device)
+        H = _as(H, sw)
+        kk = None if keep is None else torch.as_tensor(_np.asarray(keep), dtype=torch.long,
+                                                       device=sw.device)
+        out = {"h": [], "energy": [], "a": []}
+        acc_h = torch.zeros_like(h); acc_e = torch.zeros_like(h); cnt = 0
+        nsteps, blk = A.shape[0], 4096
+        for a0 in range(0, nsteps, blk):
+            dr = A[a0:a0 + blk] @ P
+            for i in range(dr.shape[0]):
+                n = a0 + i
+                gain = None if k == 0.0 else 1.0 + k * a / a_ref
+                ue, h = sw.step(ue, h + dr[i], dt, g, H, gain=gain)
+                h2 = h * h
+                a = a + (h2 - a) / tau_steps
+                acc_h += h; acc_e += h2; cnt += 1
+                if n % save == 0:
+                    for nm, v in (("h", acc_h / cnt), ("energy", acc_e / cnt), ("a", a)):
+                        out[nm].append((v if kk is None else v[kk]).float().cpu().numpy())
+                    acc_h = torch.zeros_like(h); acc_e = torch.zeros_like(h); cnt = 0
+        return {nm: _np.asarray(v) for nm, v in out.items()}, (ue, h, a)
 
 
 # --------------------------------------------------------------------------------------
