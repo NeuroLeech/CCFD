@@ -159,7 +159,7 @@ in-phase crossing from A2. The beige band is 0.01–0.08 Hz.
 | fitted switch | **none** | 0.53 | **1.29** (0.155 Hz) |
 | fit (2,000 solve vertices) | 0.7777 | 0.8087 | 0.6360 |
 | realised, 4 draws | +0.7080 ± 0.0064 | +0.7568 ± 0.0014 | +0.6027 ± 0.0026 |
-| gap, fit to realised | 0.057 | 0.070 | 0.103 |
+| spatial-autocorrelation mismatch (`gap` in the logs: mean absolute difference in Moran's I, model against data) | 0.057 | 0.070 | 0.103 |
 | rank | 28.7 | 18.6 | 2.2 |
 | still gaining at 150 evaluations (last 15) | 0.0006 | 0.0011 | 0.0070 |
 | reinforcing / cancelling, HRF + 0.01–0.08 Hz | 5% / 58% | 53% / 29% | 66% / 15% |
