@@ -118,7 +118,7 @@ def held_out_score(t, frames, val, val_raw_ranks):
 
 def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, nb,
                  sched_f, ps, dt, kern, cpl, Lw=None, keep_f=None, spec=None,
-                 band=None, frame_s=None, segment=None):
+                 band=None, frame_s=None, segment=None, hrf=False):
     """Choose where to stop the solve, by simulating at each candidate and scoring on
     held-out vertices.
 
@@ -158,7 +158,7 @@ def select_iters(a, c, t, p, P, H, w, idx, ref_frames, save, val, val_Ct, Tgt, n
             run_fn = lambda dr, ns, sv: bo_step.fl.run(c, dr, p, ns, sv, coupling=cpl)
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, run_fn=run_fn,
                                     kernel=kern, band=band, frame_s=frame_s,
-                                    segment=segment)
+                                    segment=segment, hrf=hrf)
         v = held_out_score(t, r["frames"], val, yv)
         scores[n] = v
         print(f"    {n:5d} iterations: held-out realised {v:+.4f}  "
@@ -327,6 +327,12 @@ def main():
                          "spectrum (data/cache/bold_psd.npz). Convex, and a much tighter "
                          "statement than a band: the empirical spectrum falls as f^-2.6 "
                          "with 84%% of its variance in 0.01-0.1 Hz. Needs --oversample")
+    ap.add_argument("--hrf", action="store_true",
+                    help="observe the field through the canonical haemodynamic response "
+                         "(core/hrf.py), on both sides: H is multiplied by its gain on the "
+                         "solved bins and the realised frames are convolved with the same "
+                         "kernel. Without it the observable keeps power up to the fMRI "
+                         "Nyquist that BOLD does not have. Needs --oversample for a clock")
     ap.add_argument("--bold-smooth", action="store_true", dest="bold_smooth",
                     help="low-pass the field to the fMRI Nyquist before scoring, with "
                          "the same kernel folded into the transfer function")
@@ -677,6 +683,12 @@ def main():
             raise SystemExit("  --bandpass takes LO,HI in Hz")
         fs_bp = clock["frame_s"]
         print(f"  observable bandpassed {bp[0]}-{bp[1]} Hz, matching the target's filter")
+    if a.hrf:
+        if clock is None:
+            raise SystemExit("  --hrf needs --oversample: the kernel is defined in seconds "
+                             "and without a clock there is no mapping to frames")
+        fs_bp = clock["frame_s"]           # the frame clock both filters are defined on
+        print("  observable seen through the canonical HRF (core/hrf.py)")
 
     tm, mkey = t, None
     if a.medoid_from:
@@ -785,6 +797,19 @@ def main():
                 Hv = Hv * br[:, None, None]
             print(f"    filter response over the kept bins: {br.min():.3f}-{br.max():.3f}, "
                   f"{int((br > 0.5).sum())} of {len(br)} bins above 0.5")
+        if a.hrf:
+            # a gain identical at every vertex, so like the passband it multiplies H; its
+            # phase is a common delay that no cross-spectrum between vertices can see
+            import hrf
+            hr = hrf.transfer_response(idx, ref_frames, clock["frame_s"])
+            H = H * hr[:, None, None]
+            if Hv is not None:
+                Hv = Hv * hr[:, None, None]
+            fb = np.asarray(idx, float) / (ref_frames * clock["frame_s"])
+            print(f"    HRF power over the kept bins: {hr.min()**2:.2e}-{hr.max()**2:.3f}, "
+                  f"below 1% from {fb[np.flatnonzero(hr ** 2 < 0.01)[0]]:.3f} Hz"
+                  if (hr ** 2 < 0.01).any() else
+                  f"    HRF power over the kept bins: {hr.min()**2:.3f}-{hr.max()**2:.3f}")
         if seg_fr:
             import bandpass
             sr = bandpass.segment_response(idx, ref_frames, clock["frame_s"], seg_fr)
@@ -867,7 +892,7 @@ def main():
                                Tgt, nb, sched_f if nb > 1 else None,
                                ps if nb > 1 else None, dt if nb > 1 else None, kern, cpl,
                                Lw, keep_f, spec, band=bp, frame_s=fs_bp,
-                               segment=seg_fr)
+                               segment=seg_fr, hrf=a.hrf)
     tr = []
     s_fac = None                 # (factor, trace) when the solve is factored; see the save
     if a.lag_taus:
@@ -981,7 +1006,7 @@ def main():
                 for d in range(1, a.draws)]
         pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
                                           band=bp, frame_s=fs_bp, segment=seg_fr,
-                                          smooth=Kscore)
+                                          smooth=Kscore, hrf=a.hrf)
         print(f"  draws 2-{a.draws} scored over {min(a.workers, len(rest))} workers",
               flush=True)
     for d in range(1 if pool is not None else a.draws):
@@ -999,7 +1024,7 @@ def main():
                 c, dr, p, nsteps, sv, coupling=cpl))
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P,
                                     run_fn=run_fn, kernel=kern, band=bp, frame_s=fs_bp,
-                                    segment=seg_fr, smooth=Kscore)
+                                    segment=seg_fr, smooth=Kscore, hrf=a.hrf)
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
         if "sim_aff" in r:
             affs.append(r["sim_aff"])
@@ -1033,6 +1058,7 @@ def main():
              pad=a.pad, ref_frames=ref_frames,
              frame_s=(clock["frame_s"] if clock else np.nan),
              band=np.array(bp if bp else (np.nan, np.nan)), segment=seg_fr,
+             hrf=bool(a.hrf),
              fc_path=(a.fc_path or ""), H_w=w, regions=a.regions, split=a.split,
              sub=sub, impulse_frames=a.impulse_frames, nfreq=a.nfreq,
              medoid_from=(a.medoid_from or ""), profiles=P,

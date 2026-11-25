@@ -1541,22 +1541,22 @@ def cmd_combine(a, c, S, run):
 
 def hrf_power(hz):
     """|HRF(f)|^2 of the SPM canonical double gamma (peak 6 s, undershoot 16 s, 1/6),
-    normalised to 1 at 0 Hz."""
-    from scipy.stats import gamma
-    t = np.arange(0, 40, 0.01)
-    h = gamma.pdf(t, 6) - gamma.pdf(t, 16) / 6.0
-    Hf = np.array([np.sum(h * np.exp(-2j * np.pi * f * t)) for f in np.atleast_1d(hz)])
-    H0 = np.sum(h)
-    return np.abs(Hf / H0) ** 2
+    normalised to 1 at 0 Hz. The kernel lives in core/hrf.py, shared with the fit."""
+    import hrf
+    return hrf.power(hz)
 
 
-def observables(hz, frame_s, smooth_frames):
+def observables(hz, frame_s, smooth_frames, hrf_fit=False):
     """Gain^2 per frequency of four readings of what is observed. Temporal filters act on
     each frequency by a gain alone, so they reweight frequencies and change no wave's
-    geometry at any one of them."""
+    geometry at any one of them. `hrf_fit`: the solve was fitted through the HRF
+    (`best_fit.py --hrf`), so its own observable includes it."""
     sd_t = smooth_frames / 2.3548 * frame_s
     import bandpass
     model = np.exp(-(2 * np.pi * hz * sd_t) ** 2)          # the gaussian kernel, squared
+    if hrf_fit:
+        import hrf as _hrf
+        model = model * _hrf.power(hz, dt=frame_s)
     hrf = hrf_power(hz)
     return {"raw field": np.ones_like(hz),
             "this model's observable": model,
@@ -1589,8 +1589,9 @@ def cmd_bold(a, c, S, run):
             print(f"    {hz[fi]:.4f} Hz done", flush=True)
         np.savez(cf, rows=np.array(allrows, object), hz=hz)
     z = np.load(os.path.join(RESULTS, f"xspec_{a.tag}.npz"), allow_pickle=True)
-    smooth = float(json.loads(str(z["args_json"])).get("smooth", 8.0))
-    obs = observables(hz, run["frame_s"], smooth)
+    zargs = json.loads(str(z["args_json"]))
+    smooth = float(zargs.get("smooth", 8.0))
+    obs = observables(hz, run["frame_s"], smooth, hrf_fit=bool(zargs.get("hrf", False)))
     width = np.gradient(hz)                                  # each bin stands for a band
     power = np.array([[r["power"] for r in rows] for rows in allrows])     # (nf, np)
     cats = np.array([[r["cat"] for r in rows] for rows in allrows])

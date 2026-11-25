@@ -208,6 +208,7 @@ def main():
             A = np.stack([np.roll(A[:, k], s) for k, s in enumerate(shifts)], axis=1)
         return A
     band = tuple(z["band"]) if "band" in z and np.isfinite(z["band"]).all() else None
+    hrf = bool(z["hrf"]) if "hrf" in z.files else False     # best_fit.py --hrf
     seg = int(z["segment"]) if "segment" in z and z["segment"].size else 0
 
     smooth = a.smooth
@@ -236,6 +237,7 @@ def main():
     print(f"  realise {frames} frames ({a.seconds:.0f}s) at {frame_s:.5g}s, "
           f"{a.draws} draws, smoothing FWHM {float(smooth):g} frames"
           + ("" if band is None else f", band {band[0]:g}-{band[1]:g} Hz")
+          + (", through the HRF" if hrf else "")
           + ("" if pa else "   [no provenance on this file]"), flush=True)
 
     t0 = time.time()
@@ -244,14 +246,15 @@ def main():
     if a.workers > 1 and a.draws > 1:
         rest = [draw(d) for d in range(1, a.draws)]
         pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
-                                          band=band, frame_s=frame_s if band else None,
-                                          segment=seg, smooth=Kscore)
+                                          band=band,
+                                          frame_s=frame_s if (band or hrf) else None,
+                                          segment=seg, smooth=Kscore, hrf=hrf)
         print(f"  draws 2-{a.draws} over {min(a.workers, len(rest))} workers", flush=True)
     for d in range(1 if pool is not None else a.draws):
         A = draw(d)
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, kernel=kern,
-                                    band=band, frame_s=frame_s if band else None,
-                                    segment=seg, smooth=Kscore)
+                                    band=band, frame_s=frame_s if (band or hrf) else None,
+                                    segment=seg, smooth=Kscore, hrf=hrf)
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
         if d == 0 and a.save_frames:
             sec = int(round(a.seconds))

@@ -283,10 +283,10 @@ _W_SCORE = {}
 
 
 def _score_init(cortex, target, p, profiles, save, kernel, band, frame_s, segment,
-                trim_edge=False, smooth=None):
+                trim_edge=False, smooth=None, hrf=False):
     _W_SCORE.update(cortex=cortex, target=target, p=p, profiles=profiles, save=save,
                     kernel=kernel, band=band, frame_s=frame_s, segment=segment,
-                    trim_edge=trim_edge, smooth=smooth)
+                    trim_edge=trim_edge, smooth=smooth, hrf=hrf)
 
 
 def _score_one(A):
@@ -297,12 +297,14 @@ def _score_one(A):
                           save=_W_SCORE["save"], profiles=_W_SCORE["profiles"],
                           kernel=_W_SCORE["kernel"], band=_W_SCORE["band"],
                           frame_s=_W_SCORE["frame_s"], segment=_W_SCORE["segment"],
-                          trim_edge=_W_SCORE["trim_edge"], smooth=_W_SCORE.get("smooth"))
+                          trim_edge=_W_SCORE["trim_edge"], smooth=_W_SCORE.get("smooth"),
+                          hrf=_W_SCORE.get("hrf", False))
     return r["sim"], r["gap"], r["rank"], r.get("sim_aff", float("nan"))
 
 
 def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
-                    band=None, frame_s=None, segment=None, trim_edge=False, smooth=None):
+                    band=None, frame_s=None, segment=None, trim_edge=False, smooth=None,
+                    hrf=False):
     """Score several drawn realisations at once. -> [(sim, gap, rank), ...]
 
     Draws are independent runs of the same medium under different samples of the same
@@ -337,7 +339,7 @@ def parallel_scores(cortex, target, p, draws_A, save, profiles, kernel, workers,
     try:
         pool = ctx.Pool(n, initializer=_score_init,
                         initargs=(cortex, target, p, profiles, save, kernel, band,
-                                  frame_s, segment, trim_edge, smooth))
+                                  frame_s, segment, trim_edge, smooth, hrf))
     finally:
         for k, v in env.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
@@ -1646,7 +1648,8 @@ class ProfileDrive:
 
 def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=False,
                       seed=0, profiles=None, run_fn=None, kernel=None, band=None,
-                      frame_s=None, segment=None, diagnostics=True, trim_edge=False, smooth=None):
+                      frame_s=None, segment=None, diagnostics=True, trim_edge=False, smooth=None,
+                      hrf=False):
     """Hold each drawn sample over its block of steps, run, and score for real.
 
     `run_fn(drive, nsteps, save) -> (frames, dt)` replaces the plain integration, which is
@@ -1681,6 +1684,11 @@ def score_realisation(cortex, target, p, A_frames, save=SAVE, amp=2e-4, balance=
     if kernel is not None:                  # the observable, not the field; see transfer
         import units
         frames = units.smooth_frames(frames, kernel)
+    if hrf:                                 # the haemodynamic response; see core/hrf.py
+        import hrf as _hrf
+        if frame_s is None:
+            raise ValueError("hrf needs frame_s; the kernel is defined in seconds")
+        frames = _hrf.apply(frames, frame_s)
     if band is not None:
         import bandpass
         if frame_s is None:
