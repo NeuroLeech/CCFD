@@ -1424,7 +1424,13 @@ def control_drive(run, mode, seed=0):
       random        at every frequency the fitted eigenvalues - the same total power and
                     the same spread of it over independent patterns - with eigenvectors
                     drawn at random (Haar unitary): coherent like the fit, but with timing
-                    patterns that were never fitted to anything"""
+                    patterns that were never fitted to anything. Its eigenvectors also
+                    reassign how loud each input is, so it changes loudness as well
+      timing        timing alone: every input keeps its fitted power and the size of its
+                    coherence with every other input, and at each frequency is given its
+                    own random phase, S_kl -> e^{i phi_k} S_kl e^{-i phi_l}. A diagonal
+                    unitary congruence, so the eigenvalues are the fitted ones too; only
+                    the relative phases (lags) between inputs are not the fitted ones"""
     S = np.asarray(run["S"])
     if mode == "fitted":
         return run
@@ -1443,6 +1449,11 @@ def control_drive(run, mode, seed=0):
             Q = Q * (np.diag(R) / np.abs(np.diag(R)))[None, :]
             out[f] = (Q * ev) @ Q.conj().T
         return dict(run, S=out, name=f"{run['name']}_random{seed}")
+    if mode == "timing":
+        rng = np.random.default_rng(seed)
+        e = np.exp(2j * np.pi * rng.random(S.shape[:2]))
+        return dict(run, S=e[:, :, None] * S * e.conj()[:, None, :],
+                    name=f"{run['name']}_timing{seed}")
     raise ValueError(mode)
 
 
@@ -1629,19 +1640,22 @@ def cmd_media(a):
         def frac(rows):
             cats = np.array([[r["cat"] for r in rr] for rr in rows])
             return {k: (cats == k).mean(1) for k in CATS}
-        ctl = [frac(np.load(f, allow_pickle=True)["rows"]) for f in
-               (os.path.join(RESULTS, f"interplay_combine_all_{t}_random{s}.npz")
-                for s in range(3)) if os.path.exists(f)]
+        def load(kind):
+            return [frac(np.load(f, allow_pickle=True)["rows"]) for f in
+                    (os.path.join(RESULTS, f"interplay_combine_all_{t}_{kind}{s}.npz")
+                     for s in range(3)) if os.path.exists(f)]
         med.append(dict(tag=t, hz=z["hz"], tau=float(args["decay_s"]),
-                        speed=float(args["spread_mm_s"]), frac=frac(z["rows"]), ctl=ctl))
-    print(f"\n  share of 150 patches by category, fitted drive (random coherent drive in "
-          f"brackets, mean of {len(med[0]['ctl'])} seeds)")
+                        speed=float(args["spread_mm_s"]), frac=frac(z["rows"]),
+                        ctl=load("random"), tim=load("timing")))
+    print(f"\n  share of 150 patches by category, fitted drive (in brackets, mean over seeds: "
+          f"random coherent drive / timing-only control)")
     for m in med:
         print(f"\n  {m['tag']}: {m['speed']:g} mm/s, decay {m['tau']:.3g} s")
         for i, f in enumerate(m["hz"]):
             print(f"    {f:.4f} Hz = {f * m['tau']:5.2f} cyc/decay: " + ", ".join(
                 f"{k[:6]} {m['frac'][k][i]:4.0%}"
-                + (f" ({np.mean([c[k][i] for c in m['ctl']]):3.0%})" if m["ctl"] else "")
+                + (f" ({np.mean([c[k][i] for c in m['ctl']]):3.0%}" if m["ctl"] else " (  - ")
+                + (f" /{np.mean([c[k][i] for c in m['tim']]):4.0%})" if m["tim"] else " /  - )")
                 for k in CATS[:3]))
         d = m["frac"]["reinforcing"] - m["frac"]["cancelling"]
         x = np.flatnonzero((d[:-1] > 0) & (d[1:] <= 0))
@@ -1652,6 +1666,17 @@ def cmd_media(a):
             m["cross"] = float(np.exp(lf))
             print(f"    reinforcing gives way to cancelling at {m['cross']:.3f} Hz = "
                   f"{m['cross'] * m['tau']:.2f} cycles per decay")
+        for c in m["tim"]:
+            d = c["reinforcing"] - c["cancelling"]
+            x = np.flatnonzero((d[:-1] > 0) & (d[1:] <= 0))
+            if len(x):
+                i = x[0]
+                lf = np.log(m["hz"][i]) + d[i] / (d[i] - d[i + 1]) * np.log(
+                    m["hz"][i + 1] / m["hz"][i])
+                print(f"    timing-only seed: first crossover at {np.exp(lf):.3f} Hz = "
+                      f"{np.exp(lf) * m['tau']:.2f} cycles per decay")
+            else:
+                print("    timing-only seed: reinforcing never gives way to cancelling")
     _plot_media(os.path.join(RESULTS, "interplay_media"), med)
 
 
@@ -2300,18 +2325,22 @@ def _plot_media(stem, med):
             ax = axs[r, k]
             # what a random coherent drive gives in the same media: the spread over media
             # and seeds, drawn once per panel as a band
-            if all(m["ctl"] for m in med):
+            for key, kw in (("ctl", dict(color=band, lw=0,
+                                         label="random coherent drive (range)")),
+                            ("tim", dict(facecolor="none", edgecolor="#b07a2a", lw=0.9,
+                                         hatch="////", label="timing-only control (range)"))):
+                if not all(m[key] for m in med):
+                    continue
                 xs, ys = [], []
                 for m in med:
                     x = m["hz"] * (m["tau"] if unit == "cyc" else 1)
-                    for cc in m["ctl"]:
+                    for cc in m[key]:
                         xs.append(x); ys.append(cc[ct])
                 gx = np.geomspace(min(x.min() for x in xs), max(x.max() for x in xs), 60)
                 Y = np.array([np.where((gx >= x[0]) & (gx <= x[-1]),
                                        np.interp(np.log(gx), np.log(x), y), np.nan)
                               for x, y in zip(xs, ys)])
-                ax.fill_between(gx, np.nanmin(Y, 0), np.nanmax(Y, 0), color=band, lw=0,
-                                label="random coherent drive (range)")
+                ax.fill_between(gx, np.nanmin(Y, 0), np.nanmax(Y, 0), **kw)
             if unit == "hz":
                 ax.axvspan(0.01, 0.08, color="#f2efe6", lw=0, zorder=0)
             for m in med:
@@ -2462,7 +2491,8 @@ def main():
                     help="types: below this on both directedness and |expansion|: mixed")
     ap.add_argument("--ninputs", type=int, default=8,
                     help="types: the pieces per patch whose timing and loudness are read")
-    ap.add_argument("--drive", default="fitted", choices=("fitted", "independent", "random"),
+    ap.add_argument("--drive", default="fitted",
+                    choices=("fitted", "independent", "random", "timing"),
                     help="combine/bold: the fitted drive, or a control (see control_drive)")
     ap.add_argument("--nregions", type=int, default=3,
                     help="combine: the input regions split out per patch; the rest is one")
