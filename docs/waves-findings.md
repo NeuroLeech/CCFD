@@ -151,8 +151,13 @@ reasonable alternative reading. These weightings are one view, not the right one
 - *random*: the fitted eigenvalues at every frequency with Haar-random eigenvectors.
   Coherent like the fit, with timing patterns never fitted to anything. Three seeds.
 
-Random eigenvectors also randomise how loud each input is, not only its timing. A
-timing-only control that keeps each input's fitted loudness has not been run.
+- *timing*: timing alone. Each input keeps its fitted power and the size of its coherence
+  with every other input. At each frequency each input is given its own random phase,
+  S_kl → e^{iφ_k} S_kl e^{−iφ_l}. The eigenvalues are therefore also the fitted ones. Only the
+  lags between inputs differ from the fit. Three seeds.
+
+The random control also reassigns how loud each input is, as well as its timing. The
+timing control isolates timing.
 
 ---
 
@@ -306,13 +311,22 @@ Share by category, raw field, all patches:
 | fitted | 5% | 5% | 76% |
 | independent inputs | 50% | 0% | 20% |
 | random coherent (3 seeds) | 19–24% | 31–41% | 16–31% |
+| timing only (3 seeds) | 15–22% | 33–42% | 23–27% |
 
-- **Specific to the fit:**
+- **Specific to the fit, and to its timing:**
   - fast cancellation;
   - the rarity of single-source patches. Independent inputs give 50–57% single source
-    across the readings, random coherent drive 18–31%.
-- **Not clearly specific:** the slow reinforcing picture. Random coherent drive is already
-  19–49% reinforcing, depending on seed and reading.
+    across the readings, random coherent drive 18–31%, timing only 14–31%.
+
+  The timing control keeps every input's fitted loudness and every coherence magnitude, and
+  loses both features. So they come from the fitted lags between inputs, not from which
+  inputs are loud or which are coherent.
+- **Specific per frequency, but not in the BOLD-weighted totals:** the slow reinforcing
+  picture. At 0.02–0.04 Hz the fit is 79–85% reinforcing, against 17–25% for timing only
+  (see the speed series below). Summed over frequencies, though, both controls also reach
+  25–53% reinforcing under the HRF, depending on seed. Their slow bins are not reinforcing.
+  Instead their reinforcing share is spread over all frequencies and weighted by a different
+  distribution of power.
 - **Looked fit-specific in the flat medium:** more cancellation transmodally than in
   sensorimotor cortex under the HRF. It does not survive a change of medium (next section).
 
@@ -374,16 +388,22 @@ across media. Measured in **cycles per decay time** (Hz × decay s), the media l
 ![Categories across media](figures/interplay_media.png)
 
 Top row in Hz (shaded: 0.01–0.08 Hz), bottom row in cycles per decay time (dotted: one
-cycle). The grey band is the range of the random coherent drive over all media and seeds.
+cycle). The grey band is the range of the random coherent drive, and the hatched band the
+range of the timing control, each over all media and seeds.
 
 The crossover is where the reinforcing and cancelling shares are equal, interpolated in
 log frequency (`interplay.py media`).
 
-The random coherent drive shows no switch. It stays at roughly 10–35% reinforcing and
-20–40% cancelling at every frequency, in every medium. So:
+Neither control shows the switch. The random coherent drive stays at roughly 10–35%
+reinforcing and 20–40% cancelling at every frequency, in every medium. The timing control
+keeps the fitted loudness and coherence magnitudes but not the lags, and does the same.
+It ranges over 6–46% reinforcing and 15–44% cancelling, with no consistent ordering. Where
+its two shares happen to cross first varies from seed to seed (0.03–0.85 cycles per decay),
+so it is noise rather than a switch. So:
 
 - the medium's decay time sets *where* the switch is;
-- the fitted drive supplies the strong contrast either side of it.
+- the fitted *timing* between inputs supplies the strong contrast either side of it.
+  With the same loudness and coherence magnitudes but other lags, the contrast is gone.
 
 Below about half a cycle per decay, the fitted inputs add up. Above it, the waves at most
 patches are what is left after the inputs largely cancel.
@@ -429,8 +449,8 @@ Fit alone does not decide between the media: 1x scores 0.724, 3x 0.756 and 5x 0.
   the 0.06–0.12 Hz band over 1154 s is too few for 64 pairwise features. A longer
   realisation, or fewer inputs per patch, would be needed before reading anything into the
   timing-vs-loudness R².
-- **Only three random-control seeds were run**, and the random control changes loudness as
-  well as timing.
+- **Only three seeds were run for each control.** The per-seed spread is wide, which
+  is why ranges are quoted rather than means.
 - **Media were compared at 150 evaluations.** Longer solves concentrate the drive, and
   whether the half-cycle-per-decay switch holds in a more converged solve is untested.
 - **Why half a cycle per decay?** Not yet explained. A first guess: below it, the medium's
@@ -462,6 +482,7 @@ python analysis/interplay.py bold --tag $TAG                       # 14 bins, 4 
 python analysis/interplay.py combine --tag $TAG                    # 5 bins, maps
 python analysis/interplay.py bold --tag $TAG --drive independent
 python analysis/interplay.py bold --tag $TAG --drive random --seed 0   # and 1, 2
+python analysis/interplay.py bold --tag $TAG --drive timing --seed 0   # and 1, 2
 python viz/render_steering.py --tag $TAG --site s1 --hz 0.0848     # or --site frontal, other --hz
 
 python analysis/interplay.py media                                 # across media
