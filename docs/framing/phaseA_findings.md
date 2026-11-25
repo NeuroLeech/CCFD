@@ -312,6 +312,68 @@ rebuilt solves is queued after the rebuilds.
 
 Logs: [logs/a1_s3](logs/a1_s3/).
 
+### Rebuilt 1x solve (`nobp_sm6_s1_box`, decay 25 s)
+
+| drive | realised FC, 4 draws |
+|---|---|
+| fitted | +0.7232 ± 0.0099 |
+| independent | +0.0980 ± 0.0222 |
+| random, seeds 0/1/2 | +0.0762 / +0.0714 / +0.0812 |
+| timing, seeds 0/1/2 | +0.0747 / +0.1108 / +0.1030 |
+
+| delay jitter, sd (seed 0) | 0.1 s | 0.2 s | 0.3 s | 0.5 s | 1 s | 2 s | 5 s | 10 s | 20 s |
+|---|---|---|---|---|---|---|---|---|---|
+| realised FC | +0.699 | +0.625 | +0.557 | +0.376 | +0.180 | +0.110 | +0.087 | +0.089 | +0.067 |
+
+The same picture as 3x, at a slower scale. Every control falls to 0.07–0.11. Timing still
+matters below a second, but this medium tolerates more of it: 0.1 s costs 0.024 here
+against 0.14 in 3x, and the score reaches the controls' floor at about 2 s rather than
+0.5 s. In this medium the fitted observable has half its power below 0.11 Hz (median
+patch), against 0.20 Hz in 3x (logs/bold_s1_box_fitted.txt).
+
+Logs: [logs/a1_s1](logs/a1_s1/).
+
+---
+
+## A4 (in progress): the 3x fit through the HRF
+
+**Question.** A1 shows the fitted FC rests on input timing held to a tenth of a second, at
+frequencies the haemodynamics would remove. Does a fit made through the HRF need the same
+timing, and does it build its waves the same way?
+
+**Test.** `best_fit.py --hrf` (core/hrf.py): the SPM canonical HRF in the observation
+model on both sides of the fit. Its gain multiplies H on the solved bins, and the
+realised frames are convolved with the same kernel. Everything else is as
+`nobp_sm6_s3_box`. Check on a 15-evaluation run: fit 0.480 on the solve vertices,
+realised 0.446 over the cortex, the usual relation between the two
+([logs/a4/smoke_15evals.txt](logs/a4/smoke_15evals.txt)).
+
+**At 150 evaluations** (`nobp_sm6_s3_hrf_box`):
+
+| | through the HRF | without (rebuilt 3x) |
+|---|---|---|
+| fit (2,000 solve vertices) | 0.6593 | 0.8087 |
+| realised, 4 draws | +0.6106 ± 0.0051 | +0.7568 ± 0.0014 |
+| still gaining at 150 evaluations (last 15) | 0.0076 | 0.0011 |
+| effective rank of the realised observable (`rank`) | 1.4 | 18.6 |
+| switch, reinforcing to cancelling | 0.32 cycles per decay (0.038 Hz) | 0.53 (0.063 Hz) |
+| reinforcing / cancelling in its own observable | 61% / 21% | 11% / 74% |
+
+**This is not yet an answer.** The HRF fit was still gaining seven times faster than the
+no-HRF fit when it stopped, and what it had reached is close to a single global
+fluctuation. The participation ratio of the correlation matrix of its realised
+observable is 1.2. The same measure is 19.1 for the no-HRF 3x fit, 33.0 for 1x, and 96.2
+for the target FC itself (N²/ΣC² over the group Spearman matrix; a group average, so only
+a rough anchor). Through the HRF the fit reinforces at 84–89% of patches below 0.18
+cycles per decay (0.021 Hz) and cancels at 98–99% from 0.49 to 0.71 (0.06–0.085 Hz).
+
+A fit started from a random factor reaches the dominant, near-global mode first, and in
+this observable that mode carries most of the power. So the low rank may only mean the
+solve had not yet carved structure out of it. A 600-evaluation fit through the HRF
+(`nobp_sm6_s3_hrf_f600_box`) is running, with its categories, controls and jitter grid.
+
+Logs: [logs/a4](logs/a4/).
+
 ---
 
 ## Rebuilds of the wave-analysis solves
@@ -322,6 +384,7 @@ docs/waves-findings.md, at 150 evaluations.
 | solve | fit (2,000 solve vertices) | realised, 4 draws of 577 s | rank | recorded | verdict |
 |---|---|---|---|---|---|
 | `nobp_sm6_s3_box` (3x flat) | 0.8087 | +0.7568 ± 0.0014 | 18.6 | fit 0.809, realised 0.756 ± 0.002, rank 18.6 | reproduced |
+| `nobp_sm6_s1_box` (1x flat) | 0.8178 | +0.7232 ± 0.0099 | 38.2 | realised 0.724 | reproduced |
 
 Log: [logs/build_s3.txt](logs/build_s3.txt). The 3x build took 28 minutes in this container.
 
@@ -338,6 +401,16 @@ single source / reinforcing / cancelling / other, %, over all patches:
 
 The timing-only control's first crossovers come out at 0.13, 0.11 and 0.04 cycles per
 decay for the three seeds, inside the recorded 0.03–0.85 range.
+
+**Categories and switch, 1x rebuilt** ([logs/bold_s1_box_fitted.txt](logs/bold_s1_box_fitted.txt)):
+
+| reading | rebuilt | recorded |
+|---|---|---|
+| raw field | 23 / 7 / 48 / 22 | 24 / 7 / 47 / 22 |
+| this model's observable | 10 / 7 / 68 / 14 | 10 / 7 / 68 / 14 |
+| HRF | 9 / 16 / 59 / 16 | 9 / 16 / 59 / 16 |
+| HRF + 0.01–0.08 Hz | 10 / 17 / 55 / 17 | 10 / 17 / 55 / 18 |
+| switch, reinforcing to cancelling | 0.021 Hz = 0.54 cycles per decay | 0.022 Hz = 0.54 |
 
 **Resolution of the switch.** The switch is read from 14 log-spaced bins. Near it they
 sit at 0.34, 0.49 and 0.71 cycles per decay, a factor of about 1.45 apart. So differences

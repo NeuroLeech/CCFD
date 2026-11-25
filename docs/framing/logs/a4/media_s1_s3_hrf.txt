@@ -1,0 +1,65 @@
+
+  share of 150 patches by category, fitted drive (in brackets, mean over seeds: random coherent drive / timing-only control)
+
+  nobp_sm6_s1_box: 1.5 mm/s, decay 25 s
+    0.0045 Hz =  0.11 cyc/decay: single  25% (42% / 50%), reinfo  41% (21% / 20%), cancel  18% (20% / 19%)
+    0.0076 Hz =  0.19 cyc/decay: single   5% (43% / 26%), reinfo  75% (16% / 31%), cancel  12% (27% / 20%)
+    0.0106 Hz =  0.26 cyc/decay: single   3% (42% / 33%), reinfo  85% (14% / 32%), cancel   9% (24% / 20%)
+    0.0151 Hz =  0.38 cyc/decay: single   9% (15% / 17%), reinfo  71% (29% / 35%), cancel   8% (36% / 30%)
+    0.0212 Hz =  0.53 cyc/decay: single  13% (15% / 10%), reinfo  33% (30% / 41%), cancel  32% (37% / 37%)
+    0.0288 Hz =  0.72 cyc/decay: single  11% (22% / 18%), reinfo  18% (27% / 46%), cancel  54% (36% / 23%)
+    0.0409 Hz =  1.02 cyc/decay: single  11% (22% / 13%), reinfo   9% (18% / 39%), cancel  63% (41% / 26%)
+    0.0590 Hz =  1.48 cyc/decay: single   3% (18% / 14%), reinfo   5% (34% / 34%), cancel  87% (29% / 38%)
+    0.0848 Hz =  2.12 cyc/decay: single   3% (18% / 14%), reinfo   5% (37% / 34%), cancel  85% (29% / 34%)
+    0.1226 Hz =  3.07 cyc/decay: single   1% (20% / 18%), reinfo   3% (35% / 28%), cancel  90% (26% / 32%)
+    0.1756 Hz =  4.39 cyc/decay: single   3% (18% / 15%), reinfo   0% (21% / 27%), cancel  92% (36% / 36%)
+    0.2513 Hz =  6.28 cyc/decay: single   3% (30% / 26%), reinfo   0% (16% /  7%), cancel  85% (22% / 41%)
+    0.3452 Hz =  8.63 cyc/decay: single  11% (41% / 42%), reinfo   3% ( 7% /  6%), cancel  69% (24% / 28%)
+    0.4936 Hz = 12.34 cyc/decay: single  38% (41% / 37%), reinfo   9% ( 6% /  7%), cancel  23% (24% / 28%)
+    reinforcing gives way to cancelling at 0.021 Hz = 0.54 cycles per decay
+    timing-only seed: first crossover at 0.011 Hz = 0.26 cycles per decay
+    timing-only seed: first crossover at 0.034 Hz = 0.85 cycles per decay
+    timing-only seed: first crossover at 0.006 Hz = 0.15 cycles per decay
+
+  nobp_sm6_s3_box: 4.5 mm/s, decay 8.33 s
+    0.0045 Hz =  0.04 cyc/decay: single  32% (45% / 50%), reinfo  27% (13% / 16%), cancel  24% (21% / 16%)
+    0.0076 Hz =  0.06 cyc/decay: single  13% (52% / 35%), reinfo  59% (10% / 22%), cancel  14% (27% / 23%)
+    0.0106 Hz =  0.09 cyc/decay: single  11% (43% / 36%), reinfo  60% ( 6% / 17%), cancel  16% (30% / 20%)
+    0.0151 Hz =  0.13 cyc/decay: single  15% (28% / 40%), reinfo  63% (27% / 25%), cancel  10% (27% / 18%)
+    0.0212 Hz =  0.18 cyc/decay: single   5% (52% / 46%), reinfo  79% ( 9% / 20%), cancel  10% (20% / 21%)
+    0.0288 Hz =  0.24 cyc/decay: single  14% (44% / 36%), reinfo  56% (25% / 21%), cancel  19% (18% / 23%)
+    0.0409 Hz =  0.34 cyc/decay: single   3% (40% / 35%), reinfo  85% (18% / 18%), cancel  10% (30% / 29%)
+    0.0590 Hz =  0.49 cyc/decay: single   7% (19% / 12%), reinfo  44% (36% / 40%), cancel  31% (26% / 28%)
+    0.0848 Hz =  0.71 cyc/decay: single   7% (19% / 17%), reinfo  13% (30% / 37%), cancel  69% (30% / 32%)
+    0.1226 Hz =  1.02 cyc/decay: single   3% (16% / 15%), reinfo   3% (26% / 17%), cancel  89% (41% / 44%)
+    0.1756 Hz =  1.46 cyc/decay: single   1% (21% / 18%), reinfo   1% (31% / 36%), cancel  93% (30% / 26%)
+    0.2513 Hz =  2.09 cyc/decay: single   2% (14% / 15%), reinfo   3% (29% / 37%), cancel  89% (36% / 28%)
+    0.3452 Hz =  2.88 cyc/decay: single   2% (20% / 18%), reinfo   1% (37% / 32%), cancel  95% (22% / 32%)
+    0.4936 Hz =  4.11 cyc/decay: single   5% (22% / 17%), reinfo   2% (27% / 31%), cancel  75% (30% / 29%)
+    reinforcing gives way to cancelling at 0.063 Hz = 0.53 cycles per decay
+    timing-only seed: first crossover at 0.015 Hz = 0.13 cycles per decay
+    timing-only seed: first crossover at 0.013 Hz = 0.11 cycles per decay
+    timing-only seed: first crossover at 0.005 Hz = 0.04 cycles per decay
+
+  nobp_sm6_s3_hrf_box: 4.5 mm/s, decay 8.33 s
+    0.0045 Hz =  0.04 cyc/decay: single   3% (40% / 26%), reinfo  89% (17% / 33%), cancel   5% (20% / 17%)
+    0.0076 Hz =  0.06 cyc/decay: single   3% (47% / 32%), reinfo  87% ( 9% / 26%), cancel   8% (27% / 19%)
+    0.0106 Hz =  0.09 cyc/decay: single   4% (40% / 30%), reinfo  88% ( 4% / 28%), cancel   5% (33% / 21%)
+    0.0151 Hz =  0.13 cyc/decay: single   1% (31% / 39%), reinfo  89% (26% / 18%), cancel   4% (26% / 25%)
+    0.0212 Hz =  0.18 cyc/decay: single   3% (38% / 29%), reinfo  84% (16% / 35%), cancel   9% (24% / 22%)
+    0.0288 Hz =  0.24 cyc/decay: single   8% (21% / 28%), reinfo  65% (43% / 24%), cancel  11% (17% / 29%)
+    0.0409 Hz =  0.34 cyc/decay: single  11% (14% / 26%), reinfo  28% (28% / 22%), cancel  41% (45% / 31%)
+    0.0590 Hz =  0.49 cyc/decay: single   1% (25% / 10%), reinfo   1% (32% / 43%), cancel  98% (17% / 28%)
+    0.0848 Hz =  0.71 cyc/decay: single   0% (28% / 21%), reinfo   0% (26% / 24%), cancel  99% (30% / 37%)
+    0.1226 Hz =  1.02 cyc/decay: single   2% (18% / 24%), reinfo   2% (23% / 18%), cancel  91% (39% / 36%)
+    0.1756 Hz =  1.46 cyc/decay: single  10% (22% / 21%), reinfo  15% (30% / 39%), cancel  54% (29% / 24%)
+    0.2513 Hz =  2.09 cyc/decay: single  37% (14% / 17%), reinfo  31% (27% / 29%), cancel  20% (41% / 38%)
+    0.3452 Hz =  2.88 cyc/decay: single  41% (42% / 43%), reinfo  12% (15% / 10%), cancel  24% (21% / 24%)
+    0.4936 Hz =  4.11 cyc/decay: single  35% (44% / 42%), reinfo   9% (11% /  8%), cancel  25% (22% / 23%)
+    reinforcing gives way to cancelling at 0.038 Hz = 0.32 cycles per decay
+    cancelling leads in every bin above 0.292 Hz = 2.43 cycles per decay
+    timing-only seed: first crossover at 0.009 Hz = 0.07 cycles per decay
+    timing-only seed: first crossover at 0.027 Hz = 0.22 cycles per decay
+    timing-only seed: first crossover at 0.012 Hz = 0.10 cycles per decay
+
+  wrote /home/user/CCFD/results/interplay_media.png

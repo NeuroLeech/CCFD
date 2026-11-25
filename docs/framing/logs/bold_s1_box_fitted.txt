@@ -1,0 +1,42 @@
+  nobp_sm6_s1_box: 100 pieces
+    transfer: frame 0/1088
+    transfer: frame 1000/1088
+    0.0045 Hz done
+    0.0076 Hz done
+    0.0106 Hz done
+    0.0151 Hz done
+    0.0212 Hz done
+    0.0288 Hz done
+    0.0409 Hz done
+    0.0590 Hz done
+    0.0848 Hz done
+    0.1226 Hz done
+    0.1756 Hz done
+    0.2513 Hz done
+    0.3452 Hz done
+    0.4936 Hz done
+
+  150 patches, 14 frequencies 0.0045-0.494 Hz, under the fitted drive of nobp_sm6_s1_box
+
+  raw field: half of what is seen lies below 0.343 Hz (median patch)
+    all                : single source 23%, reinforcing 7%, cancelling 48%, other 22%; interference adds -78% of the net (median)
+    sensorimotor fifth : single source 29%, reinforcing 7%, cancelling 52%, other 12%; interference adds -125% of the net (median)
+    transmodal fifth   : single source 19%, reinforcing 9%, cancelling 44%, other 29%; interference adds -74% of the net (median)
+
+  this model's observable: half of what is seen lies below 0.112 Hz (median patch)
+    all                : single source 10%, reinforcing 7%, cancelling 68%, other 14%; interference adds -158% of the net (median)
+    sensorimotor fifth : single source 10%, reinforcing 5%, cancelling 77%, other 9%; interference adds -228% of the net (median)
+    transmodal fifth   : single source 10%, reinforcing 9%, cancelling 61%, other 20%; interference adds -177% of the net (median)
+
+  haemodynamic response: half of what is seen lies below 0.035 Hz (median patch)
+    all                : single source 9%, reinforcing 16%, cancelling 59%, other 16%; interference adds -79% of the net (median)
+    sensorimotor fifth : single source 9%, reinforcing 12%, cancelling 61%, other 17%; interference adds -116% of the net (median)
+    transmodal fifth   : single source 11%, reinforcing 15%, cancelling 54%, other 20%; interference adds -100% of the net (median)
+
+  HRF + 0.01-0.08 Hz: half of what is seen lies below 0.032 Hz (median patch)
+    all                : single source 10%, reinforcing 17%, cancelling 55%, other 17%; interference adds -62% of the net (median)
+    sensorimotor fifth : single source 9%, reinforcing 14%, cancelling 57%, other 20%; interference adds -84% of the net (median)
+    transmodal fifth   : single source 12%, reinforcing 15%, cancelling 51%, other 22%; interference adds -84% of the net (median)
+
+  wrote /home/user/CCFD/results/interplay_bold_nobp_sm6_s1_box.npz
+  wrote /home/user/CCFD/results/interplay_bold_nobp_sm6_s1_box.png
