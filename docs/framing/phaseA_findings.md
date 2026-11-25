@@ -130,7 +130,7 @@ frequency and c for the wave speed:
   rule reinforces or cancels depending on f, on the decay and on the travel time across
   the sheet.
 
-### Test now queued
+### Test queued after A2 (results under "A3 on fitted drives" below)
 
 Two solves at decay 8.33 s with reach 74 mm and 664 mm (`nobp_sm6_reach033_box`,
 `nobp_sm6_reach3_box`), with `interplay.py bold` and its controls on each, and
@@ -138,6 +138,32 @@ Two solves at decay 8.33 s with reach 74 mm and 664 mm (`nobp_sm6_reach033_box`,
 moves with the in-phase crossing, to about 0.36 cycles per decay (0.043 Hz) and about 1.27
 (0.15 Hz). If instead it stays near 0.5, the switch belongs to something in the fit rather
 than to the medium on this sheet.
+
+### A3 on fitted drives (in progress)
+
+**Reach 74 mm** (`nobp_sm6_reach033_box`, decay 8.33 s, spread label 1.5):
+
+| | 74 mm | 3x, ~220 mm (rebuilt) |
+|---|---|---|
+| fit (2,000 solve vertices) | 0.7777 | 0.8087 |
+| realised, 4 draws | +0.7080 ± 0.0064 | +0.7568 ± 0.0014 |
+| rank | 28.7 | 18.6 |
+| fitted switch | **none**: reinforcing never exceeds 6% in any bin | 0.53 cycles per decay |
+| reinforcing / cancelling, HRF + 0.01–0.08 Hz | 5% / 58% | 53% / 29% |
+
+**The prediction failed for the short reach.** The fitted switch did not move down to
+about 0.36 cycles per decay. There is no reinforcing regime at all: at every frequency,
+cancelling takes 57–87% of the 150 patches (single source takes over in the top bin).
+Below 0.36 cycles per decay the in-phase crossing says inputs could still add here (in-phase
+R 0.99 at 0.04 cycles per decay), but the fitted drive does not use that.
+
+The controls cancel more in this medium than in 3x too, but far less than the fit. The
+random coherent drive cancels at 15–53% of patches and the timing-only control at 18–45%.
+
+So the in-phase crossing marks where reinforcing becomes impossible, not where the fit will
+use it. Whether the fit reinforces below the crossing depends on what this FC asks of this
+medium, and this medium also fits the FC worse (0.708 against 0.757). The 664 mm solve is
+running.
 
 ### Reproduce
 
