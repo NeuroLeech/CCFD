@@ -1,0 +1,8 @@
+target: correlation participation ratio N^2/sum C^2 = 96.2
+target: mean correlation +0.031 (1,500 random vertices)
+nobp_sm6_s1_box             : correlation PR  33.0   global signal  8.5% of variance   mean correlation +0.075
+nobp_sm6_s3_box             : correlation PR  19.1   global signal 14.5% of variance   mean correlation +0.136
+nobp_sm6_reach033_box       : correlation PR  22.9   global signal 12.5% of variance   mean correlation +0.075
+nobp_sm6_reach3_box         : correlation PR   2.1   global signal 68.8% of variance   mean correlation +0.679
+nobp_sm6_s3_hrf_box         : correlation PR   1.2   global signal 91.0% of variance   mean correlation +0.907
+nobp_sm6_s3_hrf_f600_box    : correlation PR   1.1   global signal 96.9% of variance   mean correlation +0.968

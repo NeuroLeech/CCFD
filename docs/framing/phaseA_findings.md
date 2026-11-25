@@ -335,7 +335,7 @@ Logs: [logs/a1_s1](logs/a1_s1/).
 
 ---
 
-## A4 (in progress): the 3x fit through the HRF
+## A4: the 3x fit through the HRF (open: needs a decision on the observation model)
 
 **Question.** A1 shows the fitted FC rests on input timing held to a tenth of a second, at
 frequencies the haemodynamics would remove. Does a fit made through the HRF need the same
@@ -348,29 +348,78 @@ realised frames are convolved with the same kernel. Everything else is as
 realised 0.446 over the cortex, the usual relation between the two
 ([logs/a4/smoke_15evals.txt](logs/a4/smoke_15evals.txt)).
 
-**At 150 evaluations** (`nobp_sm6_s3_hrf_box`):
+| | HRF, 150 evaluations | HRF, 600 evaluations | no HRF (rebuilt 3x, 150) |
+|---|---|---|---|
+| fit (2,000 solve vertices) | 0.6593 | 0.7380 | 0.8087 |
+| realised, 4 draws | +0.6106 ± 0.0051 | +0.6687 ± 0.0133 | +0.7568 ± 0.0014 |
+| still gaining at the end, per 15 evaluations | 0.0076 | about 0.0013 (0.0052 over the last 60) | 0.0011 |
+| controls (independent, random, timing) | not run | +0.267 to +0.298 | +0.107 to +0.153 |
+| switch, reinforcing to cancelling | 0.32 cycles per decay (0.038 Hz) | 0.08 (0.010 Hz) | 0.53 (0.063 Hz) |
 
-| | through the HRF | without (rebuilt 3x) |
-|---|---|---|
-| fit (2,000 solve vertices) | 0.6593 | 0.8087 |
-| realised, 4 draws | +0.6106 ± 0.0051 | +0.7568 ± 0.0014 |
-| still gaining at 150 evaluations (last 15) | 0.0076 | 0.0011 |
-| effective rank of the realised observable (`rank`) | 1.4 | 18.6 |
-| switch, reinforcing to cancelling | 0.32 cycles per decay (0.038 Hz) | 0.53 (0.063 Hz) |
-| reinforcing / cancelling in its own observable | 61% / 21% | 11% / 74% |
+### The HRF fit becomes one global signal
 
-**This is not yet an answer.** The HRF fit was still gaining seven times faster than the
-no-HRF fit when it stopped, and what it had reached is close to a single global
-fluctuation. The participation ratio of the correlation matrix of its realised
-observable is 1.2. The same measure is 19.1 for the no-HRF 3x fit, 33.0 for 1x, and 96.2
-for the target FC itself (N²/ΣC² over the group Spearman matrix; a group average, so only
-a rough anchor). Through the HRF the fit reinforces at 84–89% of patches below 0.18
-cycles per decay (0.021 Hz) and cancels at 98–99% from 0.49 to 0.71 (0.06–0.085 Hz).
+Measured on each solve's saved realisation
+([logs/a4/global_share.py](logs/a4/global_share.py), output in
+[global_share.txt](logs/a4/global_share.txt)):
 
-A fit started from a random factor reaches the dominant, near-global mode first, and in
-this observable that mode carries most of the power. So the low rank may only mean the
-solve had not yet carved structure out of it. A 600-evaluation fit through the HRF
-(`nobp_sm6_s3_hrf_f600_box`) is running, with its categories, controls and jitter grid.
+| | share of each vertex's variance in the global signal | mean correlation between vertices | participation ratio of the correlation matrix |
+|---|---|---|---|
+| target FC | | +0.031 | 96.2 |
+| 1x | 8.5% | +0.075 | 33.0 |
+| 3x | 14.5% | +0.136 | 19.1 |
+| 74 mm reach | 12.5% | +0.075 | 22.9 |
+| 664 mm reach | 68.8% | +0.679 | 2.1 |
+| 3x through the HRF, 150 evaluations | 91.0% | +0.907 | 1.2 |
+| 3x through the HRF, 600 evaluations | 96.9% | +0.968 | 1.1 |
+
+Running the fit longer made this worse, not better: from 91% to 97% global while the score
+rose from 0.611 to 0.669. In its own observable, half of what each patch sees lies below
+0.005 Hz, a period longer than 200 s (logs/a4/bold_s3_hrf_f600_box_fitted.txt). So the
+fit is a slow global fluctuation with a structured remainder of about 3% of the variance.
+
+**Why it still scores 0.67.** The target was built from data denoised with XCP-D's 36P
+regressors, which include the global signal, plus linear detrending
+(`targets/rbc_nobp.py`). The score double-centres both FC matrices before ranking edges
+(`targets/fc_score.py`, `double_centre`: "the linear analogue of GSR") and Spearman sees
+only rank. So the global component is invisible to the score, and the fit is free to make
+it as large as it likes. The comparison is formally consistent with how the target was
+processed. But no real cortex is 97% one signal before global-signal regression, so this
+is a solution the score allows rather than a model of the data.
+
+**Why it happens in this medium.** The HRF passes little above 0.1 Hz. A2 showed that this
+medium's response reaches about as far as the hemisphere is wide (221 mm), so at those
+frequencies every input's response spreads over most of the sheet. The 664 mm reach,
+without the HRF, already went 69% global. Without the HRF the fit built its structure at
+higher frequencies, where responses are local enough to differ between regions.
+
+### Timing, through the HRF
+
+| delay jitter, sd (seed 0) | 0 | 0.1 s | 0.2 s | 0.3 s | 0.5 s | 1 s | 2 s | 5 s | 10 s | 20 s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| HRF, 600 evaluations | +0.669 | +0.630 | +0.513 | +0.422 | +0.307 | +0.251 | +0.255 | +0.284 | +0.288 | +0.300 |
+| HRF, 150 evaluations | +0.611 | +0.602 | | +0.569 | | +0.300 | | | | |
+
+The 600-evaluation fit is still sensitive to a few tenths of a second, which the HRF's
+passband alone does not explain: at 0.05 Hz a 0.3 s delay is a phase error of only
+0.1 rad. The structured remainder is about 3% of the variance, so a phase error that
+leaves even 1% of the global signal unmatched is a third of it. The sensitivity belongs
+to the small-remainder solution, not to the haemodynamics.
+
+### Where this leaves A4
+
+A4 cannot be answered under this observation model. Through the HRF alone, the fit does
+not choose different timing for the waves so much as stop making differentiated waves.
+Three things need deciding (Phase B, "observation model" and "scoring"):
+
+1. **Put the data's preprocessing into the model's observable.** Detrending and global
+   signal removal are part of how the target was made. A linear stand-in for the global
+   regression, removing the mean over vertices, is a spatial operator and could be folded
+   into H the way the 6 mm smoothing is. That stops a global fluctuation from being free.
+2. **Report the global share beside every score**, as above, so a fit like this is seen.
+3. **A score that sees magnitude**, alongside double-centred Spearman.
+
+A medium with a shorter reach might build differentiated structure through the HRF where
+this one cannot: a 600-evaluation HRF fit on the 74 mm medium would test that.
 
 Logs: [logs/a4](logs/a4/).
 
