@@ -145,3 +145,16 @@ python analysis/phase_reach.py --tags nobp_sm6_s1,nobp_sm6_s3,nobp_sm6_s5,nobp_s
   --standin 8.3333,1.5 --standin 8.3333,4.5 --standin 8.3333,13.5
 python analysis/phase_reach.py --figure results/phase_reach_<...>.npz    # the figure above
 ```
+
+---
+
+## Rebuilds of the wave-analysis solves
+
+Each rebuild is held to its recorded values within draw scatter. Recorded values are from
+docs/waves-findings.md, at 150 evaluations.
+
+| solve | fit (2,000 solve vertices) | realised, 4 draws of 577 s | rank | recorded | verdict |
+|---|---|---|---|---|---|
+| `nobp_sm6_s3_box` (3x flat) | 0.8087 | +0.7568 ± 0.0014 | 18.6 | fit 0.809, realised 0.756 ± 0.002, rank 18.6 | reproduced |
+
+Log: [logs/build_s3.txt](logs/build_s3.txt). The 3x build took 28 minutes in this container.
