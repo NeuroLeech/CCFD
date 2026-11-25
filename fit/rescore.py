@@ -18,6 +18,28 @@ clock - so that is read from the provenance stamp, and a file written before
 `core/provenance.py` existed has to be told with `--smooth`.
 
   python fit/rescore.py --tag graded100_nolag --seconds 2308 --draws 2
+
+A solve fitted with `--smooth-fwhm` (6 mm surface smoothing folded into H) is scored with
+the same smoothing matrix applied to its realisations, as best_fit scored it; without it a
+rescore measures a different observable from the one the solve was fitted and recorded on.
+
+`--drive` replaces the solved cross-spectrum with one of the controls the wave analysis uses
+(`interplay.control_drive`, imported rather than re-implemented): `independent` keeps each
+input's power and removes all coherence, `random` keeps the eigenvalues with Haar-random
+eigenvectors, `timing` keeps every input's power and every coherence magnitude and gives each
+input a random phase per solved bin. They are applied to S on its solved grid and realised
+the way every solve is, so between solved bins the interpolation of a phase-scrambled S also
+loses some coherence magnitude.
+
+`--jitter-s` keeps the solved S exactly and shifts each input's drawn drive by its own random
+delay (normal, sd in seconds; the same delays for every draw of one seed). The drive realise
+returns is periodic, so a circular shift is exactly a phase rotation e^{-2 pi i f tau_k} at
+every bin: each input's spectrum and every coherence magnitude are untouched, and only the
+relative timing between inputs moves. Scored over a range of sd, it says how precisely in
+seconds the inputs' timing has to be held for the fit.
+
+  python fit/rescore.py --tag nobp_sm6_s3_box --seconds 577 --draws 4 --drive timing --seed 0
+  python fit/rescore.py --tag nobp_sm6_s3_box --seconds 577 --draws 4 --jitter-s 5
 """
 import _path  # noqa: F401  - puts the sibling code folders on sys.path
 import os, time, json, argparse
@@ -111,6 +133,14 @@ def main():
                          "is not the same measurement")
     ap.add_argument("--save-frames", action="store_true", dest="save_frames",
                     help="write frames_/drive_<tag>_<seconds>s.npy for draw 0")
+    ap.add_argument("--drive", default="fitted",
+                    choices=("fitted", "independent", "random", "timing"),
+                    help="score a control cross-spectrum instead of the solved one "
+                         "(interplay.control_drive)")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seed for the random/timing controls and the jitter delays")
+    ap.add_argument("--jitter-s", type=float, default=0.0, dest="jitter_s",
+                    help="shift each input's drive by a random delay with this sd (s)")
     a = ap.parse_args()
 
     if a.torch_ref:
@@ -153,8 +183,30 @@ def main():
     big = xspec.solution_K(z) > 512
     fac = xspec.load_factors(z) if big else None
     S = None if big else xspec.load_S(z)
+    if a.drive != "fitted":
+        if big:
+            raise SystemExit("  --drive needs the full S; this solve stores only its factor")
+        from interplay import control_drive
+        S = control_drive(dict(S=S, name=a.tag), a.drive, seed=a.seed)["S"]
     ref_frames = int(z["ref_frames"])
     frame_s = float(z["frame_s"])
+    # the solve's own surface smoothing, applied to the realisations as best_fit did
+    sm_fwhm = float(z["smooth_fwhm"]) if "smooth_fwhm" in z.files else 0.0
+    Kscore = None
+    if sm_fwhm > 0:
+        import surface_smooth
+        Kscore = surface_smooth.smoothing_matrix(c, sm_fwhm)
+    shifts = None
+    if a.jitter_s > 0:
+        rng = np.random.default_rng(a.seed)
+        shifts = np.round(rng.normal(0.0, a.jitter_s, P.shape[0]) / frame_s).astype(int)
+
+    def draw(d):
+        A = xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d,
+                          factors=fac)
+        if shifts is not None:      # periodic drive: a circular shift is a pure delay
+            A = np.stack([np.roll(A[:, k], s) for k, s in enumerate(shifts)], axis=1)
+        return A
     band = tuple(z["band"]) if "band" in z and np.isfinite(z["band"]).all() else None
     seg = int(z["segment"]) if "segment" in z and z["segment"].size else 0
 
@@ -173,6 +225,11 @@ def main():
 
     frames = timescale.frames_for(a.seconds, frame_s)
     print(f"  {a.tag}: {P.shape[0]} channels, {len(idx)} solved frequencies, save {save}")
+    print(f"  drive {a.drive}" + ("" if a.drive == "fitted" else f" (seed {a.seed})")
+          + ("" if shifts is None else
+             f", delays sd {a.jitter_s:g}s (seed {a.seed}; realised sd "
+             f"{np.std(shifts) * frame_s:.2f}s)")
+          + (f", surface smoothing {sm_fwhm:g} mm" if sm_fwhm > 0 else ""))
     print(f"  medium from the file: a {np.round(p.get('a', ()), 3)}, "
           f"b {np.round(p.get('b', ()), 3)}, Ld {p['Ld']:.4g}, "
           f"map_clip {p['map_clip']}")
@@ -185,19 +242,16 @@ def main():
     sims, gaps, rks = [], [], []
     pool = res = None
     if a.workers > 1 and a.draws > 1:
-        rest = [xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d,
-                              factors=fac)
-                for d in range(1, a.draws)]
+        rest = [draw(d) for d in range(1, a.draws)]
         pool, res = xspec.parallel_scores(c, t, p, rest, save, P, kern, a.workers,
                                           band=band, frame_s=frame_s if band else None,
-                                          segment=seg)
+                                          segment=seg, smooth=Kscore)
         print(f"  draws 2-{a.draws} over {min(a.workers, len(rest))} workers", flush=True)
     for d in range(1 if pool is not None else a.draws):
-        A = xspec.realise(S, idx, frames, ref_frames=ref_frames, seed=1000 + d,
-                              factors=fac)
+        A = draw(d)
         r = xspec.score_realisation(c, t, p, A, save=save, profiles=P, kernel=kern,
                                     band=band, frame_s=frame_s if band else None,
-                                    segment=seg)
+                                    segment=seg, smooth=Kscore)
         sims.append(r["sim"]); gaps.append(r["gap"]); rks.append(r["rank"])
         if d == 0 and a.save_frames:
             sec = int(round(a.seconds))
@@ -236,10 +290,19 @@ def main():
     # keyed by length AND draw count: a one-draw check and a six-draw measurement are two
     # estimates of the same quantity, not revisions of one, and keying by length alone lets
     # the cheaper one silently replace the better.
-    rec[f"{int(round(a.seconds))}s_{a.draws}d"] = dict(
+    # a control is a different drive, not a revision of the solve's own score
+    key = f"{int(round(a.seconds))}s_{a.draws}d"
+    if a.drive != "fitted":
+        key += f"_{a.drive}{a.seed}"
+    if a.jitter_s > 0:
+        key += f"_jitter{a.jitter_s:g}s{a.seed}"
+    rec[key] = dict(
         sim=float(np.mean(sims)), sim_sd=float(np.std(sims)),
+        sims=[float(s) for s in sims],
         gap=float(np.mean(gaps)), field_rank=float(np.mean(rks)),
         frames=int(frames), draws=int(a.draws), seconds=float(a.seconds),
+        drive=a.drive, seed=int(a.seed), jitter_s=float(a.jitter_s),
+        smooth_fwhm_mm=sm_fwhm,
         # which scoring pipeline produced this. Realised scores before bandpass.apply's
         # mirror padding (5be967f) are depressed by an edge artefact that grows with
         # optimisation, so they are not comparable with later ones; runs.py marks them.
