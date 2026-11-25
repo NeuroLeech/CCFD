@@ -1666,6 +1666,17 @@ def cmd_media(a):
             m["cross"] = float(np.exp(lf))
             print(f"    reinforcing gives way to cancelling at {m['cross']:.3f} Hz = "
                   f"{m['cross'] * m['tau']:.2f} cycles per decay")
+            # the first crossover can be a flicker in the low bins, where few patches
+            # sit in either category; also report the crossover above which cancelling
+            # leads in every bin (added after the 664 mm reach solve, 2026-11-25)
+            last = [j for j in x if (d[j + 1:] <= 0).all()]
+            if last and last[0] != i:
+                j = last[0]
+                lf = np.log(m["hz"][j]) + d[j] / (d[j] - d[j + 1]) * np.log(
+                    m["hz"][j + 1] / m["hz"][j])
+                m["cross_last"] = float(np.exp(lf))
+                print(f"    cancelling leads in every bin above {m['cross_last']:.3f} Hz = "
+                      f"{m['cross_last'] * m['tau']:.2f} cycles per decay")
         for c in m["tim"]:
             d = c["reinforcing"] - c["cancelling"]
             x = np.flatnonzero((d[:-1] > 0) & (d[1:] <= 0))

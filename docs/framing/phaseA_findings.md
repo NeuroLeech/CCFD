@@ -139,38 +139,100 @@ moves with the in-phase crossing, to about 0.36 cycles per decay (0.043 Hz) and 
 (0.15 Hz). If instead it stays near 0.5, the switch belongs to something in the fit rather
 than to the medium on this sheet.
 
-### A3 on fitted drives (in progress)
+### A3 on fitted drives
 
-**Reach 74 mm** (`nobp_sm6_reach033_box`, decay 8.33 s, spread label 1.5):
+Three solves at the same decay (8.33 s), differing only in reach: `nobp_sm6_reach033_box`
+(spread label 1.5), the rebuilt 3x `nobp_sm6_s3_box` (4.5) and `nobp_sm6_reach3_box` (13.5).
+Each has `interplay.py bold` under the fitted drive and its six controls.
 
-| | 74 mm | 3x, ~220 mm (rebuilt) |
-|---|---|---|
-| fit (2,000 solve vertices) | 0.7777 | 0.8087 |
-| realised, 4 draws | +0.7080 ± 0.0064 | +0.7568 ± 0.0014 |
-| rank | 28.7 | 18.6 |
-| fitted switch | **none**: reinforcing never exceeds 6% in any bin | 0.53 cycles per decay |
-| reinforcing / cancelling, HRF + 0.01–0.08 Hz | 5% / 58% | 53% / 29% |
+![A3](figures/phaseA3_fit_reach.png)
 
-**The prediction failed for the short reach.** The fitted switch did not move down to
-about 0.36 cycles per decay. There is no reinforcing regime at all: at every frequency,
-cancelling takes 57–87% of the 150 patches (single source takes over in the top bin).
-Below 0.36 cycles per decay the in-phase crossing says inputs could still add here (in-phase
-R 0.99 at 0.04 cycles per decay), but the fitted drive does not use that.
+The curve in each panel is the share of the 150 patches reinforcing minus the share
+cancelling, under the fitted drive. Above zero, more patches build their waves by
+reinforcing; below, by cancelling. Grey is the range over the six controls (random coherent
+drive and timing-only control, three seeds each). The dotted line is the medium-only
+in-phase crossing from A2. The beige band is 0.01–0.08 Hz.
 
-The controls cancel more in this medium than in 3x too, but far less than the fit. The
-random coherent drive cancels at 15–53% of patches and the timing-only control at 16–45%.
+| | 74 mm | 221 mm (3x, rebuilt) | 664 mm |
+|---|---|---|---|
+| in-phase crossing (A2, medium only) | 0.36 | 0.51 | 1.27 |
+| fitted switch | **none** | 0.53 | **1.29** (0.155 Hz) |
+| fit (2,000 solve vertices) | 0.7777 | 0.8087 | 0.6360 |
+| realised, 4 draws | +0.7080 ± 0.0064 | +0.7568 ± 0.0014 | +0.6027 ± 0.0026 |
+| gap, fit to realised | 0.057 | 0.070 | 0.103 |
+| rank | 28.7 | 18.6 | 2.2 |
+| still gaining at 150 evaluations (last 15) | 0.0006 | 0.0011 | 0.0070 |
+| reinforcing / cancelling, HRF + 0.01–0.08 Hz | 5% / 58% | 53% / 29% | 66% / 15% |
 
-So the in-phase crossing marks where reinforcing becomes impossible, not where the fit will
-use it. Whether the fit reinforces below the crossing depends on what this FC asks of this
-medium, and this medium also fits the FC worse (0.708 against 0.757). The 664 mm solve is
-running.
+**Long reach: the prediction held.** The fitted drive reinforces at 46–91% of patches from
+0.13 to 1.02 cycles per decay and cancels at 59–99% from 1.46 up. The switch between them,
+interpolated, is at 1.29 cycles per decay against a predicted 1.27. The bins there are a
+factor of 1.43 apart, so this says the switch lies between 1.02 and 1.46, which contains
+the prediction, and is far from the 0.5 of the recorded media.
+
+One qualification about how the switch is read. `interplay.py media` reports the *first*
+bin where cancelling overtakes reinforcing. In the 664 mm solve that is a flicker at 0.08
+cycles per decay (27% reinforcing against 35% cancelling, with 27% single source), after
+which reinforcing leads again until 1.29. I added a second readout, the crossing above
+which cancelling leads in every bin, after seeing this solve. For the 3x solve the two
+readouts agree (0.53). The figure uses the second.
+
+**Short reach: the prediction failed** (left panel). There is
+no reinforcing regime: cancelling leads in every bin, at 57–87% of patches. In-phase
+inputs could still add below 0.36 cycles per decay (in-phase R 0.99 at 0.04), but the
+fitted drive does not use that.
+
+**The controls.** Comparing the fitted curve with the range of the six controls, bin by bin:
+
+- **Above its switch**, the fit cancels more than any control in every bin, in both the
+  221 mm (6 of 6 bins) and 664 mm (4 of 4) media.
+- **Below its switch**, the fit reinforces more than any control in 5 of 8 bins (221 mm)
+  and 4 of 10 (664 mm). In the rest, which include the lowest bins in both media, it lies
+  inside the range.
+- **In the 74 mm medium** it cancels more than any control in 13 of the 14 bins.
+
+The controls carry a lean of their own, set by the medium. In the 664 mm medium their
+mean is +0.27 to +0.56 (towards reinforcing) from 0.13 to 1.02 cycles per decay, and two
+of the three timing-only seeds never cross over. In the 74 mm medium their mean is −0.14
+to −0.33 at every frequency. In the 221 mm medium it stays between −0.21 and +0.10. So the
+medium sets a lean, and the fit works with it or against it:
+
+- At 74 mm the fit goes further in the medium's direction (cancelling) at every frequency.
+- At 664 mm it goes further in the medium's direction (reinforcing) below the switch, and
+  reverses it above.
+- At 221 mm the controls barely lean, so both regimes come from the fit.
+
+**What A3 says.** Taking both reaches together:
+
+- The in-phase crossing behaves as an **upper limit** on where reinforcing can lead. In
+  none of the three media does reinforcing lead above it.
+- Whether reinforcing leads **below** it is not fixed by the crossing. In two of the three
+  media the fit uses reinforcing all the way up to the crossing. In the 74 mm medium it
+  never does.
+- So the switch the waves analysis found at half a cycle per decay is the medium-and-sheet
+  limit, reached by a fit that chooses to reinforce. Both parts are needed: the limit from
+  the medium and sheet, the choice from what the FC asks of that medium.
+
+**The 664 mm fit is not converged.** At 150 evaluations it was still gaining about 0.007
+per 15 evaluations, six times the 3x rate. Its effective rank of 2.2 and its realised score
+are therefore from a fit stopped early, and the fit scores in the table are not a
+like-for-like comparison of the three media. The 150-evaluation budget is the project
+convention and stands in for a realisability penalty (see `--prank-mu` in
+`fit/best_fit.py`), but that brake clearly binds harder in this medium. A 600-evaluation solve
+(`nobp_sm6_reach3_f600_box`) is queued after the rebuilds to check whether the switch
+stays at about 1.3 as the fit converges.
+
+Logs: [build_reach033](logs/build_reach033.txt), [bold_reach033](logs/bold_reach033_box_fitted.txt),
+[build_reach3](logs/build_reach3.txt), [bold_reach3](logs/bold_reach3_box_fitted.txt),
+[media_reach](logs/media_reach.txt).
 
 ### Reproduce
 
 ```bash
 python analysis/phase_reach.py --tags nobp_sm6_s1,nobp_sm6_s3,nobp_sm6_s5,nobp_sm6_mapsmm_s3 \
   --standin 8.3333,1.5 --standin 8.3333,4.5 --standin 8.3333,13.5
-python analysis/phase_reach.py --figure results/phase_reach_<...>.npz    # the figure above
+python analysis/phase_reach.py --figure results/phase_reach_<...>.npz    # the A2 figure
+python analysis/phase_reach.py --fit-figure results/phase_reach_<...>.npz  # the A3 figure (needs the bold caches)
 ```
 
 ---

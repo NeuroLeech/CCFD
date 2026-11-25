@@ -169,7 +169,13 @@ def main():
     ap.add_argument("--rhi", type=float, default=60.0)
     ap.add_argument("--figure", default="",
                     help="only redraw the findings figure from this saved .npz")
+    ap.add_argument("--fit-figure", default="",
+                    help="only draw the A3 fitted-drive figure, reading the in-phase "
+                         "crossings from this saved .npz and the `interplay.py bold` caches")
     a = ap.parse_args()
+    if a.fit_figure:
+        fit_reach_figure(a.fit_figure, a.fit_figure.replace(".npz", "_fit.png"))
+        return
     if a.figure:
         reach_figure(a.figure, a.figure.replace(".npz", "_reach.png"))
         return
@@ -315,6 +321,84 @@ def reach_figure(npz, path):
     for tag in out:
         print(f"    {out[tag]['label']:40s} crossing {crossing(out[tag]['ftau'], out[tag]['R_med']):.3f}")
     print(f"    {'infinite flat plane':40s} crossing {crossing(ftp, plane_R(ftp)):.3f}")
+
+
+FIT_MEDIA = [("nobp_sm6_reach033_box", "8.3333,1.5", "#257de0"),
+             ("nobp_sm6_s3_box", "8.3333,4.5", "#f47230"),
+             ("nobp_sm6_reach3_box", "8.3333,13.5", "#00b894")]
+
+
+def _cat_frac(path):
+    from interplay import CATS
+    rows = np.load(path, allow_pickle=True)["rows"]
+    cats = np.array([[r["cat"] for r in rr] for rr in rows])
+    return {k: (cats == k).mean(1) for k in CATS}
+
+
+def _last_cross(x, d):
+    """Log-interpolated crossing above which d <= 0 in every bin (nan if none)."""
+    j = [i for i in np.flatnonzero((d[:-1] > 0) & (d[1:] <= 0)) if (d[i + 1:] <= 0).all()]
+    if not j:
+        return np.nan
+    i = j[0]
+    return float(np.exp(np.log(x[i]) + d[i] / (d[i] - d[i + 1]) * np.log(x[i + 1] / x[i])))
+
+
+def fit_reach_figure(npz, path):
+    """A3 on fitted drives: per reach, the share of patches reinforcing minus the share
+    cancelling under the fitted drive, against the range of the six controls, with the
+    medium-only in-phase crossing from A2 marked."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    out = np.load(npz, allow_pickle=True)["out"].item()
+    ink, ink2, grid, band = "#191919", "#666666", "#e5e5e5", "#d9d9d9"
+    plt.rcParams.update({"font.size": 9, "axes.edgecolor": ink2, "axes.labelcolor": ink,
+                         "xtick.color": ink2, "ytick.color": ink2, "axes.spines.top": False,
+                         "axes.spines.right": False})
+    fig, ax = plt.subplots(1, 3, figsize=(12, 3.9), sharey=True)
+    for a, (tag, spec, col) in zip(ax, FIT_MEDIA):
+        z = np.load(os.path.join(RESULTS, f"interplay_combine_all_{tag}.npz"), allow_pickle=True)
+        tau = 8.3333
+        x = z["hz"] * tau
+        fit = _cat_frac(os.path.join(RESULTS, f"interplay_combine_all_{tag}.npz"))
+        d = fit["reinforcing"] - fit["cancelling"]
+        ctl = [_cat_frac(os.path.join(RESULTS, f"interplay_combine_all_{tag}_{k}{s}.npz"))
+               for k in ("random", "timing") for s in range(3)]
+        dc = np.array([c["reinforcing"] - c["cancelling"] for c in ctl])
+        a.axvspan(0.01 * tau, 0.08 * tau, color="#f4f1ea", zorder=0, lw=0)
+        a.fill_between(x, dc.min(0), dc.max(0), color=band, lw=0, zorder=1)
+        a.axhline(0, color=ink2, lw=0.8, zorder=2)
+        a.plot(x, d, color=col, lw=2, marker="o", ms=4, markeredgecolor="white",
+               markeredgewidth=0.8, zorder=4)
+        r = out[spec]
+        xc = crossing(r["ftau"], r["R_med"])
+        a.axvline(xc, color=ink, lw=1, ls=":", zorder=3)
+        a.text(xc * 1.08, 0.97, f"in-phase\ncrossing {xc:.2f}", color=ink, fontsize=8,
+               va="top")
+        xs = _last_cross(x, d)
+        if np.isfinite(xs):
+            a.plot([xs], [0], marker="o", ms=7, mfc="white", mec=ink, mew=1.2, zorder=5)
+            a.annotate(f"fitted switch {xs:.2f}", (xs, 0), xytext=(-8, 10),
+                       textcoords="offset points", ha="right", color=ink, fontsize=8)
+        else:
+            a.text(0.045, 0.78, "no fitted switch:\ncancelling leads\nat every frequency",
+                   color=ink, fontsize=8, va="top")
+        reach = C_PER_LABEL * float(spec.split(",")[1]) * r["tau"]
+        a.set_title(f"reach {reach:.0f} mm" + (" (= 3x)" if spec.endswith(",4.5") else ""),
+                    loc="left", fontsize=10, color=ink)
+        a.set_xscale("log")
+        a.set_xlim(0.03, 5.5)
+        a.set_ylim(-1, 1)
+        a.grid(axis="y", color=grid, lw=0.6)
+        a.set_xlabel("cycles per decay time (f tau), decay 8.33 s")
+    ax[0].set_ylabel("share reinforcing - share cancelling\n(150 patches, fitted drive)")
+    ax[0].text(0.083 * 1.05, -0.97, "0.01-0.08 Hz", color=ink2, fontsize=8, va="bottom")
+    ax[2].text(0.035, -0.62, "grey: range over the six\nrandom and timing controls",
+               color=ink2, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, facecolor="white")
+    print(f"  wrote {path}")
 
 
 def _plot(path, out):
