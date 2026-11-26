@@ -86,8 +86,8 @@ cycle per decay.
 The fitted switch comes out within 0.03 of the in-phase crossing, and the map-weighted medium is lowest
 on both. That 0.03 is below the resolution of the fitted switch, which is read from bins
 a factor of about 1.45 apart (see Rebuilds below). Only two distinct values of the medium-only crossing are in play, so this is
-agreement, not a correlation. The fitted values are from the impulse-fixed solves; they will
-be replaced by the rebuilt solves' values when the queue reaches them.
+agreement, not a correlation. The rebuilt solves give the same switches (0.54, 0.53, 0.51, 0.42;
+[logs/media_all.txt](logs/media_all.txt)).
 
 **5. The derivation in waves-findings is withdrawn as the explanation.** "Phase π across
 one attenuation length at fτ = ½" gives the right number only because reach ≈ sheet in
@@ -500,10 +500,11 @@ decay for the three seeds, inside the recorded 0.03–0.85 range.
 
 **Categories, 5x rebuilt** ([logs/bold_s5_box_fitted.txt](logs/bold_s5_box_fitted.txt)):
 identical to the recorded values in every reading (raw field 6 / 8 / 75 / 12; this model's
-observable 6 / 26 / 55 / 13). Its switch comes from `interplay.py media`, which is queued.
+observable 6 / 26 / 55 / 13). Its switch is at 0.102 Hz = 0.51 cycles per decay, as recorded.
 
 **Categories, map-weighted 3x rebuilt** ([logs/bold_mapsmm_s3_box_fitted.txt](logs/bold_mapsmm_s3_box_fitted.txt)):
-raw field 9 / 4 / 75 / 12, against the recorded 9% single source and 74% cancelling.
+raw field 9 / 4 / 75 / 12, against the recorded 9% single source and 74% cancelling. Its switch is at 0.051 Hz = 0.42 cycles per decay, as recorded
+([logs/media_all.txt](logs/media_all.txt)).
 
 **Resolution of the switch.** The switch is read from 14 log-spaced bins. Near it they
 sit at 0.34, 0.49 and 0.71 cycles per decay, a factor of about 1.45 apart. So differences
