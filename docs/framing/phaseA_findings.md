@@ -351,6 +351,24 @@ The same picture again. The controls' floor is higher than in 3x (0.18–0.21 ag
 
 Logs: [logs/a1_s5](logs/a1_s5/).
 
+### Rebuilt map-weighted 3x solve (`nobp_sm6_mapsmm_s3_box`)
+
+| drive | realised FC, 4 draws |
+|---|---|
+| fitted | +0.7388 ± 0.0046 |
+| independent | +0.1201 ± 0.0161 |
+| random, seeds 0/1/2 | +0.0813 / +0.1096 / +0.0982 |
+| timing, seeds 0/1/2 | +0.0824 / +0.1009 / +0.1276 |
+
+| delay jitter, sd (seed 0) | 0.1 s | 0.2 s | 0.3 s | 0.5 s | 1 s | 2 s | 5 s | 10 s | 20 s |
+|---|---|---|---|---|---|---|---|---|---|
+| realised FC | +0.646 | +0.415 | +0.294 | +0.160 | +0.108 | +0.097 | +0.098 | +0.095 | +0.099 |
+
+The same picture as the flat 3x. The controls' floor is 0.08–0.13, and 0.1 s of jitter
+costs 0.09 (0.14 in the flat medium); from 1 s up the score sits on the floor.
+
+Logs: [logs/a1_mapsmm_s3](logs/a1_mapsmm_s3/).
+
 ---
 
 ## A4: the 3x fit through the HRF (dropped)
@@ -483,6 +501,9 @@ decay for the three seeds, inside the recorded 0.03–0.85 range.
 **Categories, 5x rebuilt** ([logs/bold_s5_box_fitted.txt](logs/bold_s5_box_fitted.txt)):
 identical to the recorded values in every reading (raw field 6 / 8 / 75 / 12; this model's
 observable 6 / 26 / 55 / 13). Its switch comes from `interplay.py media`, which is queued.
+
+**Categories, map-weighted 3x rebuilt** ([logs/bold_mapsmm_s3_box_fitted.txt](logs/bold_mapsmm_s3_box_fitted.txt)):
+raw field 9 / 4 / 75 / 12, against the recorded 9% single source and 74% cancelling.
 
 **Resolution of the switch.** The switch is read from 14 log-spaced bins. Near it they
 sit at 0.34, 0.49 and 0.71 cycles per decay, a factor of about 1.45 apart. So differences
