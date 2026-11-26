@@ -46,12 +46,24 @@ import torch_swe
 
 
 def load_reference(tag):
+    """The convex solve to start from, with everything that defines its observable.
+
+    `band` is None when the solve had no passband (best_fit without --bandpass, whose file
+    stores nan): the unfiltered target is then scored on the unfiltered observable.
+    `decimate` and `smooth_fwhm` are the solve's frame readout and its surface smoothing,
+    and `fc_path` the target it was fitted to - all three have to be the same here, or the
+    descent fits a different observable from the one the warm start was solved on."""
     z = np.load(os.path.join(RESULTS, f"xspec_{tag}.npz"), allow_pickle=True)
+    band = tuple(float(v) for v in z["band"])
     return dict(S=z["S"], idx=z["idx"].astype(int), x=z["x"], save=int(z["save"]),
-                P=z["profiles"], sub=z["sub"], band=tuple(z["band"]),
+                P=z["profiles"], sub=z["sub"],
+                band=band if np.isfinite(band).all() else None,
                 frame_s=float(z["frame_s"]), ref_frames=int(z["ref_frames"]),
                 segment=int(z["segment"]) if z["segment"].size else 0,
-                map_clip=(str(z["map_clip"]) if "map_clip" in z else "none"))
+                map_clip=(str(z["map_clip"]) if "map_clip" in z else "none"),
+                decimate=(str(z["decimate"]) if "decimate" in z.files else "snapshot"),
+                smooth_fwhm=(float(z["smooth_fwhm"]) if "smooth_fwhm" in z.files else 0.0),
+                fc_path=(str(z["fc_path"]) if "fc_path" in z.files else ""))
 
 
 def target_edges(target, sub):
@@ -113,6 +125,9 @@ class Fit:
         # in an unclipped medium is a different system, the same way replaying G in the
         # baseline grading is - see _medium_state.
         self.p["map_clip"] = ref.get("map_clip", "none")
+        # frames as the solve read them: a snapshot, or the mean over each frame's steps
+        self.decimate = ref.get("decimate", "snapshot")
+        self.p["decimate"] = self.decimate
         # bo_step.unpack already takes the speed/damping map coefficients from x[4:10];
         # they are the same a and b best_fit saves as map_a/map_b.
         if maps_scale != 1.0:
@@ -153,13 +168,29 @@ class Fit:
                                       verbose=False)
         self.kern = kern
         kr = units.kernel_response(kern, self.nb, self.nframes)
-        br = bandpass.response(np.arange(self.nb) / (self.nframes * ref["frame_s"]),
-                               ref["frame_s"], ref["band"][0], ref["band"][1])
+        br = (1.0 if ref["band"] is None else
+              bandpass.response(np.arange(self.nb) / (self.nframes * ref["frame_s"]),
+                                ref["frame_s"], ref["band"][0], ref["band"][1]))
         self.filt = torch.as_tensor((kr * br).real.copy(), dtype=dtype,
                                     device="cpu")[:, None]
 
         self.cols = torch.as_tensor(np.asarray(target.cols)[ref["sub"]], dtype=torch.long,
                                     device=device)
+        # Surface smoothing of the observable (best_fit --smooth-fwhm): the solve vertices'
+        # rows of the smoothing matrix, applied to the field on every vertex they touch.
+        # The simulation keeps those columns, and the smoothed solve-vertex frames are one
+        # sparse product - linear, so the gradient passes straight through.
+        self.Kscore, self.Ksm, self.keep = None, None, self.cols
+        if ref.get("smooth_fwhm", 0.0) > 0:
+            import surface_smooth
+            self.Kscore = surface_smooth.smoothing_matrix(cortex, ref["smooth_fwhm"])
+            Kr = self.Kscore[np.asarray(target.cols)[ref["sub"]]].tocoo()
+            kv, inv = np.unique(Kr.col, return_inverse=True)
+            self.keep = torch.as_tensor(kv, dtype=torch.long, device=device)
+            ij = torch.as_tensor(np.vstack([Kr.row, inv]), dtype=torch.long)
+            self.Ksm = torch.sparse_coo_tensor(
+                ij, torch.as_tensor(Kr.data, dtype=dtype), (Kr.shape[0], len(kv)),
+                device="cpu").coalesce()
         self.Pt = torch.as_tensor(np.asarray(ref["P"]), dtype=dtype, device=device)
         y, iu = target_edges(target, ref["sub"])
         self.y = torch.as_tensor(y, dtype=dtype, device="cpu")
@@ -336,7 +367,10 @@ class Fit:
         A = self.drive(G, eta)
         H = self.apply_medium()
         F, _, _ = torch_swe.run(self.sw, A, self.Pt, self.dt, self.g, H,
-                                save=self.save, chunk=self.chunk, keep=self.cols)
+                                save=self.save, chunk=self.chunk, keep=self.keep,
+                                decimate=self.decimate)
+        if self.Ksm is not None:
+            F = torch.sparse.mm(self.Ksm, F.to("cpu").T).T
         Z = self.observable(F)
         M = (Z @ Z.T) / Z.shape[1]
         M = M - M.mean(0, keepdim=True) - M.mean(1, keepdim=True) + M.mean()
@@ -375,7 +409,7 @@ class Fit:
                 H = self.apply_medium()
                 F, _, _ = torch_swe.run(self.sw, np.asarray(d.Aser[:nsteps]),
                                         np.asarray(d.P), self.dt, self.g, H,
-                                        save=save, chunk=0)
+                                        save=save, chunk=0, decimate=self.decimate)
             return np.asarray(F.cpu().numpy(), np.float32), self.dt
         return _run
 
@@ -391,7 +425,7 @@ class Fit:
                 self.c, self.t, self.p, Af, save=self.save, amp=self.amp,
                 profiles=self.ref["P"], kernel=self.kern, band=self.ref["band"],
                 frame_s=self.ref["frame_s"], segment=self.ref["segment"] or None,
-                diagnostics=False, run_fn=self.run_fn())
+                diagnostics=False, run_fn=self.run_fn(), smooth=self.Kscore)
             out.append(r["sim"])
         return float(np.mean(out)), float(np.std(out))
 
@@ -540,7 +574,13 @@ def main():
     torch.manual_seed(a.seed)
     ref = load_reference(a.ref)
     c = load_cortex("fsaverage5", verbose=False)
-    t = fc_score.default_target(c, verbose=False)
+    # the target the reference was solved against - default_target would take the newest
+    # file under results/fc/, which is the bandpassed one, not results/fc/nobp/
+    t = (fc_score.FCTarget(c, fc_path=ref["fc_path"], centre="double", verbose=False)
+         if ref["fc_path"] else fc_score.default_target(c, verbose=False))
+    print(f"  target {os.path.basename(ref['fc_path']) or 'default'}; observable: "
+          f"{'no passband' if ref['band'] is None else ref['band']}, frames "
+          f"{ref['decimate']}, surface smoothing {ref['smooth_fwhm']:g} mm")
     fit = Fit(ref, c, t, a.seconds, device=a.device, amp=a.amp, nl_flux=a.nl_flux,
               nl_adv=a.nl_adv, Ld=a.Ld, maps_scale=a.maps_scale, wa=a.wa,
               lag_taus=[int(v) for v in a.lag_taus.split(",") if v.strip()],
@@ -651,7 +691,7 @@ def main():
                 c, t, fit.p, A, save=fit.save, amp=a.amp, profiles=ref["P"],
                 kernel=fit.kern, band=ref["band"], frame_s=ref["frame_s"],
                 segment=ref["segment"] or None, diagnostics=False,
-                run_fn=fit.run_fn())["sim"])
+                run_fn=fit.run_fn(), smooth=fit.Kscore)["sim"])
         print(f"  convex S realised the repo's way, same length: "
               f"sim {np.mean(cv):+.4f} +- {np.std(cv):.4f}   "
               f"(interpolation gap {m0-np.mean(cv):+.4f})", flush=True)
