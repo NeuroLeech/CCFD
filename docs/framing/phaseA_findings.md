@@ -629,3 +629,18 @@ unchanged to within 0.001, with or without rotation, even when the depth falls t
 rest. Whether a nonlinear medium can do something the linear one cannot would show only if
 the drive is fitted in it (step 2: descent through the nonlinear simulation).
 
+**Earlier work, not recorded at the time (from the project lead, 2026-11-26).** The
+nonlinearity was previously pushed until the linear drive fitted clearly worse, and the
+drive then refitted from there. A cold start (random drive) was also tried and did not work
+well. Neither run left a record in the repository. The recorded nonlinear fits
+(`nl100_ld100`, `nl100_ld100_200`, September) were warm starts at 15x on the old graded
+medium and bandpassed target; the September plan (`NEXT_SESSION_NONLINEAR.md`, commit
+a0e97ab) specified a cold start at 30x.
+
+**Step 2, first attempt (warm start at 15x).** Stopped. From the convex drive with the
+default step size, the per-step objective fell over 20 steps (5-step means 0.739, 0.733,
+0.725, 0.704); a restart with steps ten times smaller was stopped before it ran, because a
+warm start at a strength where the linear drive already fits stays near the linear solution
+and cannot show a different input. The next step is to find the strength at which the
+linear drive clearly breaks, and refit from there.
+
