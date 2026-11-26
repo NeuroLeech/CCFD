@@ -1,11 +1,13 @@
-"""The haemodynamic response, as an observation stage between the field and BOLD.
+"""The canonical HRF as an observation stage between the field and BOLD.
 
-The measured signal is the field seen through the haemodynamics, which pass little above
-about 0.1 Hz. An observable without them lets a fit carry FC structure at frequencies the
-data barely contains: the rebuilt 3x solve, fitted on the field low-passed by a 1.29 s
-gaussian only, loses most of its score when the inputs' relative timing is jittered by a
-few tenths of a second (docs/framing/phaseA_findings.md, A1). `best_fit.py --hrf` puts
-this stage into both sides of the fit, the way `--bandpass` puts the passband in:
+One hypothesis about how the field becomes BOLD: a linear haemodynamic response, the
+same at every vertex. It is an observation-model ARM (docs/framing/plan.md, Phase B), not
+the measured signal's known filter. How BOLD arises from neural activity is not settled:
+the canonical kernel is a convention fitted to evoked responses, and the real transform
+may be nonlinear, slower or faster, or differ across cortex. The default observable
+(`--bold-smooth`, a 1.29 s gaussian) makes no such assumption and only removes what
+sampling at the TR cannot report. `best_fit.py --hrf` puts this stage into both sides of
+the fit, the way `--bandpass` puts the passband in:
 
     transfer_response()   multiplies H by the gain |HRF(f)| on the solved bins
     apply()               convolves the realised frames with the same kernel

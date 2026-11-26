@@ -298,11 +298,21 @@ in the observable the fit is scored on, half of what each patch sees lies above 
 - **For framing point 2.** Under this observation model the answer to A1 is unambiguous:
   the FC fit needs the fitted relative timing, not just the powers and coherences.
 - **The observation model.** The observable these solves are fitted and scored on is the
-  field low-passed by a 1.29 s gaussian (`--bold-smooth`). It has no haemodynamic
-  response, which in real BOLD removes most of what lies above about 0.1 Hz. So the fit is
-  free to carry FC structure in sub-second timing at frequencies the measured signal
-  barely contains. How much of the timing dependence survives an HRF in the fit is
-  exactly A4. A4 is now the decisive test for A1, not a robustness check.
+  field low-passed by a 1.29 s gaussian (`--bold-smooth`), which removes only what sampling
+  at the TR cannot report. That is deliberate: how the field becomes BOLD is not known, and
+  the canonical HRF is one hypothesis among several (Phase B lists the gaussian, the HRF,
+  HRF plus passband and the envelope). An earlier version of this note called A4 "the
+  decisive test" on the assumption that real BOLD carries little above 0.1 Hz; that
+  assumption is withdrawn.
+- **What the data say, with no haemodynamic model.** `fit/band_fc.py` (2026-10-09, on the
+  October solves, before the impulse fix) compared model and data FC band by band. The
+  data's FC is nearly the same in every band below 0.2 Hz (the bands agree at 0.87–0.98).
+  The 3x solve carried its FC in its fast bands (0.08–0.2 Hz +0.46, 0.2–0.775 Hz +0.45)
+  and matched the slow bands poorly (+0.16 to +0.27). The sub-second timing A1 finds is
+  most likely that fast-band FC. The data-grounded check is therefore A1 on a solve made
+  to match the data band by band (`--fit-bands`, which in October lifted the 3x slow bands
+  to +0.31 to +0.61 at a cost of 0.04 overall). A fit through the canonical HRF (A4) is a
+  check under one hypothesis, not a test against the truth.
 - **Interpreting the wave analysis.** The categories read through the HRF (53%
   reinforcing in the BOLD band, 3x) are a reading of the same solve. They do not show
   that a fit through the HRF would choose the same timing.
@@ -337,9 +347,14 @@ Logs: [logs/a1_s1](logs/a1_s1/).
 
 ## A4: the 3x fit through the HRF (open: needs a decision on the observation model)
 
-**Question.** A1 shows the fitted FC rests on input timing held to a tenth of a second, at
-frequencies the haemodynamics would remove. Does a fit made through the HRF need the same
-timing, and does it build its waves the same way?
+**Status (2026-11-26): paused.** The canonical HRF is a hypothesis about how the field
+becomes BOLD, not its known filter (see A1, "the observation model"). This section records
+what happens under that one hypothesis.
+
+**Question.** A1 shows the fitted FC rests on input timing held to a tenth of a second.
+Under the hypothesis that BOLD is the field seen through the canonical HRF, which passes
+little above 0.1 Hz, does a fit need the same timing, and does it build its waves the
+same way?
 
 **Test.** `best_fit.py --hrf` (core/hrf.py): the SPM canonical HRF in the observation
 model on both sides of the fit. Its gain multiplies H on the solved bins, and the
@@ -383,10 +398,13 @@ regressors, which include the global signal, plus linear detrending
 (`targets/fc_score.py`, `double_centre`: "the linear analogue of GSR") and Spearman sees
 only rank. So the global component is invisible to the score, and the fit is free to make
 it as large as it likes. The comparison is formally consistent with how the target was
-processed. But no real cortex is 97% one signal before global-signal regression, so this
-is a solution the score allows rather than a model of the data.
+processed. Whether cortex could look like this before preprocessing is not something these
+data can say: raw BOLD carries a large global component of debated origin, and the target
+had it regressed out. What the result shows is narrower. In this medium, under this
+observation hypothesis, the fit reaches the target mainly through a component the score
+cannot see.
 
-**Why it happens in this medium.** The HRF passes little above 0.1 Hz. A2 showed that this
+**Why it happens in this medium.** The canonical kernel passes little above 0.1 Hz. A2 showed that this
 medium's response reaches about as far as the hemisphere is wide (221 mm), so at those
 frequencies every input's response spreads over most of the sheet. The 664 mm reach,
 without the HRF, already went 69% global. Without the HRF the fit built its structure at
@@ -407,7 +425,7 @@ to the small-remainder solution, not to the haemodynamics.
 
 ### Where this leaves A4
 
-A4 cannot be answered under this observation model. Through the HRF alone, the fit does
+A4 cannot be answered under this observation hypothesis as it stands. Through the HRF alone, the fit does
 not choose different timing for the waves so much as stop making differentiated waves.
 Three things need deciding (Phase B, "observation model" and "scoring"):
 
@@ -420,6 +438,11 @@ Three things need deciding (Phase B, "observation model" and "scoring"):
 
 A medium with a shorter reach might build differentiated structure through the HRF where
 this one cannot: a 600-evaluation HRF fit on the 74 mm medium would test that.
+
+Point 1 is written and tested but has not been run: `core/confounds.py` and
+`best_fit.py --confounds` (detrend, then regression on the global signal over the target's
+vertices and its derivative, on both sides of the fit), on branch `a4-gsr`. It is held
+until the observation model is discussed.
 
 Logs: [logs/a4](logs/a4/).
 
