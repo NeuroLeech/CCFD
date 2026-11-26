@@ -1,0 +1,5 @@
+x30  (amp 0.006): sim +0.7538 (+0.7557, +0.7518), rank 9.1, shallowest (H+h)/H 0.258, field vs linear r 0.9341  [623s]
+x50  (amp 0.01): the field is not finite - the sheet ran dry (scorer crashed on it; caught in later runs)
+x35  (amp 0.007): sim +0.7522 (+0.7544, +0.7500), rank 8.3, shallowest (H+h)/H 0.134, field vs linear r 0.9097  [581s]
+x40  (amp 0.008): sim +0.7496 (+0.7519, +0.7473), rank 7.3, shallowest (H+h)/H 0.010, field vs linear r 0.8798  [568s]
+x45  (amp 0.009): the field is not finite - the sheet ran dry (bed strike)  [396s]

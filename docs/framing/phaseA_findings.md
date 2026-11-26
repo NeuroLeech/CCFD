@@ -644,3 +644,36 @@ warm start at a strength where the linear drive already fits stays near the line
 and cannot show a different input. The next step is to find the strength at which the
 linear drive clearly breaks, and refit from there.
 
+### Where the linear drive breaks: up to the point the sheet runs dry
+
+The 30 s rotation drive replayed at rising amplitude, 2 draws of 577 s each
+([replay2.py](logs/nonlinear/replay2.py), [replay2.txt](logs/nonlinear/replay2.txt)). "Field vs
+linear" is the correlation of the nonlinear field with the linear field for the same drive.
+
+| drive | 1x | 15x | 30x | 35x | 40x | 45x, 50x |
+|---|---|---|---|---|---|---|
+| realised | +0.756 | +0.756 | +0.754 | +0.752 | +0.750 | ran dry |
+| effective rank | 10.5 | 10.1 | 9.1 | 8.3 | 7.3 | |
+| shallowest (H + h)/H | 0.975 | 0.629 | 0.258 | 0.134 | 0.010 | |
+| field vs linear, r | 1 | | 0.934 | 0.910 | 0.880 | |
+
+The linear drive keeps its fit to within 0.006 all the way to the point where the sheet runs
+dry (between 40x and 45x), although by then about a quarter of the field's variance is not
+what the linear medium makes.
+
+**Where the nonlinear part sits** (draw 0; [where_nl.py](logs/nonlinear/where_nl.py)). In the
+bare field most of it is fast: over 80% lies above 0.775 Hz. In the scored observable (1.29 s
+kernel and 6 mm), most of it is slow:
+
+| | below 0.02 Hz | 0.02-0.05 Hz | 0.05-0.1 Hz | 0.1-0.775 Hz |
+|---|---|---|---|---|
+| nonlinear part / linear power, 35x | 31% | 64% | 12% | 3-4% |
+| nonlinear part / linear power, 40x | 61% | 106% | 17% | 4-5% |
+| share of the nonlinear part, 40x | 62% | 12% | 5% | about 22% |
+
+So the nonlinearity makes new slow fluctuations out of fast waves, comparable at 40x to the
+linear power between 0.02 and 0.05 Hz, while the 0.1-0.775 Hz part, where this solve carries
+most of its FC, changes by 3-5%. That is why the score barely moves. At a 30 s inertial period
+rotation acts only below 0.033 Hz, with a Rossby radius of 122 mm, so it barely meets the part
+of the drive the fit relies on. Faster rotation moves that regime up into it.
+
