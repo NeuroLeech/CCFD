@@ -1,0 +1,32 @@
+[FCTarget] group-RBCNKI100nobp_hemi-L_space-fsaverage5_mask-glasser_spearmanfc.npy
+           9305 vertices (69 of cortex.nV unmatched), 1999771 edges, metric=spearman, centre=double, burn=50
+  profiles read from the file (100 channels); --profile taper not applied
+  hybrid input: 100 channels, 1880 driven vertices, 9409 mm2 (17.3% of cortex), from xspec_asc_first_area_100.npz
+  frames at TR/4 = 0.1613 s; save 4 steps/frame, damping 0.002688/step
+    spread 1.47 mm/s, decay 15.0 s (93 frames), reach 22 mm
+    reference medium: 3.04 mm/s, 97.7 s, reach 297 mm;  BOLD 1/e decay 9.0 s
+  low-pass FWHM 8.00 frames (= 2 TR = 1.290 s), cutting at the fMRI Nyquist 0.775 Hz
+  clock: frame 0.1613s, impulse window 704 frames (114s, decay 93 frames), pad 4096, realise 3578 frames (577s)
+  map coefficients scaled by 0: a [-0. -0.  0.], b [-0.  0.  0.] (COEF_LIM 0.45)
+  frames are the mean of the field over each frame's 4 steps, not a snapshot (anti-alias; impulses and realisation alike)
+  100 pieces, save 4 steps/frame, per-step damping 2.69e-03, rotation 1.10e-05, sponge 1.80e-03, impulse window 704 frames (decay 93)
+  smoothing: FWHM 8.0 frames, kernel length 29
+  impulse responses over 9332 of 9374 vertices (2.45 GiB, 1.0x smaller than full width)
+  smoothed 6 mm: H read from 9332 vertices onto 2000
+  transfer: 135 frequencies x 100 channels from a 4096-frame window [273s]
+      nfev     15  rho +0.76796993  |grad|*|L| 4.0543e-01
+      nfev     30  rho +0.79267601  |grad|*|L| 1.1563e-01
+      nfev     45  rho +0.80174392  |grad|*|L| 1.1506e-01
+      nfev     60  rho +0.80625404  |grad|*|L| 1.3819e-01
+      nfev     75  rho +0.80912998  |grad|*|L| 6.5152e-02
+      nfev     90  rho +0.81089250  |grad|*|L| 8.0014e-02
+      nfev    105  rho +0.81217576  |grad|*|L| 6.3512e-02
+      nfev    120  rho +0.81299581  |grad|*|L| 5.0370e-02
+      nfev    135  rho +0.81376366  |grad|*|L| 8.1177e-02
+      nfev    150  rho +0.81439410  |grad|*|L| 4.4980e-02
+    factored solve: rank 20, corr = +0.814427, 151 evaluations (STOP: TOTAL NO. OF F,G EVALUATIONS EXCEEDS LIMIT)
+  solve: pearson vs raw +0.8327, spearman vs raw +0.8067
+  convergence: objective 0.8144 after 145 accepted steps of 150; last 5 gains +8.2e-04, +7.7e-04, +6.3e-04, +3.3e-05
+  draws 2-4 scored over 3 workers
+
+  realised over 3578 frames, 4 draws: sim +0.7270 +- 0.0085   gap 0.046   rank 32.8

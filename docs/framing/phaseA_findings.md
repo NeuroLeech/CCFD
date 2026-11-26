@@ -489,3 +489,54 @@ sit at 0.34, 0.49 and 0.71 cycles per decay, a factor of about 1.45 apart. So di
 of a few hundredths between a fitted switch and an in-phase crossing (A2, finding 4) are
 below what the bins resolve. The A3 prediction is a shift of about a factor of 0.7 or
 2.5, which they resolve easily.
+
+---
+
+## Speed × decay grid
+
+**Question.** Speed and decay are separate parameters. Reach is their product, but two
+media with the same reach run on different clocks against the same fMRI time (TR, a 577 s
+record, the 1.29 s kernel), so the fit can differ. Earlier series each held one thing
+fixed: 1x, 3x and 5x held reach at about 220 mm, and A3 held the decay at 8.33 s. This
+grid varies both.
+
+**Test.** Uniform medium, unfiltered target, the standard fit (factored, rank 20, 150
+evaluations, 2,000 solve vertices, 6 mm smoothing), realised over 4 draws of 577 s. Speed
+labels 1.5, 4.5 and 7.5 (wave speeds 8.8, 26.5 and 44 mm/s) by decays of 2.5, 5, 8.33, 15
+and 25 s. The 5x × 25 s corner (reach 1,100 mm) was left out. Each cell also has an
+unfiltered video of one draw (`viz/render_bandpass.py --band none`, not in the repo).
+Script: [logs/grid/grid.sh](logs/grid/grid.sh).
+
+Realised FC, effective rank in brackets. Reach in mm under each score.
+
+| speed \ decay | 2.5 s | 5 s | 8.33 s | 15 s | 25 s |
+|---|---|---|---|---|---|
+| 1x (8.8 mm/s) | 0.622 (16.9)<br>22 | 0.679 (20.9)<br>44 | 0.708 (28.7)<br>74 | 0.727 (32.8)<br>132 | 0.723 (38.2)<br>220 |
+| 3x (26.5 mm/s) | 0.737 (17.3)<br>66 | 0.757 (18.5)<br>133 | 0.757 (18.6)<br>221 | 0.744 (20.8)<br>398 | 0.731 (21.3)<br>663 |
+| 5x (44 mm/s) | 0.742 (12.3)<br>110 | 0.739 (9.6)<br>220 | 0.730 (9.7)<br>367 | 0.716 (9.6)<br>660 | not run |
+| 9x (80 mm/s) | | | 0.603 (2.2)<br>664 | | |
+
+The 1x × 8.33 s, 1x × 25 s, 3x × 8.33 s, 5x × 5 s and 9x × 8.33 s cells are the rebuilt
+solves above (`nobp_sm6_reach033_box`, `nobp_sm6_s1_box`, `nobp_sm6_s3_box`,
+`nobp_sm6_s5_box`, `nobp_sm6_reach3_box`); the other ten are new (`nobp_sm6_v<speed>_d<decay>_box`).
+
+**What it shows.**
+
+- **Speed mostly sets how many independent patterns the fit carries:** about 17–38 at 1x
+  (rising with decay), 17–21 at 3x, about 10 at 5x, 2 at 9x.
+- **At a given speed, decay sets the score, and each row has a best decay:** 15–25 s at
+  1x, 5–8.33 s at 3x, 2.5–5 s at 5x. The faster the medium, the shorter its best decay.
+- **The same reach gives different fits.** At about 220 mm: 0.723 (rank 38), 0.757 (19),
+  0.739 (10) for 1x, 3x, 5x. At about 660 mm: 0.731 (21), 0.716 (10), 0.603 (2) for 3x,
+  5x, 9x. A very long reach does not fail by itself; it fails when it comes from a fast
+  medium.
+- **Both extremes of reach fail visibly** (videos). At 22 mm the field stays near the
+  input regions and most of the sheet is still; at 664 mm from a fast medium it is a few
+  hemisphere-sized patches.
+
+**Caveat.** Every cell stops at 150 evaluations, the project's stopping rule, and the
+fast, long-decay cells were still gaining most (up to 0.004 per 15 evaluations against
+about 0.001 for the slow ones). Differences of 0.01–0.02 between neighbouring cells are
+within what that stopping point can move.
+
+Logs: [logs/grid](logs/grid/).
