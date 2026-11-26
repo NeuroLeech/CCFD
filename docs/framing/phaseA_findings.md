@@ -597,3 +597,35 @@ can carry structure between scales.
 
 Logs: [logs/rotation](logs/rotation/).
 
+---
+
+## Nonlinear medium, step 1: the linear drives replayed harder
+
+**Question.** Does nonlinearity change the FC a drive produces, with and without rotation?
+Linear FC does not depend on drive amplitude, so any change with amplitude is the
+nonlinearity.
+
+**Test.** No fitting. The convex 3x drives, without rotation (`nobp_sm6_s3_box`) and with a
+30 s inertial period (`nobp_sm6_s3_rot30_box`), replayed in the medium with both nonlinear
+terms on (`nl_flux 1`: the depth update uses H + h; `nl_adv 1`: momentum advection) through
+`fit/torch_fit.py`'s integrator, at 1x, 5x and 15x the linear fits' drive amplitude. Two
+draws of 577 s each, scored by `score_realisation` with the solve's own observable.
+`torch_fit` was first made to fit and score the reference's own target and observable;
+with the nonlinearity off its integrator matches numpy to r = 1.00000000
+([check_torch.py](logs/nonlinear/check_torch.py)). Script and output:
+[replay.py](logs/nonlinear/replay.py), [replay.txt](logs/nonlinear/replay.txt).
+
+| drive | 1x | 5x | 15x |
+|---|---|---|---|
+| 3x, no rotation: realised, 2 draws | +0.7557 | +0.7556 | +0.7550 |
+| effective rank | 17.0 | 17.1 | 17.1 |
+| shallowest (H + h)/H | 0.977 | 0.883 | 0.649 |
+| 3x, 30 s rotation: realised, 2 draws | +0.7559 | +0.7559 | +0.7556 |
+| effective rank | 10.5 | 10.4 | 10.1 |
+| shallowest (H + h)/H | 0.975 | 0.876 | 0.629 |
+
+**What it shows.** Replaying a drive fitted for the linear medium harder leaves the FC
+unchanged to within 0.001, with or without rotation, even when the depth falls to 63–65% of
+rest. Whether a nonlinear medium can do something the linear one cannot would show only if
+the drive is fitted in it (step 2: descent through the nonlinear simulation).
+

@@ -1,0 +1,7 @@
+nobp_sm6_s3_box          x1  (amp 0.0002): sim +0.7557 (+0.7579, +0.7535), rank 17.0, shallowest (H+h)/H 0.977  [582s]
+nobp_sm6_s3_box          x5  (amp 0.001): sim +0.7556 (+0.7578, +0.7533), rank 17.1, shallowest (H+h)/H 0.883  [579s]
+nobp_sm6_s3_box          x15 (amp 0.003): sim +0.7550 (+0.7575, +0.7526), rank 17.1, shallowest (H+h)/H 0.649  [623s]
+nobp_sm6_s3_rot30_box    x1  (amp 0.0002): sim +0.7559 (+0.7573, +0.7545), rank 10.5, shallowest (H+h)/H 0.975  [581s]
+nobp_sm6_s3_rot30_box    x5  (amp 0.001): sim +0.7559 (+0.7573, +0.7545), rank 10.4, shallowest (H+h)/H 0.876  [566s]
+nobp_sm6_s3_rot30_box    x15 (amp 0.003): sim +0.7556 (+0.7571, +0.7541), rank 10.1, shallowest (H+h)/H 0.629  [575s]
+REPLAY DONE
