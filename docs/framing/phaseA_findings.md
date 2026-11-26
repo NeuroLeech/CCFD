@@ -452,6 +452,7 @@ docs/waves-findings.md, at 150 evaluations.
 | `nobp_sm6_s3_box` (3x flat) | 0.8087 | +0.7568 ± 0.0014 | 18.6 | fit 0.809, realised 0.756 ± 0.002, rank 18.6 | reproduced |
 | `nobp_sm6_s1_box` (1x flat) | 0.8178 | +0.7232 ± 0.0099 | 38.2 | realised 0.724 | reproduced |
 | `nobp_sm6_s5_box` (5x flat) | 0.7845 | +0.7387 ± 0.0026 | 9.6 | fit 0.785, realised 0.739 ± 0.003, rank 9.6 | reproduced |
+| `nobp_sm6_mapsmm_s3_box` (3x map-weighted) | 0.7942 | +0.7388 ± 0.0046 | 17.4 | realised 0.7388 ± 0.0045 | reproduced |
 
 Log: [logs/build_s3.txt](logs/build_s3.txt). The 3x build took 28 minutes in this container.
 
