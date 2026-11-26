@@ -121,11 +121,9 @@ frequency and c for the wave speed:
   timed to reinforce, and above which the waves are what is left after cancellation, is
   set by the medium and the sheet together. The input timing then supplies the contrast
   either side of it (the controls in waves-findings).
-- **The BOLD-band conclusions.** In waves-findings, BOLD sees mostly reinforcing waves in
-  3x and 5x and mostly cancelling ones in 1x. Whether that is so depends on where the
-  crossing falls relative to the BOLD band, so it depends on reach relative to sheet, not
-  on the decay alone. A 664 mm reach at 8.33 s puts the in-phase crossing at 0.15 Hz,
-  above the whole 0.01–0.08 Hz band.
+- **Where the switch falls in hertz.** It depends on reach relative to the sheet, not on
+  the decay alone: at 8.33 s, a 221 mm reach puts the in-phase crossing at 0.06 Hz and a
+  664 mm reach at 0.15 Hz.
 - **Toy examples.** "Phased array on a finite sheet" is the right toy: the same timing
   rule reinforces or cancels depending on f, on the decay and on the travel time across
   the sheet.
@@ -151,7 +149,7 @@ The curve in each panel is the share of the 150 patches reinforcing minus the sh
 cancelling, under the fitted drive. Above zero, more patches build their waves by
 reinforcing; below, by cancelling. Grey is the range over the six controls (random coherent
 drive and timing-only control, three seeds each). The dotted line is the medium-only
-in-phase crossing from A2. The beige band is 0.01–0.08 Hz.
+in-phase crossing from A2.
 
 | | 74 mm | 221 mm (3x, rebuilt) | 664 mm |
 |---|---|---|---|
@@ -162,7 +160,6 @@ in-phase crossing from A2. The beige band is 0.01–0.08 Hz.
 | spatial-autocorrelation mismatch (`gap` in the logs: mean absolute difference in Moran's I, model against data) | 0.057 | 0.070 | 0.103 |
 | rank | 28.7 | 18.6 | 2.2 |
 | still gaining at 150 evaluations (last 15) | 0.0006 | 0.0011 | 0.0070 |
-| reinforcing / cancelling, HRF + 0.01–0.08 Hz | 5% / 58% | 53% / 29% | 66% / 15% |
 
 **Long reach: the prediction held.** The fitted drive reinforces at 46–91% of patches from
 0.13 to 1.02 cycles per decay and cancels at 59–99% from 1.46 up. The switch between them,
@@ -297,25 +294,16 @@ in the observable the fit is scored on, half of what each patch sees lies above 
 
 - **For framing point 2.** Under this observation model the answer to A1 is unambiguous:
   the FC fit needs the fitted relative timing, not just the powers and coherences.
-- **The observation model.** The observable these solves are fitted and scored on is the
-  field low-passed by a 1.29 s gaussian (`--bold-smooth`), which removes only what sampling
-  at the TR cannot report. That is deliberate: how the field becomes BOLD is not known, and
-  the canonical HRF is one hypothesis among several (Phase B lists the gaussian, the HRF,
-  HRF plus passband and the envelope). An earlier version of this note called A4 "the
-  decisive test" on the assumption that real BOLD carries little above 0.1 Hz; that
-  assumption is withdrawn.
-- **What the data say, with no haemodynamic model.** `fit/band_fc.py` (2026-10-09, on the
-  October solves, before the impulse fix) compared model and data FC band by band. The
-  data's FC is nearly the same in every band below 0.2 Hz (the bands agree at 0.87–0.98).
-  The 3x solve carried its FC in its fast bands (0.08–0.2 Hz +0.46, 0.2–0.775 Hz +0.45)
-  and matched the slow bands poorly (+0.16 to +0.27). The sub-second timing A1 finds is
-  most likely that fast-band FC. The data-grounded check is therefore A1 on a solve made
-  to match the data band by band (`--fit-bands`, which in October lifted the 3x slow bands
-  to +0.31 to +0.61 at a cost of 0.04 overall). A fit through the canonical HRF (A4) is a
-  check under one hypothesis, not a test against the truth.
-- **Interpreting the wave analysis.** The categories read through the HRF (53%
-  reinforcing in the BOLD band, 3x) are a reading of the same solve. They do not show
-  that a fit through the HRF would choose the same timing.
+- **The observation model.** The solves are fitted and scored against the unfiltered
+  target, on the field low-passed only to what sampling at the TR can report
+  (`--bold-smooth`, a 1.29 s gaussian). No bandpass and no HRF (plan.md, Decisions). So
+  the timing A1 finds is timing the data's FC is consistent with, at every frequency the
+  TR can report. An earlier version of this note claimed that real BOLD carries little
+  above 0.1 Hz and made a fit through the HRF "the decisive test". Both are withdrawn.
+- **The data band by band** (`fit/band_fc.py`, 2026-10-09, on the October solves before the
+  impulse fix, not yet rerun on the rebuilt ones). The data's FC is nearly the same in
+  every band below 0.2 Hz (the bands agree at 0.87–0.98). The 3x solve matched it best in
+  its faster bands and least in the slowest (+0.16 to +0.27).
 
 The 0.1–0.5 s rows are 2-draw checks. A 4-draw grid at 0.1, 0.2, 0.3 and 0.5 s on all four
 rebuilt solves is queued after the rebuilds.
@@ -345,11 +333,11 @@ Logs: [logs/a1_s1](logs/a1_s1/).
 
 ---
 
-## A4: the 3x fit through the HRF (open: needs a decision on the observation model)
+## A4: the 3x fit through the HRF (dropped)
 
-**Status (2026-11-26): paused.** The canonical HRF is a hypothesis about how the field
-becomes BOLD, not its known filter (see A1, "the observation model"). This section records
-what happens under that one hypothesis.
+**Status (2026-11-26): dropped.** The canonical HRF is only superficially sensible as a
+description of how the field becomes BOLD, and the project does not fit through it
+(plan.md, Decisions). The two fits that were run are kept here as a record.
 
 **Question.** A1 shows the fitted FC rests on input timing held to a tenth of a second.
 Under the hypothesis that BOLD is the field seen through the canonical HRF, which passes
@@ -423,26 +411,12 @@ passband alone does not explain: at 0.05 Hz a 0.3 s delay is a phase error of on
 leaves even 1% of the global signal unmatched is a third of it. The sensitivity belongs
 to the small-remainder solution, not to the haemodynamics.
 
-### Where this leaves A4
+### What carries over
 
-A4 cannot be answered under this observation hypothesis as it stands. Through the HRF alone, the fit does
-not choose different timing for the waves so much as stop making differentiated waves.
-Three things need deciding (Phase B, "observation model" and "scoring"):
-
-1. **Put the data's preprocessing into the model's observable.** Detrending and global
-   signal removal are part of how the target was made. A linear stand-in for the global
-   regression, removing the mean over vertices, is a spatial operator and could be folded
-   into H the way the 6 mm smoothing is. That stops a global fluctuation from being free.
-2. **Report the global share beside every score**, as above, so a fit like this is seen.
-3. **A score that sees magnitude**, alongside double-centred Spearman.
-
-A medium with a shorter reach might build differentiated structure through the HRF where
-this one cannot: a 600-evaluation HRF fit on the 74 mm medium would test that.
-
-Point 1 is written and tested but has not been run: `core/confounds.py` and
-`best_fit.py --confounds` (detrend, then regression on the global signal over the target's
-vertices and its derivative, on both sides of the fit), on branch `a4-gsr`. It is held
-until the observation model is discussed.
+One thing does not depend on the HRF. Double-centred Spearman cannot see a global
+component, and the 664 mm medium went 69% global with no HRF at all. So the global share
+is worth reporting beside a score, and a score that sees magnitude stays on the Phase B
+scoring list. Nothing is added to the observable.
 
 Logs: [logs/a4](logs/a4/).
 

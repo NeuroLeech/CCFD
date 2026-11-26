@@ -366,7 +366,6 @@ def fit_reach_figure(npz, path):
         ctl = [_cat_frac(os.path.join(RESULTS, f"interplay_combine_all_{tag}_{k}{s}.npz"))
                for k in ("random", "timing") for s in range(3)]
         dc = np.array([c["reinforcing"] - c["cancelling"] for c in ctl])
-        a.axvspan(0.01 * tau, 0.08 * tau, color="#f4f1ea", zorder=0, lw=0)
         a.fill_between(x, dc.min(0), dc.max(0), color=band, lw=0, zorder=1)
         a.axhline(0, color=ink2, lw=0.8, zorder=2)
         a.plot(x, d, color=col, lw=2, marker="o", ms=4, markeredgecolor="white",
@@ -393,7 +392,6 @@ def fit_reach_figure(npz, path):
         a.grid(axis="y", color=grid, lw=0.6)
         a.set_xlabel("cycles per decay time (f tau), decay 8.33 s")
     ax[0].set_ylabel("share reinforcing - share cancelling\n(150 patches, fitted drive)")
-    ax[0].text(0.083 * 1.05, -0.97, "0.01-0.08 Hz", color=ink2, fontsize=8, va="bottom")
     ax[2].text(0.035, -0.62, "grey: range over the six\nrandom and timing controls",
                color=ink2, fontsize=8)
     fig.tight_layout()
