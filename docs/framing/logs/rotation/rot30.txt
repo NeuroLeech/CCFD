@@ -1,0 +1,33 @@
+[FCTarget] group-RBCNKI100nobp_hemi-L_space-fsaverage5_mask-glasser_spearmanfc.npy
+           9305 vertices (69 of cortex.nV unmatched), 1999771 edges, metric=spearman, centre=double, burn=50
+  profiles read from the file (100 channels); --profile taper not applied
+  hybrid input: 100 channels, 1880 driven vertices, 9409 mm2 (17.3% of cortex), from xspec_asc_first_area_100.npz
+  frames at TR/4 = 0.1613 s; save 12 steps/frame, damping 0.001613/step
+    spread 4.42 mm/s, decay 8.3 s (52 frames), reach 37 mm
+    reference medium: 3.04 mm/s, 97.7 s, reach 297 mm;  BOLD 1/e decay 9.0 s
+  low-pass FWHM 8.00 frames (= 2 TR = 1.290 s), cutting at the fMRI Nyquist 0.775 Hz
+  clock: frame 0.1613s, impulse window 384 frames (62s, decay 52 frames), pad 4096, realise 3578 frames (577s)
+  map coefficients scaled by 0: a [-0. -0.  0.], b [-0.  0.  0.] (COEF_LIM 0.45)
+  frames are the mean of the field over each frame's 12 steps, not a snapshot (anti-alias; impulses and realisation alike)
+  rotation: inertial period 30 s (1.7 rad per decay time), Rossby radius 122.4 mm; edge absorption at the rim: time 7.465 s (1.1x the bulk damping rate)
+  100 pieces, save 12 steps/frame, per-step damping 1.61e-03, rotation 2.81e-03, sponge 1.80e-03, impulse window 384 frames (decay 52)
+  smoothing: FWHM 8.0 frames, kernel length 29
+  impulse responses over 9332 of 9374 vertices (1.33 GiB, 1.0x smaller than full width)
+  smoothed 6 mm: H read from 9332 vertices onto 2000
+  transfer: 135 frequencies x 100 channels from a 4096-frame window [407s]
+      nfev     15  rho +0.74844229  |grad|*|L| 2.8848e-01
+      nfev     30  rho +0.77530650  |grad|*|L| 1.5205e-01
+      nfev     45  rho +0.78913188  |grad|*|L| 1.8681e-01
+      nfev     60  rho +0.79569948  |grad|*|L| 1.0645e-01
+      nfev     75  rho +0.80015577  |grad|*|L| 1.1797e-01
+      nfev     90  rho +0.80347017  |grad|*|L| 1.0978e-01
+      nfev    105  rho +0.80537305  |grad|*|L| 7.9207e-02
+      nfev    120  rho +0.80702703  |grad|*|L| 9.5789e-02
+      nfev    135  rho +0.80845230  |grad|*|L| 9.7838e-02
+      nfev    150  rho +0.80962619  |grad|*|L| 9.3729e-02
+    factored solve: rank 20, corr = +0.809713, 151 evaluations (STOP: TOTAL NO. OF F,G EVALUATIONS EXCEEDS LIMIT)
+  solve: pearson vs raw +0.8233, spearman vs raw +0.7979
+  convergence: objective 0.8097 after 147 accepted steps of 150; last 5 gains +1.7e-03, +1.4e-03, +1.2e-03, +8.7e-05
+  draws 2-4 scored over 3 workers
+
+  realised over 3578 frames, 4 draws: sim +0.7608 +- 0.0029   gap 0.070   rank 11.8

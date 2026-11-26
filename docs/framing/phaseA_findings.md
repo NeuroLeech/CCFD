@@ -562,3 +562,38 @@ about 0.001 for the slow ones). Differences of 0.01–0.02 between neighbouring 
 within what that stopping point can move.
 
 Logs: [logs/grid](logs/grid/).
+
+---
+
+## Rotation in the linear fit
+
+**Question.** Rotation has been effectively off in every fit (BEST_X's 1.1e-5 per step is an
+inertial period of 2,500–23,000 s against decays of 2.5–25 s). What does it do when it is
+strong enough to matter? Below the inertial frequency waves cannot travel, so a slow
+response should stay within about one Rossby radius rather than spread across the sheet.
+
+**Test.** The 3x medium (speed label 4.5, decay 8.33 s), the standard fit, with rotation set
+by `best_fit.py --inertial-s`. Everything else, edge absorption included, as `nobp_sm6_s3_box`.
+`--inertial-s` set to the old per-step value reproduces that solve exactly (fit +0.808666,
+realised +0.7568 ± 0.0014). Script: [logs/rotation/rotation.sh](logs/rotation/rotation.sh).
+
+| inertial period | none | 100 s | 30 s | 10 s |
+|---|---|---|---|---|
+| Rossby radius | 31 m | ~410 mm | ~122 mm | ~41 mm |
+| turning per decay time | 0.007 rad | 0.5 rad | 1.7 rad | 5.2 rad |
+| fit (2,000 solve vertices) | 0.8087 | 0.8083 | 0.8097 | 0.8100 |
+| realised, 4 draws | +0.7568 ± 0.0014 | +0.7548 ± 0.0029 | +0.7608 ± 0.0029 | +0.7595 ± 0.0038 |
+| effective rank | 18.6 | 18.6 | 11.8 | 16.4 |
+
+**What it shows.** In the linear fit, rotation does not change how well the FC is matched:
+all four scores lie within about 0.006, close to the draw scatter. At 100 s, where the Rossby
+radius is larger than the sheet, nothing changes at all. At 30 s and 10 s the fitted field
+carries a different number of independent patterns (11.8 and 16.4 against 18.6), not
+monotonically. So the input absorbs what rotation does to the medium, and the same FC is
+reached either way. That is the core argument's point in one more parameter: FC constrains
+the mechanism without identifying it. Whether rotation matters has to be read from what the
+waves do (the videos), or from a nonlinear medium, where rotation and advection together
+can carry structure between scales.
+
+Logs: [logs/rotation](logs/rotation/).
+
