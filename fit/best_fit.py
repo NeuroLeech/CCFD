@@ -333,6 +333,15 @@ def main():
                          "solved bins and the realised frames are convolved with the same "
                          "kernel. Without it the observable keeps power up to the fMRI "
                          "Nyquist that BOLD does not have. Needs --oversample for a clock")
+    ap.add_argument("--inertial-s", type=float, default=None, dest="inertial_s",
+                    help="rotation as an inertial period 2 pi / f in SECONDS ('inf' = no "
+                         "rotation). Default: BEST_X's 1.1e-5 per integration step, which "
+                         "is a different period at every steps-per-frame. Needs --oversample")
+    ap.add_argument("--edge-s", type=float, default=None, dest="edge_s",
+                    help="absorption at the rim of the sheet (the medial-wall cut), as the "
+                         "time constant 1/rate in SECONDS at the rim itself ('inf' = none); "
+                         "it ramps to zero over SPONGE_WIDTH_FIXED mm. Default: BEST_X's "
+                         "1.8e-3 per integration step. Needs --oversample")
     ap.add_argument("--bold-smooth", action="store_true", dest="bold_smooth",
                     help="low-pass the field to the fMRI Nyquist before scoring, with "
                          "the same kernel folded into the transfer function")
@@ -630,6 +639,17 @@ def main():
               f"{10**x[0]:.3e} -> {d_m:.3e} per step (median speed off by "
               f"{save_m * r_c / save_f - 1:+.1%} from rounding)", flush=True)
         x[3], x[0] = np.log10(save_m), np.log10(d_m)
+    if a.inertial_s is not None or a.edge_s is not None:
+        # x holds both per integration step; one step is frame_s / save seconds
+        if clock is None:
+            raise SystemExit("  --inertial-s and --edge-s are in seconds and need "
+                             "--oversample for a clock")
+        step_s = clock["frame_s"] / 10.0 ** x[3]
+        if a.inertial_s is not None:
+            x[1] = (-12.0 if not np.isfinite(a.inertial_s) else
+                    np.log10(2.0 * np.pi / a.inertial_s * step_s))
+        if a.edge_s is not None:
+            x[2] = -12.0 if not np.isfinite(a.edge_s) else np.log10(step_s / a.edge_s)
     p, save, _ = bo_step.unpack(x, c)
     p["map_clip"] = a.map_clip
     p["decimate"] = a.decimate
@@ -659,6 +679,15 @@ def main():
               f"over {int(ms['n'])} candidates")
         print(f"    speed {cf.min():.3f}-{cf.max():.3f} ({cf.max()/cf.min():.1f}x), "
               f"damping {sg.min():.2e}-{sg.max():.2e} ({sg.max()/sg.min():.1f}x)")
+    if clock is not None:
+        # the same two numbers in seconds, and against the bulk decay, so they can be
+        # compared across media whose steps per frame differ
+        step_s = clock["frame_s"] / save
+        f_s, rim_s = 10 ** x[1] / step_s, 10 ** x[2] / step_s
+        dec_s = step_s / 10 ** x[0]
+        print(f"  rotation: inertial period {2 * np.pi / f_s:.4g} s ({f_s * dec_s:.2g} rad "
+              f"per decay time), Rossby radius {p['Ld']:.4g} mm; edge absorption at the rim: "
+              f"time {1 / rim_s:.4g} s ({rim_s * dec_s:.2g}x the bulk damping rate)")
     print(f"  {len(P)} pieces, save {save} steps/frame, per-step damping "
           f"{10**x[0]:.2e}, rotation {10**x[1]:.2e}, sponge {10**x[2]:.2e}"
           + (f", impulse window {a.impulse_frames} frames "
