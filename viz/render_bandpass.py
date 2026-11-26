@@ -102,9 +102,11 @@ def main():
                          "--resimulate re-integrates through fluid.run, which has no "
                          "nl_flux, no nl_adv and no learned grading, so it would put the "
                          "wrong physics on the raw row")
-    ap.add_argument("--raw-label", default="the fluid", dest="raw_label",
-                    help="top-row label for --raw-npy, e.g. 'the energy h^2' when the raw "
-                         "frames are the squared field of an envelope solve")
+    ap.add_argument("--raw-label", default=None, dest="raw_label",
+                    help="top-row label (default 'the fluid' with --raw-npy, 'raw field' "
+                         "without), e.g. 'the energy h^2' when the raw frames are the "
+                         "squared field of an envelope solve, or 'the scored observable' "
+                         "when the saved frames are already kernel- and surface-smoothed")
     ap.add_argument("--smooth-fwhm", type=float, default=0.0, dest="smooth_fwhm",
                     help="the observable is also spatially smoothed by this FWHM, mm "
                          "(best_fit --smooth-fwhm); the top row stays unsmoothed")
@@ -187,8 +189,8 @@ def main():
 
     proj = _proj(c.V, c.F)
     zs = ", z-scored per vertex" if a.zscore else ""
-    labels = [(f"{a.raw_label}{zs}\n{pb_raw:.0%} of power in band" if a.raw_npy else
-               f"raw field{zs}\n{pb_raw:.0%} of power in band"),
+    labels = [(f"{a.raw_label or 'the fluid'}{zs}\n{pb_raw:.0%} of power in band" if a.raw_npy else
+               f"{a.raw_label or 'raw field'}{zs}\n{pb_raw:.0%} of power in band"),
               (f"the observable: Nyquist low-pass"
                f"{'' if nob else f' + {lo}-{hi} Hz'}"
                f"{f' + {a.smooth_fwhm:g} mm' if a.smooth_fwhm else ''}{zs}\n"

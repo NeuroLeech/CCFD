@@ -265,9 +265,10 @@ Spearman against the unfiltered RBC FC. The controls (`interplay.control_drive`)
 |---|---|
 | 0 (fitted) | +0.7568 ± 0.0014 |
 | 5 s, the **same** delay for every input (check) | +0.7577 ± 0.0014 (2 draws) |
-| 0.1 s | +0.6141 ± 0.0027 (2 draws) |
-| 0.3 s | +0.2619 ± 0.0145 (2 draws) |
-| 0.5 s | +0.1341 ± 0.0135 (2 draws) |
+| 0.1 s | +0.6190 ± 0.0055 |
+| 0.2 s | +0.3649 ± 0.0137 |
+| 0.3 s | +0.2711 ± 0.0139 |
+| 0.5 s | +0.1408 ± 0.0117 |
 | 1, 2, 5, 10, 20 s | +0.090, +0.106, +0.141, +0.072, +0.119 (4 draws each) |
 
 **The check.** A delay common to every input is a pure time shift of the whole drive, so it
@@ -305,8 +306,8 @@ in the observable the fit is scored on, half of what each patch sees lies above 
   every band below 0.2 Hz (the bands agree at 0.87–0.98). The 3x solve matched it best in
   its faster bands and least in the slowest (+0.16 to +0.27).
 
-The 0.1–0.5 s rows are 2-draw checks. A 4-draw grid at 0.1, 0.2, 0.3 and 0.5 s on all four
-rebuilt solves is queued after the rebuilds.
+The 0.1–0.5 s rows are 4 draws each. They replace 2-draw checks that gave 0.614, 0.262
+and 0.134 at 0.1, 0.3 and 0.5 s.
 
 Logs: [logs/a1_s3](logs/a1_s3/).
 
@@ -330,6 +331,25 @@ against 0.14 in 3x, and the score reaches the controls' floor at about 2 s rathe
 patch), against 0.20 Hz in 3x (logs/bold_s1_box_fitted.txt).
 
 Logs: [logs/a1_s1](logs/a1_s1/).
+
+### Rebuilt 5x solve (`nobp_sm6_s5_box`, decay 5 s)
+
+| drive | realised FC, 4 draws |
+|---|---|
+| fitted | +0.7387 ± 0.0026 |
+| independent | +0.2036 ± 0.0049 |
+| random, seeds 0/1/2 | +0.1875 / +0.1860 / +0.1755 |
+| timing, seeds 0/1/2 | +0.2136 / +0.1906 / +0.1985 |
+
+| delay jitter, sd (seed 0) | 0.1 s | 0.2 s | 0.3 s | 0.5 s | 1 s | 2 s | 5 s | 10 s | 20 s |
+|---|---|---|---|---|---|---|---|---|---|
+| realised FC | +0.588 | +0.324 | +0.232 | +0.136 | +0.123 | +0.199 | +0.135 | +0.173 | +0.206 |
+
+The same picture again. The controls' floor is higher than in 3x (0.18–0.21 against
+0.11–0.15), and the timing tolerance is about the same as 3x: 0.1 s costs 0.15, and from
+0.5 s the score is on or below the floor, scattering 0.12–0.21 without trend.
+
+Logs: [logs/a1_s5](logs/a1_s5/).
 
 ---
 
@@ -431,6 +451,7 @@ docs/waves-findings.md, at 150 evaluations.
 |---|---|---|---|---|---|
 | `nobp_sm6_s3_box` (3x flat) | 0.8087 | +0.7568 ± 0.0014 | 18.6 | fit 0.809, realised 0.756 ± 0.002, rank 18.6 | reproduced |
 | `nobp_sm6_s1_box` (1x flat) | 0.8178 | +0.7232 ± 0.0099 | 38.2 | realised 0.724 | reproduced |
+| `nobp_sm6_s5_box` (5x flat) | 0.7845 | +0.7387 ± 0.0026 | 9.6 | fit 0.785, realised 0.739 ± 0.003, rank 9.6 | reproduced |
 
 Log: [logs/build_s3.txt](logs/build_s3.txt). The 3x build took 28 minutes in this container.
 
@@ -457,6 +478,10 @@ decay for the three seeds, inside the recorded 0.03–0.85 range.
 | HRF | 9 / 16 / 59 / 16 | 9 / 16 / 59 / 16 |
 | HRF + 0.01–0.08 Hz | 10 / 17 / 55 / 17 | 10 / 17 / 55 / 18 |
 | switch, reinforcing to cancelling | 0.021 Hz = 0.54 cycles per decay | 0.022 Hz = 0.54 |
+
+**Categories, 5x rebuilt** ([logs/bold_s5_box_fitted.txt](logs/bold_s5_box_fitted.txt)):
+identical to the recorded values in every reading (raw field 6 / 8 / 75 / 12; this model's
+observable 6 / 26 / 55 / 13). Its switch comes from `interplay.py media`, which is queued.
 
 **Resolution of the switch.** The switch is read from 14 log-spaced bins. Near it they
 sit at 0.34, 0.49 and 0.71 cycles per decay, a factor of about 1.45 apart. So differences
