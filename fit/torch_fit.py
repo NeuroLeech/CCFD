@@ -809,6 +809,7 @@ def main():
     hist, best = [], seed0        # iteration 0 competes, or the first eval always wins
     dump(0)
     nskip = 0
+    prev_state = None
     for it in range(1, a.iters + 1):
         t0 = time.time()
         opt.zero_grad()
@@ -822,8 +823,22 @@ def main():
         if bad:
             nskip += 1
             opt.zero_grad()
-            print(f"  {it:4d}  NON-FINITE, update skipped ({nskip} so far)", flush=True)
+            if fixed and prev_state is not None:
+                # With fixed draws a non-finite step is not bad luck: the last update made
+                # one of those draws run the sheet dry, and every later step would repeat
+                # it. Undo that update and halve the step sizes (backtracking).
+                with torch.no_grad():
+                    for q, v in zip(fitted, prev_state):
+                        q.copy_(v)
+                for gr in opt.param_groups:
+                    gr["lr"] *= 0.5
+                print(f"  {it:4d}  NON-FINITE: last update undone, step sizes halved to "
+                      + ", ".join(f"{gr['lr']:.3g}" for gr in opt.param_groups)
+                      + f" ({nskip} so far)", flush=True)
+            else:
+                print(f"  {it:4d}  NON-FINITE, update skipped ({nskip} so far)", flush=True)
             continue
+        prev_state = [q.detach().clone() for q in fitted]
         opt.step()
         hist.append(obj.detach().item())
         dump(it)
