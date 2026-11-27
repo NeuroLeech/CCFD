@@ -760,3 +760,27 @@ s of random jitter costs 0.14 in the linear 3x), and each Adam step moves every 
 its step size in a direction set by one noisy draw, so the delays random-walk faster than the
 signal can steer them.
 
+### Fixed draws, and why the gradient fails over long recordings
+
+`torch_fit --fit-timing --fixed-draws 2` (the same two 150 s draws every step): the objective,
+which no longer moves between steps, fell 0.7096, 0.7076, 0.7072, 0.7055 over four steps
+([log](logs/nonlinear/fit_nl35_rot10_timing_fixed.txt)). On 30 s draws the same setup had
+climbed 0.503, 0.513, 0.522.
+
+A direct check at the starting drive ([grad_check.py](logs/nonlinear/grad_check.py),
+[output](logs/nonlinear/grad_check.txt)): the gradient in the 200 timing parameters, and the
+objective after a step of +-h along it.
+
+| recording | gradient norm | measured slope, h = 0.003 | h = 0.01 |
+|---|---|---|---|
+| 60 s | 0.32 | +0.13 | +0.13 |
+| 150 s | 93 | +0.20 | -0.06 |
+
+Over 150 s the gradient is about 300x larger than over 60 s and does not predict the change
+along it, which at the larger step has the opposite sign. The objective itself changes by
+about 0.001 for these steps, smoothly. So in this strongly nonlinear rotating regime small
+input changes are amplified over a long trajectory, and the gradient carried back through it
+measures that amplification rather than how FC responds. Over 60 s it still points the right
+way, overstating the slope about 2.5x. This is a likely reason the earlier nonlinear fits,
+here and in September, gained so little.
+

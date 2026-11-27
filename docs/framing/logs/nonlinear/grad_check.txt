@@ -1,0 +1,6 @@
+60 s: obj +0.60633, |grad| 0.3163; step 0.003 along it: obj(+) +0.60686, obj(-) +0.60607, measured slope +0.1318 vs predicted +0.3163  [354s]
+60 s: obj +0.60633, |grad| 0.3163; step 0.01 along it: obj(+) +0.60753, obj(-) +0.60499, measured slope +0.1271 vs predicted +0.3163  [494s]
+150 s: obj +0.70961, |grad| 93.2228; step 0.003 along it: obj(+) +0.70989, obj(-) +0.70867, measured slope +0.2026 vs predicted +93.2228  [880s]
+150 s: obj +0.70961, |grad| 93.2228; step 0.01 along it: obj(+) +0.70888, obj(-) +0.71009, measured slope -0.0601 vs predicted +93.2228  [1300s]
+
+[exited with code 0]
