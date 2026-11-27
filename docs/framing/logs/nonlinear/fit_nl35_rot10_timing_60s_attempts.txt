@@ -1,0 +1,32 @@
+== fit_nl35_rot10_timing_60s_lr005_stopped
+  fixed draw 1 (seed 20000): objective at the start +0.6013
+  fixed draw 2 (seed 20001): objective at the start +0.6114
+  fixed draw 3 (seed 20002): objective at the start +0.6174
+  fixed draw 4 (seed 20003): objective at the start +0.6602
+     1  surrogate +0.6226  [323.1s]
+     2  surrogate +0.6217  [332.4s]
+== fit_nl35_rot10_timing_60s_lr0005_stopped
+  fixed draw 1 (seed 20000): objective at the start +0.6013
+  fixed draw 2 (seed 20001): objective at the start +0.6114
+  fixed draw 3 (seed 20002): objective at the start +0.6174
+  fixed draw 4 (seed 20003): objective at the start +0.6602
+     1  surrogate +0.6226  [345.7s]
+     2  surrogate +0.6222  [340.8s]
+== fit_nl35_rot10_timing_60s_sgd_stuck
+  fixed draw 1 (seed 20000): objective at the start +0.6013
+  fixed draw 2 (seed 20001): objective at the start +0.6114
+  fixed draw 3 (seed 20002): objective at the start +0.6174
+  fixed draw 4 (seed 20003): objective at the start +0.6602
+     1  surrogate +0.6226  [337.8s]
+     2  NON-FINITE, update skipped (1 so far)
+== fit_nl35_rot10_timing_60s_sgd_stopped
+  fixed draw 1 (seed 20000): objective at the start +0.6013
+  fixed draw 2 (seed 20001): objective at the start +0.6114
+  fixed draw 3 (seed 20002): objective at the start +0.6174
+  fixed draw 4 (seed 20003): objective at the start +0.6602
+     1  surrogate +0.6226  [348.5s]
+     2  NON-FINITE: last update undone, step sizes halved to 0.015, 0.015 (1 so far)
+     3  surrogate +0.6226  [331.4s]
+     4  NON-FINITE: last update undone, step sizes halved to 0.0075, 0.0075 (2 so far)
+     5  surrogate +0.6226  [325.6s]
+     6  surrogate +0.6048  [317.9s]

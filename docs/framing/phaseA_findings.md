@@ -784,3 +784,23 @@ measures that amplification rather than how FC responds. Over 60 s it still poin
 way, overstating the slope about 2.5x. This is a likely reason the earlier nonlinear fits,
 here and in September, gained so little.
 
+### 60 s fixed draws: no optimiser climbs (10 s, 35x)
+
+Timing-only fit on 4 fixed draws of 60 s, evaluated on the six 150 s draws
+([logs](logs/nonlinear/fit_nl35_rot10_timing_60s_attempts.txt)). The objective at the start
+is 0.6226 (draws 0.601, 0.611, 0.617, 0.660).
+
+| optimiser, step | step 2 | later |
+|---|---|---|
+| Adam, 0.005 s / 0.01 | 0.6217 | stopped |
+| Adam, 0.0005 s / 0.001 | 0.6222 | stopped |
+| gradient ascent, 0.03 | ran a draw dry | stalled (every later step re-ran it) |
+| gradient ascent, 0.03 with backtracking | ran dry, undone, halved; at 0.015 ran dry again, halved | at 0.0075: 0.6048 |
+
+Adam's steps went downhill at both sizes, and steps along the gradient either ran a draw dry
+or, at a quarter of the size, cost 0.018. So even over 60 s, in this regime, the gradient
+summed over four draws is not a usable direction: some draws contribute amplified
+sensitivities like those seen over 150 s, and they dominate it. Gradient-based refitting of
+the drive does not work in the nonlinear rotating medium at this drive strength with this
+setup.
+
