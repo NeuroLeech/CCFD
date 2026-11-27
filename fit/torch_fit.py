@@ -155,6 +155,11 @@ class Fit:
 
         self.K = ref["P"].shape[0]
         self.nb = self.nframes // 2 + 1
+        # --fit-timing: a delay (s) and a log-gain per input, applied on top of a fixed G.
+        # None leaves the drive exactly as before.
+        self.tau, self.lg = None, None
+        self.f_hz = torch.as_tensor(np.arange(self.nb) / (self.nframes * ref["frame_s"]),
+                                    dtype=dtype, device="cpu")
         lo, hi, w, inside = interp_weights(ref["idx"], ref["ref_frames"], self.nframes)
         self.lo = torch.as_tensor(lo, dtype=torch.long, device="cpu")
         self.hi = torch.as_tensor(hi, dtype=torch.long, device="cpu")
@@ -320,6 +325,11 @@ class Fit:
         Glo = G[self.lo]
         Gi = Glo + (G[self.hi] - Glo) * self.w
         Z = torch.einsum("fab,fb->fa", Gi, eta) * self.inside
+        if self.tau is not None:
+            # input a delayed by tau_a seconds and scaled by exp(lg_a): a delay is a phase
+            # exp(-2 pi i f tau) at every frequency, as rescore --jitter-s applies it
+            ang = -2.0 * np.pi * self.f_hz[:, None] * self.tau[None, :]
+            Z = Z * torch.polar(torch.exp(self.lg)[None, :].expand_as(ang), ang)
         Z = torch.cat([torch.zeros_like(Z[:1]), Z[1:]], 0)        # no DC, as realise
         A = torch.fft.irfft(Z, n=self.nframes, dim=0)
         A = A / A.std().clamp_min(1e-30)
@@ -508,6 +518,15 @@ def main():
                          "an absolute lr of 0.02 is ten times a typical entry and wipes "
                          "out a warm start in three steps")
     ap.add_argument("--amp", type=float, default=2e-4)
+    ap.add_argument("--fit-timing", action="store_true", dest="fit_timing",
+                    help="keep the reference drive's shape (G) fixed and fit only a delay and "
+                         "a gain per input on top of it: 2K numbers instead of nfreq*K*K, so "
+                         "the gradient from one draw is far less noisy and the answer reads "
+                         "directly as which inputs arrive earlier or later, harder or softer")
+    ap.add_argument("--tau-lr", type=float, default=0.01, dest="tau_lr",
+                    help="Adam step for the delays, seconds")
+    ap.add_argument("--gain-lr", type=float, default=0.02, dest="gain_lr",
+                    help="Adam step for the log-gains")
     ap.add_argument("--nl-flux", type=float, default=0.0, dest="nl_flux")
     ap.add_argument("--nl-adv", type=float, default=0.0, dest="nl_adv",
                     help="momentum advection, vector-invariant (see core/torch_swe.py)")
@@ -624,6 +643,19 @@ def main():
     # beat, because every comparison against NaN is False. The baseline belongs on the
     # medium the descent actually starts from.
     groups = [{"params": [G], "lr": lr}]
+    if a.fit_timing:
+        G.requires_grad_(False)
+        fit.tau = torch.zeros(fit.K, dtype=fit.dtype, device=fit.cdev, requires_grad=True)
+        fit.lg = torch.zeros(fit.K, dtype=fit.dtype, device=fit.cdev, requires_grad=True)
+        groups = [{"params": [fit.tau], "lr": a.tau_lr}, {"params": [fit.lg], "lr": a.gain_lr}]
+        print(f"  fitting timing only: a delay and a gain per input ({2 * fit.K} numbers), "
+              f"G fixed; Adam steps {a.tau_lr:g} s and {a.gain_lr:g} in log-gain", flush=True)
+
+    def timing_state():
+        if fit.tau is None:
+            return {}
+        return dict(tau=fit.tau.detach().cpu().numpy().copy(),
+                    log_gain=fit.lg.detach().cpu().numpy().copy())
     if a.learn_maps and a.coef_lim:
         raise SystemExit("  --learn-maps and --coef-lim are two different parameterisations "
                          "of the same medium; pass one")
@@ -678,8 +710,8 @@ def main():
     print(f"  iteration 0 realised: sim {m0:+.4f} +- {s0:.4f}", flush=True)
     # A non-finite baseline must not become `best`: `m > nan` is False for every m, so
     # a NaN seed silently disables best-tracking for the whole run.
-    seed0 = ((m0, G.detach().cpu().numpy().copy(), 0) if np.isfinite(m0)
-             else (-np.inf, None, 0))
+    seed0 = ((m0, G.detach().cpu().numpy().copy(), 0, timing_state()) if np.isfinite(m0)
+             else (-np.inf, None, 0, {}))
     if a.init == "warm":
         # The one thing the G-vs-S interpolation difference could cost. Same S, same
         # length, same seeds, realised the repo's way instead of this module's.
@@ -709,7 +741,7 @@ def main():
                  S=np.einsum("fab,fcb->fac", Gd, Gd.conj()), best_iter=it, ref=a.ref,
                  best_sim=np.nan, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
                  nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale, speed=fit.speed,
-                 amp=a.amp, hist=np.asarray(hist),
+                 amp=a.amp, hist=np.asarray(hist), **timing_state(),
                  **_medium_state(fit, a), **provenance.stamp(a))
         print(f"        dumped G at iteration {it}", flush=True)
 
@@ -725,8 +757,9 @@ def main():
         # (H + h) goes negative where a trough reaches the bed and the scheme blows up.
         # A single non-finite step would put NaN into G and every later iteration with it,
         # so the update is skipped instead - the run survives and says how often.
-        bad = (not torch.isfinite(obj)) or (G.grad is None) or \
-              (not torch.isfinite(G.grad).all())
+        fitted = [fit.tau, fit.lg] if fit.tau is not None else [G]
+        bad = (not torch.isfinite(obj)) or any(
+            q.grad is None or not torch.isfinite(q.grad).all() for q in fitted)
         if bad:
             nskip += 1
             opt.zero_grad()
@@ -751,10 +784,14 @@ def main():
                          f"{float(sn.max()/sn.min()):.1f}, a "
                          f"{np.round(av.cpu().numpy(), 3)} b "
                          f"{np.round(bv.cpu().numpy(), 3)}]")
+            if fit.tau is not None:
+                tv, gv = fit.tau.detach().cpu().numpy(), np.exp(fit.lg.detach().cpu().numpy())
+                line += (f"  [delays sd {tv.std():.3f}s, {tv.min():+.2f} to {tv.max():+.2f}s; "
+                         f"gains x{gv.min():.2f}-x{gv.max():.2f}]")
             m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised sim {m:+.4f} +- {s:.4f}"
             if np.isfinite(m) and m > best[0]:
-                best = (m, G.detach().cpu().numpy().copy(), it)
+                best = (m, G.detach().cpu().numpy().copy(), it, timing_state())
                 line += "  *"
         print(line, flush=True)
 
@@ -770,7 +807,7 @@ def main():
                  hist=np.asarray(hist), best_sim=best[0], best_iter=best[2],
                  ref=a.ref, seconds=a.seconds, init=a.init, nl_flux=a.nl_flux,
                  nl_adv=a.nl_adv, Ld=fit.p["Ld"], maps_scale=a.maps_scale, speed=fit.speed,
-                 amp=a.amp, **_medium_state(fit, a), **provenance.stamp(a))
+                 amp=a.amp, **best[3], **_medium_state(fit, a), **provenance.stamp(a))
         print(f"  wrote results/torchfit_{a.tag}.npz")
 
 
