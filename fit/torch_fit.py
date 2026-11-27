@@ -523,6 +523,14 @@ def main():
                          "a gain per input on top of it: 2K numbers instead of nfreq*K*K, so "
                          "the gradient from one draw is far less noisy and the answer reads "
                          "directly as which inputs arrive earlier or later, harder or softer")
+    ap.add_argument("--fixed-draws", type=int, default=0, dest="fixed_draws",
+                    help="score every step on the SAME N draws (common random numbers) and "
+                         "sum their gradients, instead of a fresh draw per step. The objective "
+                         "then stops moving under the search, which a fresh draw makes "
+                         "noisy enough to random-walk anything timing-sensitive. Draws are "
+                         "chosen once (seeds from 20000); one that runs the sheet dry at the "
+                         "starting drive is replaced. The evaluations stay on their own "
+                         "separate draws, so fitting the chosen draws shows up there")
     ap.add_argument("--tau-lr", type=float, default=0.01, dest="tau_lr",
                     help="Adam step for the delays, seconds")
     ap.add_argument("--gain-lr", type=float, default=0.02, dest="gain_lr",
@@ -745,6 +753,38 @@ def main():
                  **_medium_state(fit, a), **provenance.stamp(a))
         print(f"        dumped G at iteration {it}", flush=True)
 
+    fixed = []
+    if a.fixed_draws:
+        sk = 20000
+        while len(fixed) < a.fixed_draws:
+            e = fit.eta(torch.Generator(device=fit.cdev).manual_seed(sk))
+            with torch.no_grad():
+                o = fit.score(G, e)
+            if torch.isfinite(o):
+                fixed.append(e)
+                print(f"  fixed draw {len(fixed)} (seed {sk}): objective at the start "
+                      f"{o.item():+.4f}", flush=True)
+            else:
+                print(f"  seed {sk} runs the sheet dry at the starting drive; replaced",
+                      flush=True)
+            sk += 1
+
+    def step_objective():
+        """-> (objective, fc part, lag part) with gradients accumulated."""
+        if not fixed:
+            ob, z0_, zl_ = fit.score(G, fit.eta(), parts=True)
+            (-ob).backward()
+            return ob, z0_, zl_
+        tot = 0.0
+        for e in fixed:
+            ob = fit.score(G, e)
+            if not torch.isfinite(ob):
+                return ob, ob, None
+            (-ob / len(fixed)).backward()
+            tot += ob.detach().item() / len(fixed)
+        ob = torch.tensor(tot)
+        return ob, ob, None
+
     opt = torch.optim.Adam(groups)
     hist, best = [], seed0        # iteration 0 competes, or the first eval always wins
     dump(0)
@@ -752,8 +792,7 @@ def main():
     for it in range(1, a.iters + 1):
         t0 = time.time()
         opt.zero_grad()
-        obj, z0, zl = fit.score(G, fit.eta(), parts=True)
-        (-obj).backward()
+        obj, z0, zl = step_objective()
         # (H + h) goes negative where a trough reaches the bed and the scheme blows up.
         # A single non-finite step would put NaN into G and every later iteration with it,
         # so the update is skipped instead - the run survives and says how often.
