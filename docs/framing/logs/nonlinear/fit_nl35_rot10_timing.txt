@@ -1,0 +1,11 @@
+  fitting timing only: a delay and a gain per input (200 numbers), G fixed; Adam steps 0.01 s and 0.02 in log-gain
+  iteration 0 realised: sim +0.6335 +- 0.0214
+     1  surrogate +0.6846  [235.2s]
+     2  NON-FINITE, update skipped (1 so far)
+     3  surrogate +0.6878  [334.3s]
+     4  surrogate +0.6533  [363.8s]
+     5  surrogate +0.6934  [324.2s]
+     6  surrogate +0.6879  [323.4s]
+     7  surrogate +0.7169  [335.2s]
+     8  surrogate +0.7021  [372.9s]
+     9  surrogate +0.6673  [321.8s]

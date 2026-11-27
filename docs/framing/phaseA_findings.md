@@ -748,3 +748,15 @@ are driven hard enough that the field there turns into slow, rotating, nonlinear
 and the FC of those regions and of what they connect to degrades. A drive refitted for this
 medium would most plausibly change how hard, and when, each input arrives.
 
+### Fitting only a delay and a gain per input (10 s, 35x): stopped at step 9
+
+`torch_fit --fit-timing` (200 numbers on the fixed linear drive), Adam steps 0.01 s and 0.02 in
+log-gain, 150 s draws ([log](logs/nonlinear/fit_nl35_rot10_timing.txt)). Both nonlinear fits
+use the same random draw at each step, and the full-drive fit barely moved its drive, so its
+per-step objective is the starting drive's on that draw. Against it, the timing fit was lower
+on every step where they differed (steps 3-9: -0.001, -0.001, -0.007, -0.001, -0.008, -0.004,
+-0.013), and the gap was growing. FC is very sensitive to the inputs' relative timing (A1: 0.1
+s of random jitter costs 0.14 in the linear 3x), and each Adam step moves every delay by about
+its step size in a direction set by one noisy draw, so the delays random-walk faster than the
+signal can steer them.
+
