@@ -707,3 +707,19 @@ spatially structured, and that is what costs the score. So rotation and nonlinea
 together make a medium in which a drive fitted for the linear medium no longer works, which
 is the condition for a nonlinear fit to find a different drive.
 
+### Fitting the drive in the nonlinear rotating medium (10 s, 35x): no progress in 25 steps
+
+`torch_fit --ref nobp_sm6_s3_rot10_box --amp 7e-3 --nl-flux 1 --nl-adv 1`, warm start, step size
+a quarter of the default, 150 s realisations (memory grows with length: 300 s needed 16 GB),
+stopped at the step-25 evaluation ([log](logs/nonlinear/fit_nl35_rot10_s3_it25.txt)).
+
+- Realised on the same 6 draws of 150 s: +0.6335 +- 0.0214 at the start, +0.6333 +- 0.0189 at
+  step 25. Per-step objective in 5-step means: 0.682, 0.698, 0.697, about 0.68-0.69.
+- 1 of 25 steps skipped because its draw ran the sheet dry.
+- The drive moved 3.3% of its norm; its cross-spectrum still correlates +1.0000 with the
+  linear one, and per-input power is unchanged.
+
+At this step size the descent does not move the drive far enough to explore; at the default
+step size (first attempt, 30 s rotation, 15x) the objective fell. Each gradient comes from one
+150 s draw, which is noisy next to the improvement available.
+

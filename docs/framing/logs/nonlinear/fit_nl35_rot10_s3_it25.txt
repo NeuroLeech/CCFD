@@ -1,0 +1,28 @@
+  iteration 0 realised: sim +0.6335 +- 0.0214
+  convex S realised the repo's way, same length: sim +0.6585 +- 0.0014   (interpolation gap -0.0249)
+     1  surrogate +0.6846  [264.5s]
+     2  NON-FINITE, update skipped (1 so far)
+     3  surrogate +0.6884  [380.8s]
+     4  surrogate +0.6538  [380.0s]
+     5  surrogate +0.7007  [397.8s]
+     6  surrogate +0.6887  [383.2s]
+     7  surrogate +0.7245  [370.3s]
+     8  surrogate +0.7056  [420.5s]
+     9  surrogate +0.6806  [378.8s]
+    10  surrogate +0.6897  [353.9s]
+    11  surrogate +0.7025  [362.7s]
+    12  surrogate +0.7080  [342.8s]
+    13  surrogate +0.7231  [330.1s]
+    14  surrogate +0.6734  [346.0s]
+    15  surrogate +0.6756  [371.2s]
+    16  surrogate +0.6958  [385.9s]
+    17  surrogate +0.6849  [317.5s]
+    18  surrogate +0.6525  [333.6s]
+    19  surrogate +0.7029  [351.9s]
+    20  surrogate +0.6947  [313.7s]
+    21  surrogate +0.6486  [364.8s]
+    22  surrogate +0.6743  [330.0s]
+    23  surrogate +0.6904  [300.8s]
+    24  surrogate +0.6957  [280.8s]
+        dumped G at iteration 25
+    25  surrogate +0.6586  [302.0s]   realised sim +0.6333 +- 0.0189
