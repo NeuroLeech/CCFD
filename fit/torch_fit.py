@@ -535,6 +535,13 @@ def main():
                     help="evaluate on realisations of this length instead of --seconds, so a "
                          "fit trained on short draws is judged on the same longer draws as "
                          "other runs (the evaluation seeds are the same either way)")
+    ap.add_argument("--optimizer", default="adam", choices=("adam", "sgd"),
+                    help="sgd: plain gradient ascent, each parameter moving in proportion to "
+                         "its gradient. Adam's early steps move every parameter by about its "
+                         "step size whatever its gradient, so parameters whose gradient is "
+                         "mostly noise move as far as the rest - which, for delays in a "
+                         "nonlinear medium, makes the step go downhill. With sgd the step "
+                         "sizes are learning rates on the gradient, not distances")
     ap.add_argument("--tau-lr", type=float, default=0.01, dest="tau_lr",
                     help="Adam step for the delays, seconds")
     ap.add_argument("--gain-lr", type=float, default=0.02, dest="gain_lr",
@@ -798,7 +805,7 @@ def main():
         ob = torch.tensor(tot)
         return ob, ob, None
 
-    opt = torch.optim.Adam(groups)
+    opt = (torch.optim.SGD(groups) if a.optimizer == "sgd" else torch.optim.Adam(groups))
     hist, best = [], seed0        # iteration 0 competes, or the first eval always wins
     dump(0)
     nskip = 0
