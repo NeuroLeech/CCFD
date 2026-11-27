@@ -723,3 +723,28 @@ At this step size the descent does not move the drive far enough to explore; at 
 step size (first attempt, 30 s rotation, 15x) the objective fell. Each gradient comes from one
 150 s draw, which is noisy next to the improvement available.
 
+### What the nonlinear rotating medium does to the linear drive (10 s, 35x)
+
+Read from the saved replays, draw 0: the nonlinear part is the 35x field minus 35 times the
+1x field (the medium is linear at 1x to r = 0.9999)
+([what_nl_does.py](logs/nonlinear/what_nl_does.py); figure
+[nonlinear_rot10_35x_maps.png](figures/nonlinear_rot10_35x_maps.png)).
+
+- **Where it sits.** At the input regions. Within about 11 mm of a driven vertex the nonlinear
+  part is 72-83% of the linear variance of the scored signal; beyond 24 mm it is 7-8%. Across
+  vertices its size correlates -0.78 with distance from the inputs (-0.34 with the principal
+  gradient, which is confounded with where the inputs are).
+- **What it is.** Mostly slow: below 0.1 Hz it is 3-4x the linear power there at the median
+  vertex, everywhere; above 0.1 Hz it is 7%. Far from the inputs, where the linear field has
+  little slow power, the nonlinear part dominates the slow range (about 10x).
+- **What it costs.** Whole-matrix agreement with the target (Pearson, double-centred) goes
+  from +0.777 to +0.754. 15% of vertices' FC rows lose more than 0.05 of their agreement with
+  the target, none gain that much. Rows at the inputs lose most (-0.024 to -0.031, against
+  -0.010 to -0.017 farther away); the losses concentrate in insula and ventral temporal,
+  ventral and medial occipital, and cingulate cortex.
+
+So in this medium the linear drive's failure is local to where it arrives: the input sites
+are driven hard enough that the field there turns into slow, rotating, nonlinear activity,
+and the FC of those regions and of what they connect to degrades. A drive refitted for this
+medium would most plausibly change how hard, and when, each input arrives.
+
