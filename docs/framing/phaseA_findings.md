@@ -677,3 +677,33 @@ most of its FC, changes by 3-5%. That is why the score barely moves. At a 30 s i
 rotation acts only below 0.033 Hz, with a Rossby radius of 122 mm, so it barely meets the part
 of the drive the fit relies on. Faster rotation moves that regime up into it.
 
+### Faster rotation: a 10 s inertial period breaks the linear drive
+
+The linear fit with a 10 s inertial period (`nobp_sm6_s3_rot10_box`, Rossby radius 41 mm,
+inertial frequency 0.1 Hz) replayed the same way, on the same two draws at every amplitude
+([replay3.py](logs/nonlinear/replay3.py), [replay3_rot10.txt](logs/nonlinear/replay3_rot10.txt)).
+The last row is the share of the observable's nonlinear part that is one signal common to the
+whole sheet, the component double-centred FC cannot see (16.7% for the linear observable).
+
+| drive | 1x | 15x | 30x | 35x | 40x |
+|---|---|---|---|---|---|
+| realised | +0.753 | +0.748 | +0.718 | +0.709 | +0.700 |
+| effective rank | 15.3 | 15.8 | 15.4 | 14.8 | 13.8 |
+| shallowest (H + h)/H | 0.975 | 0.623 | 0.246 | 0.120 | -0.006 |
+| field vs linear, r | 1.000 | 0.986 | 0.938 | 0.916 | 0.889 |
+| observable: nonlinear part / linear power | 0% | 7% | 31% | 43% | 61% |
+| below 0.1 Hz | | 47-76% | 2.0-3.5x | 2.9-5.1x | 4.2-7.1x |
+| 0.1-0.2 Hz | | 7% | 35% | 51% | 76% |
+| 0.2-0.775 Hz | | 1% | 3-6% | 5-9% | 7-13% |
+| common-to-the-sheet share of the nonlinear part | | 40% | 37% | 35% | 34% |
+
+With 30 s rotation the same amplitudes cost the linear drive at most 0.006; with 10 s they
+cost 0.035-0.052. The bare field departs from linear about as much in both (r 0.938 against
+0.934 at 30x), but with faster rotation far more of the departure reaches the scored
+observable. It dominates below the inertial frequency, where rotation stops waves from
+travelling and the response stays in place as eddies about a Rossby radius across, and it
+reaches into 0.1-0.2 Hz. About a third of it is common to the whole sheet; the rest is
+spatially structured, and that is what costs the score. So rotation and nonlinearity
+together make a medium in which a drive fitted for the linear medium no longer works, which
+is the condition for a nonlinear fit to find a different drive.
+

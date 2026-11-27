@@ -1,0 +1,10 @@
+x1   (amp 0.0002): sim +0.7526 (+0.7536, +0.7516), rank 15.3, shallowest (H+h)/H 0.975, field vs linear r 0.9999  [571s]
+      observable: nonlinear part 0.0% of the linear power; by frequency 0-0.02 Hz 0%, 0.02-0.05 Hz 0%, 0.05-0.1 Hz 0%, 0.1-0.2 Hz 0%, 0.2-0.4 Hz 0%, 0.4-0.775 Hz 0%; common-to-the-sheet share: linear 16.7%, nonlinear part 40.3%
+x15  (amp 0.003): sim +0.7480 (+0.7488, +0.7471), rank 15.8, shallowest (H+h)/H 0.623, field vs linear r 0.9855  [581s]
+      observable: nonlinear part 7.0% of the linear power; by frequency 0-0.02 Hz 58%, 0.02-0.05 Hz 76%, 0.05-0.1 Hz 47%, 0.1-0.2 Hz 7%, 0.2-0.4 Hz 1%, 0.4-0.775 Hz 1%; common-to-the-sheet share: linear 16.7%, nonlinear part 39.7%
+x30  (amp 0.006): sim +0.7182 (+0.7160, +0.7205), rank 15.4, shallowest (H+h)/H 0.246, field vs linear r 0.9380  [572s]
+      observable: nonlinear part 31.1% of the linear power; by frequency 0-0.02 Hz 241%, 0.02-0.05 Hz 352%, 0.05-0.1 Hz 204%, 0.1-0.2 Hz 35%, 0.2-0.4 Hz 6%, 0.4-0.775 Hz 3%; common-to-the-sheet share: linear 16.7%, nonlinear part 37.2%
+x35  (amp 0.007): sim +0.7085 (+0.7072, +0.7097), rank 14.8, shallowest (H+h)/H 0.120, field vs linear r 0.9157  [588s]
+      observable: nonlinear part 43.3% of the linear power; by frequency 0-0.02 Hz 319%, 0.02-0.05 Hz 506%, 0.05-0.1 Hz 294%, 0.1-0.2 Hz 51%, 0.2-0.4 Hz 9%, 0.4-0.775 Hz 5%; common-to-the-sheet share: linear 16.7%, nonlinear part 35.3%
+x40  (amp 0.008): sim +0.7005 (+0.6977, +0.7032), rank 13.8, shallowest (H+h)/H -0.006, field vs linear r 0.8889  [571s]
+      observable: nonlinear part 61.1% of the linear power; by frequency 0-0.02 Hz 444%, 0.02-0.05 Hz 708%, 0.05-0.1 Hz 416%, 0.1-0.2 Hz 76%, 0.2-0.4 Hz 13%, 0.4-0.775 Hz 7%; common-to-the-sheet share: linear 16.7%, nonlinear part 33.5%
