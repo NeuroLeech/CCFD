@@ -531,6 +531,10 @@ def main():
                          "chosen once (seeds from 20000); one that runs the sheet dry at the "
                          "starting drive is replaced. The evaluations stay on their own "
                          "separate draws, so fitting the chosen draws shows up there")
+    ap.add_argument("--eval-seconds", type=float, default=0.0, dest="eval_seconds",
+                    help="evaluate on realisations of this length instead of --seconds, so a "
+                         "fit trained on short draws is judged on the same longer draws as "
+                         "other runs (the evaluation seeds are the same either way)")
     ap.add_argument("--tau-lr", type=float, default=0.01, dest="tau_lr",
                     help="Adam step for the delays, seconds")
     ap.add_argument("--gain-lr", type=float, default=0.02, dest="gain_lr",
@@ -659,6 +663,15 @@ def main():
         print(f"  fitting timing only: a delay and a gain per input ({2 * fit.K} numbers), "
               f"G fixed; Adam steps {a.tau_lr:g} s and {a.gain_lr:g} in log-gain", flush=True)
 
+    efit = fit
+    if a.eval_seconds:
+        efit = Fit(ref, c, t, a.eval_seconds, device=a.device, amp=a.amp, nl_flux=a.nl_flux,
+                   nl_adv=a.nl_adv, Ld=a.Ld, maps_scale=a.maps_scale, speed=a.speed)
+        print(f"  evaluating on {a.eval_seconds:.0f} s draws, training on {a.seconds:.0f} s",
+              flush=True)
+    if fit.tau is not None:
+        efit.tau, efit.lg = fit.tau, fit.lg          # the same tensors: updates carry over
+
     def timing_state():
         if fit.tau is None:
             return {}
@@ -714,7 +727,7 @@ def main():
                   f"{fit.Hf.max():.3f} = {fit.Hf.max()/fit.Hf.min():.1f}x fixed), "
                   f"damping x{float(s0f.max()/s0f.min()):.1f}, map lr {a.map_lr*mrms:.3g}")
 
-    m0, s0 = fit.realised(G, seeds=tuple(range(a.eval_draws)))
+    m0, s0 = efit.realised(G, seeds=tuple(range(a.eval_draws)))
     print(f"  iteration 0 realised: sim {m0:+.4f} +- {s0:.4f}", flush=True)
     # A non-finite baseline must not become `best`: `m > nan` is False for every m, so
     # a NaN seed silently disables best-tracking for the whole run.
@@ -827,7 +840,7 @@ def main():
                 tv, gv = fit.tau.detach().cpu().numpy(), np.exp(fit.lg.detach().cpu().numpy())
                 line += (f"  [delays sd {tv.std():.3f}s, {tv.min():+.2f} to {tv.max():+.2f}s; "
                          f"gains x{gv.min():.2f}-x{gv.max():.2f}]")
-            m, s = fit.realised(G, seeds=tuple(range(a.eval_draws)))
+            m, s = efit.realised(G, seeds=tuple(range(a.eval_draws)))
             line += f"   realised sim {m:+.4f} +- {s:.4f}"
             if np.isfinite(m) and m > best[0]:
                 best = (m, G.detach().cpu().numpy().copy(), it, timing_state())
